@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% block title %}Блокировка{% endblock %}
+{% block content %}
+<div class="heading-row">
+  <div>
+    <h1>Блокировка</h1>
+    <p class="muted">Найдите работника по ФИО, логину или корпоративной почте.</p>
+  </div>
+  {% if card %}<a class="button secondary" href="/blocking">Новый поиск</a>{% endif %}
+</div>
+
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+{% if result %}
+<div class="alert {{ 'success' if result.status == 'success' else 'warning' if result.status == 'partial' else 'error' }}">
+  <strong>{{ result.status_label }}.</strong>
+  {% if result.dry_run %}
+  Внешние системы не изменялись: приложение работает в режиме DRY RUN.
+  {% else %}
+  Блокировка для {{ result.fio }} завершена.
+  {% endif %}
+  {% if result.error_message %}<div class="blocking-result-error">{{ result.error_message }}</div>{% endif %}
+</div>
+{% endif %}
+
+{% if not card %}
+<section class="card blocking-search-card">
+  <form method="get" action="/blocking" class="blocking-search-form">
+    <label for="blocking-query">Работник</label>
+    <div class="blocking-search-row">
+      <input id="blocking-query" name="q" value="{{ query }}" placeholder="Например: Миронова" autocomplete="off" autofocus>
+      <button type="submit">Найти</button>
+    </div>
+  </form>
+</section>
+
+{% if query and not error %}
+<section class="card">
+  <div class="blocking-results-heading">
+    <strong>Результаты поиска</strong>
+    <span class="muted">Найдено: {{ rows|length }}</span>
+  </div>
+  {% if rows %}
+  <div class="table-wrap">
+    <table class="blocking-results-table">
+      <thead>
+        <tr>
+          <th>ФИО</th>
+          <th>Логин AD</th>
+          <th>Корпоративная почта</th>
+          <th>AD</th>
+          <th>Zimbra</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td><strong>{{ row.fio }}</strong></td>
+          <td><code>{{ row.login or '–' }}</code></td>
+          <td>{{ row.email or '–' }}</td>
+          <td>{{ row.ad_label }}</td>
+          <td>{{ row.zimbra_label }}</td>
+          <td><a class="button secondary blocking-open" href="/blocking/{{ row.id }}">Открыть</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">Работники по запросу не найдены.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endif %}
+
+{% if card %}
+<section class="blocking-person-header card">
+  <div>
+    <span class="muted">Работник</span>
+    <h2>{{ card.fio }}</h2>
+    {% if card.placements %}
+    <ul class="blocking-placements">
+      {% for placement in card.placements %}<li>{{ placement }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  <div class="blocking-person-contact">
+    <span class="muted">Корпоративная почта</span>
+    <strong>{{ card.corporate_email or '–' }}</strong>
+  </div>
+</section>
+
+<div class="blocking-system-grid">
+  <section class="card blocking-system-card">
+    <h3>Active Directory</h3>
+    {% if card.ad_user %}
+      <dl class="blocking-details">
+        <dt>Логин</dt><dd><code>{{ card.ad_user.username }}</code></dd>
+        <dt>Имя в AD</dt><dd>{{ card.ad_user.display_name or '–' }}</dd>
+        <dt>Статус</dt><dd><span class="status {{ 'success' if card.ad_user.is_enabled else 'failed' }}">{{ 'Включена' if card.ad_user.is_enabled else 'Заблокирована' }}</span></dd>
+      </dl>
+    {% else %}
+      <div class="alert warning">Учетная запись AD не найдена{% if card.ad_error %}: {{ card.ad_error }}{% endif %}</div>
+      {% if card.effective_login %}<p>Предполагаемый логин: <code>{{ card.effective_login }}</code></p>{% endif %}
+    {% endif %}
+  </section>
+
+  <section class="card blocking-system-card">
+    <h3>Zimbra</h3>
+    {% if card.zimbra %}
+      <dl class="blocking-details">
+        <dt>Основной адрес</dt><dd>{{ card.zimbra.primary_email }}</dd>
+        <dt>Логин</dt><dd><code>{{ card.zimbra.login }}</code></dd>
+        <dt>Статус</dt><dd>{{ card.zimbra_status_label }}</dd>
+      </dl>
+    {% else %}
+      <div class="alert warning">Учетная запись Zimbra не найдена{% if card.zimbra_error %}: {{ card.zimbra_error }}{% endif %}</div>
+    {% endif %}
+  </section>
+</div>
+
+<section class="card blocking-equipment-card">
+  <div class="blocking-results-heading">
+    <div>
+      <h3>IT Invent</h3>
+      {% if card.effective_login %}<span class="muted">Поиск по доменной учетной записи <code>{{ card.effective_login }}</code></span>{% endif %}
+    </div>
+    {% if card.itinvent and card.itinvent.owner_found %}
+    <span class="status success">Найден сотрудник</span>
+    {% endif %}
+  </div>
+
+  {% if card.itinvent_state == 'not_configured' %}
+    <div class="alert warning">Интеграция IT Invent пока не настроена или отключена.</div>
+  {% elif card.itinvent_state == 'no_login' %}
+    <div class="alert warning">Не удалось определить доменный логин для поиска имущества.</div>
+  {% elif card.itinvent_state == 'error' %}
+    <div class="alert error">Ошибка проверки IT Invent: {{ card.itinvent_error }}</div>
+  {% elif card.itinvent_state == 'owner_not_found' %}
+    <p>Сотрудник с логином <code>{{ card.effective_login }}</code> в IT Invent не найден.</p>
+  {% elif card.itinvent %}
+    <dl class="blocking-details blocking-itinvent-owner">
+      <dt>Получатель в IT Invent</dt><dd>{{ card.itinvent.owner_display_name or '–' }}</dd>
+      <dt>Учетная запись</dt><dd><code>{{ card.itinvent.owner_login }}</code></dd>
+    </dl>
+
+    {% if card.itinvent.equipment %}
+    <p><strong>Выдано в пользование: {{ card.itinvent.equipment|length }}</strong></p>
+    <div class="table-wrap">
+      <table class="blocking-equipment-table">
+        <thead>
+          <tr>
+            <th>Тип / название</th>
+            <th>Инвентарный номер</th>
+            <th>Серийный номер</th>
+            <th>Бухгалтерский инв. номер</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in card.itinvent.equipment %}
+          <tr>
+            <td>{{ item.equipment_type or '–' }}</td>
+            <td>{{ item.inventory_number or '–' }}</td>
+            <td>{{ item.serial_number or '–' }}</td>
+            <td>{{ item.accounting_inventory_number or '–' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <p>За сотрудником нет оборудования с местоположением «Выданы в пользование».</p>
+    {% endif %}
+  {% endif %}
+
+  <p class="muted blocking-itinvent-note">
+    IT Invent используется как справочный источник. Отсутствие оборудования в базе не запрещает блокировку учетных записей.
+  </p>
+</section>
+
+<section class="card blocking-action-card">
+  <h3>Блокировка учетных записей</h3>
+  {% if dry_run %}
+  <div class="alert warning">DRY RUN включен: нажатие проверит сценарий и запишет операцию в журнал, но AD и Zimbra фактически не изменятся.</div>
+  {% endif %}
+  {% if card.ad_user or card.zimbra %}
+  <form method="post" action="/blocking/{{ card.record_id }}" onsubmit="return submitBlockingOnce(this);">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="blocking-danger-button" data-blocking-submit>Заблокировать</button>
+  </form>
+  {% else %}
+  <div class="alert error">Ни одна учетная запись не найдена. Выполнять блокировку нечего.</div>
+  {% endif %}
+</section>
+{% endif %}
+
+<script>
+function submitBlockingOnce(form) {
+  if (form.dataset.submitting === 'true') return false;
+  if (!window.confirm('Заблокировать учетные записи выбранного работника?')) return false;
+  form.dataset.submitting = 'true';
+  const button = form.querySelector('[data-blocking-submit]');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Блокировка...';
+  }
+  return true;
+}
+</script>
+{% endblock %}

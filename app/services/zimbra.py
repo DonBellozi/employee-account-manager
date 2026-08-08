@@ -24,6 +24,7 @@ class ZimbraAccountIdentity:
     primary_email: str
     login: str
     addresses: tuple[str, ...]
+    account_status: str = ""
 
 
 class BackgroundLoginCheckCancelled(RuntimeError):
@@ -520,6 +521,12 @@ class ZimbraService:
             if primary_email and primary_email not in addresses:
                 addresses.insert(0, primary_email)
 
+            account_status = ""
+            for value in attrs.get("zimbraaccountstatus", []):
+                if value.strip():
+                    account_status = value.strip().lower()
+                    break
+
             if zimbra_id and primary_email:
                 login = primary_email.split("@", 1)[0].lower()
                 accounts.append(
@@ -528,6 +535,7 @@ class ZimbraService:
                         primary_email=primary_email,
                         login=login,
                         addresses=tuple(addresses),
+                        account_status=account_status,
                     )
                 )
 
@@ -872,6 +880,14 @@ class ZimbraService:
         login = email.split("@", 1)[0].strip().lower()
         if login:
             self._cache_remove(login)
+
+    def lock_account(self, email: str) -> None:
+        normalized = str(email or "").strip().lower()
+        if not normalized or "@" not in normalized:
+            raise ValueError("Не передан адрес учетной записи Zimbra")
+        self._run_zmprov_direct(
+            ["ma", normalized, "zimbraAccountStatus", "locked"]
+        )
 
     def set_dismissal_note(self, email: str, dismissal_date: date) -> None:
         self._run_zmprov(

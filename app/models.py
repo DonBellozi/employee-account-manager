@@ -108,6 +108,41 @@ class ADProvisioningOperation(Base):
     )
 
 
+class BlockingOperation(Base):
+    """Ручная блокировка учетных записей из раздела «Блокировка»."""
+
+    __tablename__ = "blocking_operations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    worker_key: Mapped[str] = mapped_column(String(64), index=True)
+    source_id: Mapped[str] = mapped_column(String(128), index=True)
+    source_record_id: Mapped[int] = mapped_column(Integer, index=True)
+    operator_username: Mapped[str] = mapped_column(String(256), index=True)
+    full_name: Mapped[str] = mapped_column(String(512))
+    login: Mapped[str] = mapped_column(String(128), index=True)
+    corporate_email: Mapped[str] = mapped_column(String(320), default="", index=True)
+    status: Mapped[OperationStatus] = mapped_column(
+        Enum(OperationStatus),
+        default=OperationStatus.RUNNING,
+    )
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
+    ad_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    zimbra_locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    itinvent_checked: Mapped[bool] = mapped_column(Boolean, default=False)
+    itinvent_owner_name: Mapped[str] = mapped_column(String(512), default="")
+    equipment_count: Mapped[int] = mapped_column(Integer, default=0)
+    equipment_snapshot_json: Mapped[str] = mapped_column(Text, default="[]")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
 class DismissalSchedule(Base):
     __tablename__ = "dismissal_schedules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

@@ -13,6 +13,7 @@ from app.security import get_or_create_csrf, require_admin, validate_csrf
 from app.services.ad import ActiveDirectoryService
 from app.services.email_login_mapping import EmailLoginMappingService
 from app.services.hr_registry import HRRegistryService
+from app.services.itinvent import ITInventService
 from app.services.mailer import CredentialMailer
 from app.services.onec_import import OneCImportService
 from app.services.onec_scheduler import schedule_info
@@ -63,6 +64,13 @@ def _integration_overview(settings: Settings) -> dict[str, dict[str, object]]:
         and settings.onec_imap_username
         and settings.onec_imap_password
         and settings.onec_attachment_filename
+    )
+    itinvent_configured = bool(
+        settings.itinvent_enabled
+        and settings.itinvent_db_host
+        and settings.itinvent_db_name
+        and settings.itinvent_db_username
+        and settings.itinvent_db_password
     )
 
     if settings.smtp_ssl:
@@ -116,6 +124,25 @@ def _integration_overview(settings: Settings) -> dict[str, dict[str, object]]:
             "password": _set_not_set(settings.smtp_password),
             "timeout": f"{settings.smtp_timeout_seconds} сек.",
             "retries": settings.smtp_retry_attempts,
+        },
+        "itinvent": {
+            "configured": itinvent_configured,
+            "badge": (
+                "Используется"
+                if itinvent_configured
+                else "Отключено"
+                if not settings.itinvent_enabled
+                else "Не настроено"
+            ),
+            "enabled": _yes_no(settings.itinvent_enabled),
+            "server": settings.itinvent_db_host or "–",
+            "port": settings.itinvent_db_port,
+            "database": settings.itinvent_db_name or "ITInvent",
+            "username": settings.itinvent_db_username or "–",
+            "password": _set_not_set(settings.itinvent_db_password),
+            "location_no": settings.itinvent_issued_location_no,
+            "location_label": "Выданы в пользование",
+            "mode": "Только чтение",
         },
         "onec": {
             "configured": onec_configured,
@@ -201,6 +228,8 @@ def test_integration(
             message = CredentialMailer(settings).test_connection()
         elif integration == "onec":
             message = OneCImportService(settings).test_connection()
+        elif integration == "itinvent":
+            message = ITInventService(settings).test_connection()
         else:
             return JSONResponse(
                 {"ok": False, "error": "Неизвестная интеграция"},

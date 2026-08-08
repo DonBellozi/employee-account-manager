@@ -6,7 +6,7 @@ import time
 from datetime import date
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
@@ -16,11 +16,13 @@ from app.db import get_db
 from app.models import (
     ADProvisioningOperation,
     AuditLog,
+    BlockingOperation,
     DismissalSchedule,
     ProvisioningOperation,
 )
 from app.security import get_current_user, get_or_create_csrf, validate_csrf
 from app.services.ad import ActiveDirectoryService
+from app.services.blocking import BlockingService
 from app.services.hr_registry import HRRegistryService
 from app.services.names import build_login_candidates, parse_two_line_input, validate_person_name
 from app.services.provisioning import ProvisioningInput, ProvisioningService
@@ -161,6 +163,47 @@ def _ad_provisioning_journal_item(
     }
 
 
+
+def _blocking_journal_item(operation: BlockingOperation) -> dict[str, object]:
+    status_key = operation.status.value
+    status_labels = {
+        "running": "Выполняется",
+        "partial": "Частично выполнено",
+        "success": "Успешно",
+        "failed": "Ошибка",
+    }
+    status_label = "DRY RUN" if operation.dry_run else status_labels.get(
+        status_key,
+        status_key,
+    )
+    return {
+        "kind": "blocking",
+        "record_id": operation.id,
+        "created_at": operation.created_at,
+        "action": "Блокировка учетных записей",
+        "subject": operation.full_name,
+        "login": operation.login,
+        "corporate_email": operation.corporate_email,
+        "personal_email": "",
+        "mail_domain": "",
+        "operator": operation.operator_username,
+        "status_key": status_key,
+        "status_label": status_label,
+        "details": [
+            ("ФИО", operation.full_name),
+            ("Логин AD", operation.login),
+            ("Корпоративная почта", operation.corporate_email),
+            ("AD заблокирована", _yes_no(operation.ad_disabled)),
+            ("Zimbra заблокирована", _yes_no(operation.zimbra_locked)),
+            ("IT Invent проверен", _yes_no(operation.itinvent_checked)),
+            ("Имущества в IT Invent", str(operation.equipment_count)),
+            ("Режим DRY RUN", _yes_no(operation.dry_run)),
+        ],
+        "error_message": operation.error_message,
+        "completed_at": operation.completed_at,
+    }
+
+
 def _dismissal_journal_item(schedule: DismissalSchedule) -> dict[str, object]:
     if schedule.ad_expiration_set and schedule.zimbra_note_set:
         status_key = "success"
@@ -227,6 +270,11 @@ def dashboard(
         .order_by(desc(ADProvisioningOperation.created_at))
         .limit(50)
     ).all()
+    blocking_operations = db.scalars(
+        select(BlockingOperation)
+        .order_by(desc(BlockingOperation.created_at))
+        .limit(50)
+    ).all()
 
     journal_items = [
         *(_provisioning_journal_item(item) for item in provisioning_operations),
@@ -234,6 +282,7 @@ def dashboard(
             _ad_provisioning_journal_item(item)
             for item in ad_provisioning_operations
         ),
+        *(_blocking_journal_item(item) for item in blocking_operations),
         *(_dismissal_journal_item(item) for item in dismissal_operations),
     ]
     journal_items.sort(key=lambda item: item["created_at"], reverse=True)
@@ -775,13 +824,134 @@ def provision_employee(
         )
 
 
-@router.get("/dismissals/new")
-def dismissal_form(request: Request):
+@router.get("/blocking")
+def blocking_search(
+    request: Request,
+    q: str = "",
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    get_current_user(request)
+    query = q.strip()
+    rows: list[dict] = []
+    error = ""
+    if query:
+        if len(query) < 2:
+            error = "Введите не менее двух символов для поиска работника."
+        else:
+            try:
+                rows = BlockingService(settings, db).search(query)
+            except Exception as exc:
+                error = str(exc)
     return templates.TemplateResponse(
         request,
-        "dismissal_form.html",
-        _context(request, error="", success=""),
+        "blocking.html",
+        _context(
+            request,
+            query=query,
+            rows=rows,
+            card=None,
+            result=None,
+            error=error,
+            dry_run=settings.dry_run,
+        ),
     )
+
+
+@router.get("/blocking/{record_id}")
+def blocking_card(
+    record_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    get_current_user(request)
+    try:
+        card = BlockingService(settings, db).card(record_id)
+        return templates.TemplateResponse(
+            request,
+            "blocking.html",
+            _context(
+                request,
+                query="",
+                rows=[],
+                card=card,
+                result=None,
+                error="",
+                dry_run=settings.dry_run,
+            ),
+        )
+    except Exception as exc:
+        return templates.TemplateResponse(
+            request,
+            "blocking.html",
+            _context(
+                request,
+                query="",
+                rows=[],
+                card=None,
+                result=None,
+                error=str(exc),
+                dry_run=settings.dry_run,
+            ),
+            status_code=400,
+        )
+
+
+@router.post("/blocking/{record_id}")
+def block_employee_accounts(
+    record_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    user = get_current_user(request)
+    service = BlockingService(settings, db)
+    try:
+        result = service.block(record_id, user.username)
+        try:
+            card = service.card(record_id)
+        except Exception:
+            card = None
+        return templates.TemplateResponse(
+            request,
+            "blocking.html",
+            _context(
+                request,
+                query="",
+                rows=[],
+                card=card,
+                result=result,
+                error="",
+                dry_run=settings.dry_run,
+            ),
+        )
+    except Exception as exc:
+        try:
+            card = service.card(record_id)
+        except Exception:
+            card = None
+        return templates.TemplateResponse(
+            request,
+            "blocking.html",
+            _context(
+                request,
+                query="",
+                rows=[],
+                card=card,
+                result=None,
+                error=str(exc),
+                dry_run=settings.dry_run,
+            ),
+            status_code=400,
+        )
+
+
+@router.get("/dismissals/new")
+def dismissal_form_legacy():
+    return RedirectResponse("/blocking", status_code=303)
 
 
 @router.post("/dismissals")

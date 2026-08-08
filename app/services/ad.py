@@ -500,6 +500,40 @@ class ActiveDirectoryService:
             if not conn.delete(dn):
                 raise RuntimeError(f"Не удалось удалить заготовку AD: {conn.result}")
 
+    def disable_user(self, login: str) -> None:
+        """Немедленно отключить существующую AD-учетку, сохранив UAC-флаги."""
+        normalized = str(login or "").strip().lower()
+        if not normalized:
+            raise ValueError("Не передан логин AD")
+        if self.settings.dry_run:
+            return
+
+        safe_login = escape_filter_chars(normalized)
+        with self._service_connection() as conn:
+            conn.search(
+                self.settings.ad_base_dn,
+                f"(&(objectCategory=person)(objectClass=user)(sAMAccountName={safe_login}))",
+                attributes=["userAccountControl"],
+                size_limit=1,
+            )
+            if not conn.entries:
+                raise RuntimeError("Учетная запись AD не найдена")
+            entry = conn.entries[0]
+            current = int(
+                self._entry_value(entry, "userAccountControl", 0) or 0
+            )
+            if current & self.UAC_ACCOUNTDISABLE:
+                return
+            disabled = current | self.UAC_ACCOUNTDISABLE
+            if not conn.modify(
+                str(entry.entry_dn),
+                {"userAccountControl": [(MODIFY_REPLACE, [disabled])]},
+            ):
+                raise RuntimeError(
+                    "AD не отключил пользователя: "
+                    f"{conn.result.get('message') or conn.result}"
+                )
+
     def set_account_expiration(self, login: str, dismissal_date: date) -> None:
         """Expire at 00:00 on the day after the employee's last working date."""
         if self.settings.dry_run:

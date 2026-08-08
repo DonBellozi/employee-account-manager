@@ -247,18 +247,37 @@
       </div>
     </article>
 
-    <article class="integration-card integration-card-future">
+    <article class="integration-card">
       <div class="integration-card-heading">
         <div>
           <h3>IT Invent</h3>
-          <span class="integration-badge">Не настроено</span>
+          <span class="integration-badge{% if integrations.itinvent.configured %} active{% endif %}"
+                id="integration-badge-itinvent">
+            {{ integrations.itinvent.badge }}
+          </span>
         </div>
+        <button class="button secondary integration-test"
+                type="button"
+                data-integration="itinvent">
+          Проверить подключение
+        </button>
       </div>
-      <p>
-        Будет использоваться как справочная проверка наличия техники
-        у увольняющегося работника. Результат не будет блокировать увольнение
-        или отправку стандартного уведомления.
+      <dl class="integration-details">
+        <dt>Включено</dt><dd>{{ integrations.itinvent.enabled }}</dd>
+        <dt>MS SQL Server</dt><dd>{{ integrations.itinvent.server }}</dd>
+        <dt>Порт</dt><dd>{{ integrations.itinvent.port }}</dd>
+        <dt>База</dt><dd><code>{{ integrations.itinvent.database }}</code></dd>
+        <dt>Пользователь</dt><dd>{{ integrations.itinvent.username }}</dd>
+        <dt>Пароль</dt><dd>{{ integrations.itinvent.password }}</dd>
+        <dt>Режим</dt><dd>{{ integrations.itinvent.mode }}</dd>
+        <dt>Местоположение техники</dt><dd>{{ integrations.itinvent.location_no }} – {{ integrations.itinvent.location_label }}</dd>
+      </dl>
+      <p class="muted integration-note">
+        Приложение выполняет только SELECT. Для SQL-учетной записи рекомендуется
+        выдать только права чтения на БД ITInvent. Поиск имущества выполняется
+        по доменному логину OWNERS.OWNER_LOGIN.
       </p>
+      <div class="integration-test-result" id="integration-result-itinvent"></div>
     </article>
   </div>
 </section>

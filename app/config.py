@@ -75,6 +75,19 @@ class Settings(BaseSettings):
     smtp_retry_attempts: int = 3
     smtp_retry_delay_seconds: float = 2.0
 
+    # IT Invent / MS SQL Server. Интеграция намеренно read-only:
+    # приложение выполняет только SELECT, а учетной записи SQL следует
+    # предоставить только права чтения на БД ITInvent.
+    itinvent_enabled: bool = False
+    itinvent_db_host: str = ""
+    itinvent_db_port: int = 1433
+    itinvent_db_name: str = "ITInvent"
+    itinvent_db_username: str = ""
+    itinvent_db_password: str = ""
+    itinvent_connect_timeout_seconds: int = 5
+    itinvent_query_timeout_seconds: int = 10
+    itinvent_issued_location_no: int = 24
+
     # Получение кадровой выгрузки 1С. На первом этапе настройки read-only:
     # значения задаются через окружение/Portainer, Web только показывает их
     # безопасную часть и запускает тесты/DRY_RUN-анализ.
