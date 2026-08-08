@@ -730,6 +730,8 @@
 .blocking-search-row { display: grid; grid-template-columns: minmax(260px, 1fr) auto; gap: 10px; }
 .blocking-results-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .blocking-results-table, .blocking-equipment-table { width: 100%; border-collapse: collapse; }
+.blocking-equipment-table { font-size: .88rem; }
+.blocking-equipment-table th { font-size: .86rem; }
 .blocking-results-table th, .blocking-results-table td,
 .blocking-equipment-table th, .blocking-equipment-table td { padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: top; }
 .blocking-open { white-space: nowrap; }
