@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 
@@ -14,6 +15,7 @@ from app.services.ad import ActiveDirectoryService
 from app.services.email_login_mapping import EmailLoginMappingService
 from app.services.hr_registry import HRRegistryService
 from app.services.itinvent import ITInventService
+from app.services.itinvent_control import ITInventControlService
 from app.services.mailer import CredentialMailer
 from app.services.onec_import import OneCImportService
 from app.services.onec_scheduler import schedule_info
@@ -140,8 +142,6 @@ def _integration_overview(settings: Settings) -> dict[str, dict[str, object]]:
             "database": settings.itinvent_db_name or "ITInvent",
             "username": settings.itinvent_db_username or "–",
             "password": _set_not_set(settings.itinvent_db_password),
-            "location_no": settings.itinvent_issued_location_no,
-            "location_label": "Выданы в пользование",
             "mode": "Только чтение",
         },
         "onec": {
@@ -191,6 +191,12 @@ def settings_overview(
     registry = HRRegistryService(settings, db)
     registry_summary = registry.summary()
     integrations = _integration_overview(settings)
+    itinvent_control = ITInventControlService(settings, db).summary()
+    integrations["itinvent"]["control_locations"] = itinvent_control["locations"]
+    integrations["itinvent"]["control_types"] = itinvent_control["types"]
+    integrations["itinvent"]["control_locations_count"] = itinvent_control["locations_count"]
+    integrations["itinvent"]["control_types_count"] = itinvent_control["types_count"]
+    integrations["itinvent"]["control_persisted"] = itinvent_control["persisted"]
     if registry_summary.get("source_id") not in {"", "org_com"}:
         integrations["onec"]["source_domain"] = registry_summary["source_id"]
 
@@ -243,6 +249,63 @@ def test_integration(
             status_code=503,
         )
 
+
+
+@router.get("/settings/itinvent/catalog")
+def itinvent_catalog(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    require_admin(request)
+    try:
+        payload = ITInventControlService(settings, db).catalog_payload()
+        return {"ok": True, **payload}
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc)},
+            status_code=503,
+        )
+
+
+@router.post("/settings/itinvent/control")
+def save_itinvent_control(
+    request: Request,
+    csrf: str = Form(...),
+    locations_json: str = Form("[]"),
+    types_json: str = Form("[]"),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf)
+    current = require_admin(request)
+    try:
+        locations = json.loads(locations_json or "[]")
+        equipment_types = json.loads(types_json or "[]")
+        if not isinstance(locations, list) or not isinstance(equipment_types, list):
+            raise ValueError("Некорректный формат настроек IT Invent")
+        selection = ITInventControlService(settings, db).save_from_keys(
+            location_keys=[str(value) for value in locations],
+            type_keys=[str(value) for value in equipment_types],
+            operator=current.username,
+        )
+        return {
+            "ok": True,
+            "locations": [item.description for item in selection.locations],
+            "types": [item.type_name for item in selection.equipment_types],
+            "locations_count": len(selection.locations),
+            "types_count": len(selection.equipment_types),
+        }
+    except (ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc)},
+            status_code=400,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc)},
+            status_code=503,
+        )
 
 
 @router.post("/settings/onec/find-latest")

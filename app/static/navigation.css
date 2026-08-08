@@ -761,3 +761,234 @@
   .blocking-details { grid-template-columns: 1fr; gap: 3px; }
   .blocking-details dd { margin-bottom: 8px; }
 }
+
+/* IT Invent: правила контроля оборудования */
+.itinvent-control-panel {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #e5e7eb;
+}
+.itinvent-control-heading {
+  margin-bottom: 12px;
+}
+.itinvent-control-heading strong,
+.itinvent-control-heading span {
+  display: block;
+}
+.itinvent-control-rule {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 13px 0;
+  border-top: 1px solid #eef2f7;
+}
+.itinvent-control-copy > strong,
+.itinvent-control-copy > span {
+  display: block;
+}
+.itinvent-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.itinvent-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: .82rem;
+  font-weight: 600;
+}
+.itinvent-chip.more {
+  background: #e2e8f0;
+  color: #475569;
+}
+.itinvent-picker-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 48px));
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, .28);
+  overflow: hidden;
+}
+.itinvent-picker-dialog::backdrop {
+  background: rgba(15, 23, 42, .42);
+}
+.itinvent-picker-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px 22px 12px;
+}
+.itinvent-picker-head h3 {
+  margin: 0 0 4px;
+}
+.itinvent-dialog-close {
+  border: 0;
+  background: transparent;
+  color: #64748b;
+  font-size: 1.6rem;
+  line-height: 1;
+  cursor: pointer;
+}
+#itinvent-picker-search {
+  width: calc(100% - 44px);
+  margin: 0 22px 10px;
+}
+.itinvent-picker-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 22px 8px;
+}
+.itinvent-picker-clear {
+  border: 0;
+  background: transparent;
+  color: #2563eb;
+  padding: 2px 0;
+  cursor: pointer;
+  font: inherit;
+}
+.itinvent-picker-list {
+  max-height: min(52vh, 470px);
+  overflow-y: auto;
+  border-top: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+}
+.itinvent-picker-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 11px;
+  align-items: center;
+  padding: 10px 22px;
+  margin: 0;
+  cursor: pointer;
+}
+.itinvent-picker-option:hover {
+  background: #f8fafc;
+}
+.itinvent-picker-option input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+}
+.itinvent-picker-option span,
+.itinvent-picker-option strong,
+.itinvent-picker-option small {
+  display: block;
+}
+.itinvent-picker-option small {
+  margin-top: 2px;
+  color: #64748b;
+  font-size: .75rem;
+}
+.itinvent-picker-empty {
+  padding: 22px;
+  text-align: center;
+}
+.itinvent-picker-error {
+  margin: 10px 22px 0;
+}
+.itinvent-picker-error.error {
+  color: #991b1b;
+}
+.itinvent-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 22px 20px;
+}
+
+/* «Блокировка»: заметное, но спокойное предупреждение об имуществе */
+.blocking-equipment-card {
+  position: relative;
+  transition: background-color .2s ease, box-shadow .2s ease;
+}
+.blocking-equipment-card.has-equipment {
+  animation: blocking-equipment-attention 2.2s ease-in-out infinite;
+}
+.blocking-equipment-card.equipment-clear {
+  box-shadow: 0 0 0 1px rgba(22, 101, 52, .18);
+}
+.blocking-equipment-card.equipment-alarm {
+  animation: blocking-equipment-alarm .25s ease-in-out 4 !important;
+}
+@keyframes blocking-equipment-attention {
+  0%, 100% {
+    background-color: #ffffff;
+    box-shadow: 0 0 0 1px rgba(217, 119, 6, .22), 0 4px 16px rgba(15, 23, 42, .05);
+  }
+  50% {
+    background-color: #fff7ed;
+    box-shadow: 0 0 0 3px rgba(245, 158, 11, .42), 0 8px 24px rgba(217, 119, 6, .13);
+  }
+}
+@keyframes blocking-equipment-alarm {
+  0%, 100% {
+    background-color: #ffffff;
+    box-shadow: 0 0 0 1px rgba(185, 28, 28, .25), 0 4px 16px rgba(15, 23, 42, .05);
+  }
+  50% {
+    background-color: #fee2e2;
+    box-shadow: 0 0 0 5px rgba(220, 38, 38, .55), 0 8px 28px rgba(185, 28, 28, .20);
+  }
+}
+.blocking-itinvent-heading {
+  align-items: flex-start;
+}
+.blocking-itinvent-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+.blocking-itinvent-refresh {
+  white-space: nowrap;
+}
+.blocking-itinvent-refresh-error {
+  margin-bottom: 14px;
+}
+.blocking-itinvent-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+  min-height: 20px;
+}
+.blocking-equipment-warning {
+  color: #9a3412;
+}
+.blocking-equipment-clear {
+  margin-bottom: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .blocking-equipment-card.has-equipment,
+  .blocking-equipment-card.equipment-alarm {
+    animation: none !important;
+  }
+  .blocking-equipment-card.has-equipment {
+    background: #fff7ed;
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, .38);
+  }
+}
+
+@media (max-width: 650px) {
+  .itinvent-control-rule {
+    grid-template-columns: 1fr;
+  }
+  .itinvent-control-rule .button {
+    width: 100%;
+  }
+  .blocking-itinvent-actions {
+    justify-content: flex-start;
+  }
+}

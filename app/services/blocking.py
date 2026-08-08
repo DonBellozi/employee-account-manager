@@ -4,6 +4,7 @@ import json
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,6 +20,7 @@ from app.models import (
 from app.services.ad import ADDirectoryUser, ActiveDirectoryService
 from app.services.hr_registry import HRRegistryService
 from app.services.itinvent import ITInventEmployeeAssets, ITInventService
+from app.services.itinvent_control import ITInventControlService
 from app.services.zimbra import ZimbraAccountIdentity, ZimbraService
 
 
@@ -43,6 +45,16 @@ class BlockingCard:
     itinvent: ITInventEmployeeAssets | None
     itinvent_state: str
     itinvent_error: str
+    itinvent_checked_at: str
+
+
+@dataclass(frozen=True)
+class BlockingITInventResult:
+    effective_login: str
+    itinvent: ITInventEmployeeAssets | None
+    state: str
+    error: str
+    checked_at: str
 
 
 @dataclass(frozen=True)
@@ -135,6 +147,79 @@ class BlockingService:
             identity.account_status or "Существует",
         )
 
+    def _checked_at(self) -> str:
+        try:
+            tz = ZoneInfo(self.settings.app_timezone)
+        except Exception:
+            tz = timezone.utc
+        return datetime.now(tz).strftime("%d.%m.%Y %H:%M:%S")
+
+    def _itinvent_lookup(self, login: str) -> BlockingITInventResult:
+        normalized = str(login or "").strip().lower()
+        itinvent_service = ITInventService(self.settings)
+        if not self.settings.itinvent_enabled or not itinvent_service.configured:
+            return BlockingITInventResult(
+                effective_login=normalized,
+                itinvent=None,
+                state="not_configured",
+                error="",
+                checked_at="",
+            )
+        if not normalized:
+            return BlockingITInventResult(
+                effective_login="",
+                itinvent=None,
+                state="no_login",
+                error="",
+                checked_at="",
+            )
+
+        selection = ITInventControlService(self.settings, self.db).load()
+        try:
+            assets = itinvent_service.equipment_for_login(
+                normalized,
+                location_nos=selection.location_nos,
+                equipment_types=selection.equipment_type_keys,
+            )
+            return BlockingITInventResult(
+                effective_login=normalized,
+                itinvent=assets,
+                state="found" if assets.owner_found else "owner_not_found",
+                error="",
+                checked_at=self._checked_at(),
+            )
+        except Exception as exc:
+            return BlockingITInventResult(
+                effective_login=normalized,
+                itinvent=None,
+                state="error",
+                error=str(exc),
+                checked_at="",
+            )
+
+    def _itinvent_login_for_record(self, record: HRSourceRecord) -> str:
+        mapping = self._mapping(record)
+        if mapping is not None and mapping.ad_login.strip():
+            return mapping.ad_login.strip().lower()
+        if record.login.strip():
+            return record.login.strip().lower()
+        if record.corporate_email.strip() and self.settings.zimbra_check_enabled:
+            try:
+                identity = ZimbraService(self.settings).account_by_address(
+                    record.corporate_email
+                )
+                if identity is not None:
+                    return identity.login.strip().lower()
+            except Exception:
+                pass
+        return ""
+
+    def refresh_itinvent(self, record_id: int) -> BlockingITInventResult:
+        record = self.db.get(HRSourceRecord, record_id)
+        if record is None or not record.is_present:
+            raise LookupError("Работник не найден в текущем кадровом реестре")
+        return self._itinvent_lookup(self._itinvent_login_for_record(record))
+
     def card(self, record_id: int) -> BlockingCard:
         record = self.db.get(HRSourceRecord, record_id)
         if record is None or not record.is_present:
@@ -186,26 +271,7 @@ class BlockingService:
             else candidate_login
         )
 
-        itinvent: ITInventEmployeeAssets | None = None
-        itinvent_state = "not_configured"
-        itinvent_error = ""
-        itinvent_service = ITInventService(self.settings)
-        if self.settings.itinvent_enabled and itinvent_service.configured:
-            if not effective_login:
-                itinvent_state = "no_login"
-            else:
-                try:
-                    itinvent = itinvent_service.equipment_for_login(
-                        effective_login
-                    )
-                    itinvent_state = (
-                        "found"
-                        if itinvent.owner_found
-                        else "owner_not_found"
-                    )
-                except Exception as exc:
-                    itinvent_state = "error"
-                    itinvent_error = str(exc)
+        itinvent_result = self._itinvent_lookup(effective_login)
 
         return BlockingCard(
             record_id=record.id,
@@ -220,9 +286,10 @@ class BlockingService:
             zimbra=z_identity,
             zimbra_error=zimbra_error,
             zimbra_status_label=self._zimbra_label(z_identity),
-            itinvent=itinvent,
-            itinvent_state=itinvent_state,
-            itinvent_error=itinvent_error,
+            itinvent=itinvent_result.itinvent,
+            itinvent_state=itinvent_result.state,
+            itinvent_error=itinvent_result.error,
+            itinvent_checked_at=itinvent_result.checked_at,
         )
 
     def block(self, record_id: int, operator: str) -> BlockingResult:

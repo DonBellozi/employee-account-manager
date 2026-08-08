@@ -100,7 +100,7 @@ class ITInventTests(unittest.TestCase):
         self.assertEqual(cursor.executed[0][1], ("ahmetova.as",))
         self.assertIsNone(cursor.executed[1][1])
         self.assertEqual(cursor.executed[2][1], (17, 24))
-        self.assertIn("i.LOC_NO = %s", cursor.executed[2][0])
+        self.assertIn("i.LOC_NO IN (%s)", cursor.executed[2][0])
         self.assertIn("LEFT JOIN dbo.[MODELS] m", cursor.executed[2][0])
         self.assertIn("m.[MODEL_NAME]", cursor.executed[2][0])
 
@@ -153,6 +153,66 @@ class ITInventTests(unittest.TestCase):
         self.assertEqual(result.equipment[0].equipment_type, "Монитор")
         self.assertEqual(result.equipment[0].equipment_name, "")
         self.assertIn("CAST(N'' AS nvarchar(255))", cursor.executed[2][0])
+
+    def test_control_filter_uses_type_or_location(self):
+        cursor = FakeCursor(
+            [
+                [(21, "Тестов Тест Тестович", "testov.tt")],
+                [],
+                [],
+            ]
+        )
+        connection = FakeConnection(cursor)
+        fake = types.SimpleNamespace(connect=lambda **kwargs: connection)
+        old = sys.modules.get("pymssql")
+        sys.modules["pymssql"] = fake
+        try:
+            result = ITInventService(self.settings()).equipment_for_login(
+                "testov.tt",
+                location_nos=("24", "31"),
+                equipment_types=(("5", "1"), ("7", "2")),
+            )
+        finally:
+            if old is None:
+                sys.modules.pop("pymssql", None)
+            else:
+                sys.modules["pymssql"] = old
+
+        self.assertTrue(result.owner_found)
+        sql, params = cursor.executed[2]
+        self.assertIn("i.LOC_NO IN (%s, %s)", sql)
+        self.assertIn("i.TYPE_NO = %s AND i.CI_TYPE = %s", sql)
+        self.assertIn(" OR ", sql)
+        self.assertEqual(params, (21, 24, 31, 5, 1, 7, 2))
+
+    def test_catalogs_use_itinvent_terms(self):
+        cursor = FakeCursor(
+            [
+                [(24, "Выданы в пользование"), (7, "Склад")],
+                [(2, 1, "Ноутбук"), (3, 1, "Монитор")],
+            ]
+        )
+        connection = FakeConnection(cursor)
+        fake = types.SimpleNamespace(connect=lambda **kwargs: connection)
+        old = sys.modules.get("pymssql")
+        sys.modules["pymssql"] = fake
+        try:
+            service = ITInventService(self.settings())
+            locations = service.list_locations()
+            types_list = service.list_equipment_types()
+        finally:
+            if old is None:
+                sys.modules.pop("pymssql", None)
+            else:
+                sys.modules["pymssql"] = old
+
+        self.assertEqual(locations[0].loc_no, "24")
+        self.assertEqual(locations[0].description, "Выданы в пользование")
+        self.assertEqual(types_list[0].type_name, "Ноутбук")
+        self.assertEqual(types_list[0].type_no, "2")
+        self.assertEqual(types_list[0].ci_type, "1")
+        self.assertIn("FROM dbo.LOCATIONS", cursor.executed[0][0])
+        self.assertIn("FROM dbo.CI_TYPES", cursor.executed[1][0])
 
 
 if __name__ == "__main__":

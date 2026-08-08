@@ -898,6 +898,66 @@ def blocking_card(
         )
 
 
+@router.post("/blocking/{record_id}/itinvent/refresh")
+def refresh_blocking_itinvent(
+    record_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    get_current_user(request)
+    try:
+        result = BlockingService(settings, db).refresh_itinvent(record_id)
+        if result.state == "error":
+            return JSONResponse(
+                {"ok": False, "error": result.error},
+                status_code=503,
+            )
+        equipment = []
+        if result.itinvent is not None:
+            equipment = [
+                {
+                    "type": item.equipment_type,
+                    "inventory_number": item.inventory_number,
+                    "name": item.equipment_name,
+                    "serial_number": item.serial_number,
+                    "accounting_inventory_number": (
+                        item.accounting_inventory_number
+                    ),
+                }
+                for item in result.itinvent.equipment
+            ]
+        return {
+            "ok": True,
+            "state": result.state,
+            "effective_login": result.effective_login,
+            "checked_at": result.checked_at,
+            "owner_found": bool(
+                result.itinvent is not None
+                and result.itinvent.owner_found
+            ),
+            "owner_display_name": (
+                result.itinvent.owner_display_name
+                if result.itinvent is not None
+                else ""
+            ),
+            "owner_login": (
+                result.itinvent.owner_login
+                if result.itinvent is not None
+                else result.effective_login
+            ),
+            "equipment": equipment,
+            "equipment_count": len(equipment),
+        }
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc)},
+            status_code=503,
+        )
+
+
 @router.post("/blocking/{record_id}")
 def block_employee_accounts(
     record_id: int,

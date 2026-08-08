@@ -143,6 +143,26 @@ class BlockingOperation(Base):
     )
 
 
+class ITInventControlSettings(Base):
+    """Глобальные правила отбора контролируемого имущества IT Invent."""
+
+    __tablename__ = "itinvent_control_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    locations_json: Mapped[str] = mapped_column(Text, default="[]")
+    equipment_types_json: Mapped[str] = mapped_column(Text, default="[]")
+    updated_by: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
 class DismissalSchedule(Base):
     __tablename__ = "dismissal_schedules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

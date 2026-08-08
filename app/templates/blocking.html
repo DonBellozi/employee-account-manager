@@ -120,17 +120,40 @@
   </section>
 </div>
 
-<section class="card blocking-equipment-card">
-  <div class="blocking-results-heading">
+<section class="card blocking-equipment-card{% if card.itinvent_state == 'found' and card.itinvent and card.itinvent.equipment %} has-equipment{% elif card.itinvent_state == 'found' and card.itinvent %} equipment-clear{% endif %}" id="blocking-itinvent-card">
+  <div class="blocking-results-heading blocking-itinvent-heading">
     <div>
       <h3>IT Invent</h3>
       {% if card.effective_login %}<span class="muted">Поиск по доменной учетной записи <code>{{ card.effective_login }}</code></span>{% endif %}
     </div>
-    {% if card.itinvent and card.itinvent.owner_found %}
-    <span class="status success">Найден сотрудник</span>
-    {% endif %}
+    <div class="blocking-itinvent-actions">
+      <span class="status {% if card.itinvent_state == 'found' and card.itinvent and card.itinvent.equipment %}partial{% elif card.itinvent_state == 'found' and card.itinvent %}success{% elif card.itinvent_state == 'error' %}failed{% else %}running{% endif %}" id="blocking-itinvent-status">
+        {% if card.itinvent_state == 'found' and card.itinvent and card.itinvent.equipment %}
+          Оборудование: {{ card.itinvent.equipment|length }}
+        {% elif card.itinvent_state == 'found' and card.itinvent %}
+          Имущество не найдено
+        {% elif card.itinvent_state == 'owner_not_found' %}
+          Сотрудник не найден
+        {% elif card.itinvent_state == 'error' %}
+          Ошибка проверки
+        {% else %}
+          Не проверено
+        {% endif %}
+      </span>
+      {% if card.effective_login and card.itinvent_state != 'not_configured' %}
+      <button class="button secondary blocking-itinvent-refresh"
+              type="button"
+              id="blocking-itinvent-refresh"
+              data-url="/blocking/{{ card.record_id }}/itinvent/refresh">
+        ↻ Обновить
+      </button>
+      {% endif %}
+    </div>
   </div>
 
+  <div class="blocking-itinvent-refresh-error" id="blocking-itinvent-refresh-error" hidden></div>
+
+  <div id="blocking-itinvent-content">
   {% if card.itinvent_state == 'not_configured' %}
     <div class="alert warning">Интеграция IT Invent пока не настроена или отключена.</div>
   {% elif card.itinvent_state == 'no_login' %}
@@ -138,7 +161,7 @@
   {% elif card.itinvent_state == 'error' %}
     <div class="alert error">Ошибка проверки IT Invent: {{ card.itinvent_error }}</div>
   {% elif card.itinvent_state == 'owner_not_found' %}
-    <p>Сотрудник с логином <code>{{ card.effective_login }}</code> в IT Invent не найден.</p>
+    <div class="alert warning">Сотрудник с логином <code>{{ card.effective_login }}</code> в IT Invent не найден.</div>
   {% elif card.itinvent %}
     <dl class="blocking-details blocking-itinvent-owner">
       <dt>Получатель в IT Invent</dt><dd>{{ card.itinvent.owner_display_name or '–' }}</dd>
@@ -146,7 +169,7 @@
     </dl>
 
     {% if card.itinvent.equipment %}
-    <p><strong>Выдано в пользование: {{ card.itinvent.equipment|length }}</strong></p>
+    <p class="blocking-equipment-warning"><strong>На работнике числится оборудование: {{ card.itinvent.equipment|length }}</strong></p>
     <div class="table-wrap">
       <table class="blocking-equipment-table">
         <thead>
@@ -172,12 +195,17 @@
       </table>
     </div>
     {% else %}
-      <p>За сотрудником нет оборудования с местоположением «Выданы в пользование».</p>
+      <div class="alert success blocking-equipment-clear">Контролируемое оборудование не найдено.</div>
     {% endif %}
   {% endif %}
+  </div>
+
+  <div class="blocking-itinvent-footer">
+    <span class="muted" id="blocking-itinvent-checked-at">{% if card.itinvent_checked_at %}Проверено: {{ card.itinvent_checked_at }}{% endif %}</span>
+  </div>
 
   <p class="muted blocking-itinvent-note">
-    IT Invent используется как справочный источник.
+    IT Invent используется как справочный источник. Отсутствие оборудования в базе не запрещает блокировку учетных записей.
   </p>
 </section>
 
@@ -198,6 +226,15 @@
 {% endif %}
 
 <script>
+function escapeBlockingHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
 function submitBlockingOnce(form) {
   if (form.dataset.submitting === 'true') return false;
   if (!window.confirm('Заблокировать учетные записи выбранного работника?')) return false;
@@ -209,5 +246,132 @@ function submitBlockingOnce(form) {
   }
   return true;
 }
+
+(() => {
+  const card = document.getElementById('blocking-itinvent-card');
+  const content = document.getElementById('blocking-itinvent-content');
+  const status = document.getElementById('blocking-itinvent-status');
+  const checkedAt = document.getElementById('blocking-itinvent-checked-at');
+  const refresh = document.getElementById('blocking-itinvent-refresh');
+  const refreshError = document.getElementById('blocking-itinvent-refresh-error');
+  const blockButton = document.querySelector('[data-blocking-submit]');
+  const csrf = {{ csrf|tojson }};
+
+  function equipmentTable(items) {
+    if (!items.length) {
+      return '<div class="alert success blocking-equipment-clear">Контролируемое оборудование не найдено.</div>';
+    }
+    const rows = items.map(item => `
+      <tr>
+        <td>${escapeBlockingHtml(item.type || '–')}</td>
+        <td>${escapeBlockingHtml(item.inventory_number || '–')}</td>
+        <td>${escapeBlockingHtml(item.name || '–')}</td>
+        <td>${escapeBlockingHtml(item.serial_number || '–')}</td>
+        <td>${escapeBlockingHtml(item.accounting_inventory_number || '–')}</td>
+      </tr>`).join('');
+    return `
+      <p class="blocking-equipment-warning"><strong>На работнике числится оборудование: ${items.length}</strong></p>
+      <div class="table-wrap">
+        <table class="blocking-equipment-table">
+          <thead><tr><th>Тип</th><th>Инвентарный номер</th><th>Название</th><th>Серийный номер</th><th>Бухгалтерский инв. номер</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  function setEquipmentState(hasEquipment, clearState = false) {
+    if (!card) return;
+    card.classList.toggle('has-equipment', hasEquipment);
+    card.classList.toggle('equipment-clear', clearState);
+    if (!hasEquipment) card.classList.remove('equipment-alarm');
+  }
+
+  function renderItinvent(payload) {
+    if (!content || !status) return;
+    const items = payload.equipment || [];
+    refreshError.hidden = true;
+    refreshError.textContent = '';
+
+    if (payload.state === 'found') {
+      const owner = `
+        <dl class="blocking-details blocking-itinvent-owner">
+          <dt>Получатель в IT Invent</dt><dd>${escapeBlockingHtml(payload.owner_display_name || '–')}</dd>
+          <dt>Учетная запись</dt><dd><code>${escapeBlockingHtml(payload.owner_login || payload.effective_login || '')}</code></dd>
+        </dl>`;
+      content.innerHTML = owner + equipmentTable(items);
+      if (items.length) {
+        status.className = 'status partial';
+        status.textContent = `Оборудование: ${items.length}`;
+        setEquipmentState(true, false);
+      } else {
+        status.className = 'status success';
+        status.textContent = 'Имущество не найдено';
+        setEquipmentState(false, true);
+      }
+    } else if (payload.state === 'owner_not_found') {
+      content.innerHTML = `<div class="alert warning">Сотрудник с логином <code>${escapeBlockingHtml(payload.effective_login || '')}</code> в IT Invent не найден.</div>`;
+      status.className = 'status running';
+      status.textContent = 'Сотрудник не найден';
+      setEquipmentState(false, false);
+    } else if (payload.state === 'no_login') {
+      content.innerHTML = '<div class="alert warning">Не удалось определить доменный логин для поиска имущества.</div>';
+      status.className = 'status running';
+      status.textContent = 'Не проверено';
+      setEquipmentState(false, false);
+    } else if (payload.state === 'not_configured') {
+      content.innerHTML = '<div class="alert warning">Интеграция IT Invent пока не настроена или отключена.</div>';
+      status.className = 'status running';
+      status.textContent = 'Не проверено';
+      setEquipmentState(false, false);
+    }
+
+    if (checkedAt) {
+      checkedAt.textContent = payload.checked_at ? `Проверено: ${payload.checked_at}` : '';
+    }
+  }
+
+  refresh?.addEventListener('click', async () => {
+    const originalText = refresh.textContent;
+    refresh.disabled = true;
+    refresh.textContent = '↻ Обновляю...';
+    if (refreshError) {
+      refreshError.hidden = true;
+      refreshError.textContent = '';
+    }
+    try {
+      const body = new URLSearchParams({csrf});
+      const response = await fetch(refresh.dataset.url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body,
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || 'Не удалось обновить сведения IT Invent');
+      }
+      renderItinvent(payload);
+    } catch (error) {
+      if (refreshError) {
+        refreshError.hidden = false;
+        refreshError.className = 'blocking-itinvent-refresh-error alert warning';
+        const previous = checkedAt?.textContent?.trim();
+        refreshError.textContent = previous
+          ? `Не удалось обновить сведения IT Invent. Показаны данные предыдущей проверки (${previous.replace('Проверено: ', '')}). ${error.message || error}`
+          : `Не удалось обновить сведения IT Invent. Текущие данные на экране сохранены. ${error.message || error}`;
+      }
+    } finally {
+      refresh.disabled = false;
+      refresh.textContent = originalText;
+    }
+  });
+
+  blockButton?.addEventListener('mouseenter', () => {
+    if (!card?.classList.contains('has-equipment')) return;
+    card.classList.remove('equipment-alarm');
+    void card.offsetWidth;
+    card.classList.add('equipment-alarm');
+    window.setTimeout(() => card.classList.remove('equipment-alarm'), 1100);
+  });
+})();
 </script>
 {% endblock %}

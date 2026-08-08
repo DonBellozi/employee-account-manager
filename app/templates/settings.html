@@ -270,14 +270,80 @@
         <dt>Пользователь</dt><dd>{{ integrations.itinvent.username }}</dd>
         <dt>Пароль</dt><dd>{{ integrations.itinvent.password }}</dd>
         <dt>Режим</dt><dd>{{ integrations.itinvent.mode }}</dd>
-        <dt>Местоположение техники</dt><dd>{{ integrations.itinvent.location_no }} – {{ integrations.itinvent.location_label }}</dd>
       </dl>
+
+      <div class="itinvent-control-panel">
+        <div class="itinvent-control-heading">
+          <div>
+            <strong>Контроль оборудования</strong>
+            <span class="muted">Учитывается оборудование, которое совпало хотя бы с одним правилом.</span>
+            {% if not integrations.itinvent.control_persisted %}
+            <span class="muted">До первого сохранения используется прежнее правило «Выданы в пользование».</span>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="itinvent-control-rule">
+          <div class="itinvent-control-copy">
+            <strong>Тип оборудования</strong>
+            <span class="muted">Выбранные типы учитываются независимо от местоположения.</span>
+            <div class="itinvent-chip-list" id="itinvent-types-summary">
+              {% if integrations.itinvent.control_types %}
+                {% for item in integrations.itinvent.control_types[:4] %}<span class="itinvent-chip">{{ item }}</span>{% endfor %}
+                {% if integrations.itinvent.control_types_count > 4 %}<span class="itinvent-chip more">+{{ integrations.itinvent.control_types_count - 4 }}</span>{% endif %}
+              {% else %}
+                <span class="muted">Не выбрано</span>
+              {% endif %}
+            </div>
+          </div>
+          <button class="button secondary" type="button" data-itinvent-picker="types">Изменить</button>
+        </div>
+
+        <div class="itinvent-control-rule">
+          <div class="itinvent-control-copy">
+            <strong>Местоположение</strong>
+            <span class="muted">Оборудование в выбранных местоположениях учитывается независимо от типа.</span>
+            <div class="itinvent-chip-list" id="itinvent-locations-summary">
+              {% if integrations.itinvent.control_locations %}
+                {% for item in integrations.itinvent.control_locations[:4] %}<span class="itinvent-chip">{{ item }}</span>{% endfor %}
+                {% if integrations.itinvent.control_locations_count > 4 %}<span class="itinvent-chip more">+{{ integrations.itinvent.control_locations_count - 4 }}</span>{% endif %}
+              {% else %}
+                <span class="muted">Не выбрано</span>
+              {% endif %}
+            </div>
+          </div>
+          <button class="button secondary" type="button" data-itinvent-picker="locations">Изменить</button>
+        </div>
+      </div>
+
       <p class="muted integration-note">
         Приложение выполняет только SELECT. Для SQL-учетной записи рекомендуется
         выдать только права чтения на БД ITInvent. Поиск имущества выполняется
-        по доменному логину OWNERS.OWNER_LOGIN.
+        по доменному логину OWNERS.OWNER_LOGIN. Правила «Тип оборудования» и
+        «Местоположение» объединяются условием ИЛИ.
       </p>
       <div class="integration-test-result" id="integration-result-itinvent"></div>
+
+      <dialog class="itinvent-picker-dialog" id="itinvent-picker-dialog">
+        <div class="itinvent-picker-head">
+          <div>
+            <h3 id="itinvent-picker-title">Выбор</h3>
+            <p class="muted" id="itinvent-picker-description"></p>
+          </div>
+          <button type="button" class="itinvent-dialog-close" id="itinvent-picker-close" aria-label="Закрыть">×</button>
+        </div>
+        <input type="search" id="itinvent-picker-search" placeholder="Поиск..." autocomplete="off">
+        <div class="itinvent-picker-tools">
+          <span class="muted" id="itinvent-picker-selected-count"></span>
+          <button type="button" class="itinvent-picker-clear" id="itinvent-picker-clear">Снять все</button>
+        </div>
+        <div class="itinvent-picker-list" id="itinvent-picker-list"></div>
+        <div class="itinvent-picker-error" id="itinvent-picker-error"></div>
+        <div class="itinvent-picker-actions">
+          <button type="button" class="button secondary" id="itinvent-picker-cancel">Отмена</button>
+          <button type="button" class="button" id="itinvent-picker-save">Сохранить</button>
+        </div>
+      </dialog>
     </article>
   </div>
 </section>
@@ -371,6 +437,183 @@
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#039;');
   }
+
+  const itinventDialog = document.getElementById('itinvent-picker-dialog');
+  const itinventList = document.getElementById('itinvent-picker-list');
+  const itinventSearch = document.getElementById('itinvent-picker-search');
+  const itinventTitle = document.getElementById('itinvent-picker-title');
+  const itinventDescription = document.getElementById('itinvent-picker-description');
+  const itinventSelectedCount = document.getElementById('itinvent-picker-selected-count');
+  const itinventPickerError = document.getElementById('itinvent-picker-error');
+  const itinventSave = document.getElementById('itinvent-picker-save');
+  let itinventCatalog = null;
+  let itinventPickerKind = 'types';
+  let itinventDraft = new Set();
+
+  function renderItinventSummary(targetId, names) {
+    const target = document.getElementById(targetId);
+    if (!target) return;
+    if (!names || !names.length) {
+      target.innerHTML = '<span class="muted">Не выбрано</span>';
+      return;
+    }
+    const shown = names.slice(0, 4)
+      .map(name => `<span class="itinvent-chip">${escapeHtml(name)}</span>`)
+      .join('');
+    const rest = names.length > 4
+      ? `<span class="itinvent-chip more">+${names.length - 4}</span>`
+      : '';
+    target.innerHTML = shown + rest;
+  }
+
+  async function loadItinventCatalog(force = false) {
+    if (itinventCatalog && !force) return itinventCatalog;
+    const response = await fetch('/settings/itinvent/catalog', {
+      headers: {'Accept': 'application/json'},
+      cache: 'no-store',
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || 'Не удалось получить справочники IT Invent');
+    }
+    itinventCatalog = payload;
+    return payload;
+  }
+
+  function itinventOptions() {
+    if (!itinventCatalog) return [];
+    return itinventPickerKind === 'locations'
+      ? (itinventCatalog.locations || [])
+      : (itinventCatalog.types || []);
+  }
+
+  function renderItinventPicker() {
+    if (!itinventList) return;
+    const search = (itinventSearch?.value || '').trim().toLocaleLowerCase('ru-RU');
+    const options = itinventOptions();
+    const nameCounts = new Map();
+    options.forEach(item => {
+      const key = String(item.name || '').toLocaleLowerCase('ru-RU');
+      nameCounts.set(key, (nameCounts.get(key) || 0) + 1);
+    });
+
+    const filtered = options.filter(item => {
+      if (!search) return true;
+      return String(item.name || '').toLocaleLowerCase('ru-RU').includes(search);
+    });
+
+    itinventList.innerHTML = filtered.length
+      ? filtered.map(item => {
+          const checked = itinventDraft.has(String(item.key)) ? ' checked' : '';
+          const duplicate = nameCounts.get(String(item.name || '').toLocaleLowerCase('ru-RU')) > 1;
+          let meta = '';
+          if (duplicate && itinventPickerKind === 'locations') {
+            meta = `<small>LOC_NO ${escapeHtml(item.loc_no)}</small>`;
+          } else if (duplicate && itinventPickerKind === 'types') {
+            meta = `<small>TYPE_NO ${escapeHtml(item.type_no)} · CI_TYPE ${escapeHtml(item.ci_type)}</small>`;
+          }
+          return `<label class="itinvent-picker-option">
+            <input type="checkbox" value="${escapeHtml(item.key)}"${checked}>
+            <span><strong>${escapeHtml(item.name || 'Без названия')}</strong>${meta}</span>
+          </label>`;
+        }).join('')
+      : '<div class="muted itinvent-picker-empty">Ничего не найдено.</div>';
+
+    itinventList.querySelectorAll('input[type="checkbox"]').forEach(input => {
+      input.addEventListener('change', () => {
+        if (input.checked) itinventDraft.add(input.value);
+        else itinventDraft.delete(input.value);
+        if (itinventSelectedCount) {
+          itinventSelectedCount.textContent = `Выбрано: ${itinventDraft.size}`;
+        }
+      });
+    });
+
+    if (itinventSelectedCount) {
+      itinventSelectedCount.textContent = `Выбрано: ${itinventDraft.size}`;
+    }
+  }
+
+  async function openItinventPicker(kind) {
+    if (!itinventDialog) return;
+    itinventPickerKind = kind;
+    itinventPickerError.textContent = '';
+    itinventPickerError.className = 'itinvent-picker-error';
+    itinventList.innerHTML = '<div class="muted itinvent-picker-empty">Загрузка справочника...</div>';
+    itinventSearch.value = '';
+    itinventTitle.textContent = kind === 'locations' ? 'Местоположение' : 'Тип оборудования';
+    itinventDescription.textContent = kind === 'locations'
+      ? 'Оборудование в выбранных местоположениях учитывается независимо от типа.'
+      : 'Выбранные типы учитываются независимо от местоположения.';
+    itinventDialog.showModal();
+
+    try {
+      const catalog = await loadItinventCatalog();
+      const selected = kind === 'locations'
+        ? (catalog.selected_locations || [])
+        : (catalog.selected_types || []);
+      itinventDraft = new Set(selected.map(String));
+      renderItinventPicker();
+      itinventSearch.focus();
+    } catch (error) {
+      itinventPickerError.className = 'itinvent-picker-error error';
+      itinventPickerError.textContent = error.message || String(error);
+      itinventList.innerHTML = '';
+    }
+  }
+
+  document.querySelectorAll('[data-itinvent-picker]').forEach(button => {
+    button.addEventListener('click', () => openItinventPicker(button.dataset.itinventPicker));
+  });
+
+  itinventSearch?.addEventListener('input', renderItinventPicker);
+  document.getElementById('itinvent-picker-clear')?.addEventListener('click', () => {
+    itinventDraft.clear();
+    renderItinventPicker();
+  });
+  document.getElementById('itinvent-picker-close')?.addEventListener('click', () => itinventDialog?.close());
+  document.getElementById('itinvent-picker-cancel')?.addEventListener('click', () => itinventDialog?.close());
+
+  itinventSave?.addEventListener('click', async () => {
+    if (!itinventCatalog) return;
+    const originalText = itinventSave.textContent;
+    itinventSave.disabled = true;
+    itinventSave.textContent = 'Сохраняю...';
+    itinventPickerError.textContent = '';
+    try {
+      const locations = itinventPickerKind === 'locations'
+        ? Array.from(itinventDraft)
+        : (itinventCatalog.selected_locations || []);
+      const types = itinventPickerKind === 'types'
+        ? Array.from(itinventDraft)
+        : (itinventCatalog.selected_types || []);
+      const body = new URLSearchParams({
+        csrf,
+        locations_json: JSON.stringify(locations),
+        types_json: JSON.stringify(types),
+      });
+      const response = await fetch('/settings/itinvent/control', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body,
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || 'Не удалось сохранить настройки IT Invent');
+      }
+      itinventCatalog.selected_locations = locations;
+      itinventCatalog.selected_types = types;
+      renderItinventSummary('itinvent-locations-summary', payload.locations || []);
+      renderItinventSummary('itinvent-types-summary', payload.types || []);
+      itinventDialog.close();
+    } catch (error) {
+      itinventPickerError.className = 'itinvent-picker-error error';
+      itinventPickerError.textContent = error.message || String(error);
+    } finally {
+      itinventSave.disabled = false;
+      itinventSave.textContent = originalText;
+    }
+  });
 
   function mailSummary(mail) {
     return `

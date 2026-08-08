@@ -122,10 +122,45 @@ class BlockingTests(unittest.TestCase):
         self.assertEqual(card.ad_user.display_name, "Ахметова Анна Сергеевна")
         self.assertEqual(card.effective_login, "ahmetova.as")
         itinvent_cls.return_value.equipment_for_login.assert_called_once_with(
-            "ahmetova.as"
+            "ahmetova.as",
+            location_nos=("24",),
+            equipment_types=(),
         )
         self.assertEqual(card.itinvent.owner_display_name, "Ахметова Анна Сергеевна")
         self.assertEqual(card.itinvent.equipment[0].equipment_type, "Ноутбук")
+
+
+    @patch("app.services.blocking.ITInventService")
+    @patch("app.services.blocking.ZimbraService")
+    @patch("app.services.blocking.ActiveDirectoryService")
+    def test_itinvent_refresh_uses_mapping_without_rereading_ad(
+        self,
+        ad_cls,
+        zimbra_cls,
+        itinvent_cls,
+    ):
+        assets = ITInventEmployeeAssets(
+            owner_found=True,
+            owner_display_name="Ахметова Анна Сергеевна",
+            owner_login="ahmetova.as",
+            equipment=(),
+        )
+        itinvent_cls.return_value.configured = True
+        itinvent_cls.return_value.equipment_for_login.return_value = assets
+
+        result = BlockingService(self.settings, self.db).refresh_itinvent(
+            self.record.id
+        )
+
+        self.assertEqual(result.state, "found")
+        self.assertEqual(result.effective_login, "ahmetova.as")
+        itinvent_cls.return_value.equipment_for_login.assert_called_once_with(
+            "ahmetova.as",
+            location_nos=("24",),
+            equipment_types=(),
+        )
+        ad_cls.assert_not_called()
+        zimbra_cls.assert_not_called()
 
 
     @patch.object(BlockingService, "card")
@@ -175,6 +210,7 @@ class BlockingTests(unittest.TestCase):
             itinvent=assets,
             itinvent_state="found",
             itinvent_error="",
+            itinvent_checked_at="",
         )
 
         result = BlockingService(settings, self.db).block(

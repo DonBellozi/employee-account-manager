@@ -26,6 +26,19 @@ class ITInventEmployeeAssets:
 
 
 @dataclass(frozen=True)
+class ITInventLocation:
+    loc_no: str
+    description: str
+
+
+@dataclass(frozen=True)
+class ITInventEquipmentType:
+    type_no: str
+    ci_type: str
+    type_name: str
+
+
+@dataclass(frozen=True)
 class _ModelLookup:
     select_sql: str
     join_sql: str = ""
@@ -37,8 +50,11 @@ class ITInventService:
     Подтвержденные связи БД:
       OWNERS.OWNER_LOGIN -> доменный sAMAccountName
       ITEMS.EMPL_NO = OWNERS.OWNER_NO
-      ITEMS.LOC_NO = 24 -> «Выданы в пользование»
+      ITEMS.LOC_NO -> LOCATIONS.LOC_NO
       ITEMS.TYPE_NO/CI_TYPE -> CI_TYPES.TYPE_NO/CI_TYPE
+
+    Контролируемое имущество выбирается по настраиваемому правилу:
+    выбранный тип оборудования ИЛИ выбранное местоположение.
 
     Название конкретной техники в интерфейсе IT Invent соответствует модели.
     Так как публичной схемы таблицы моделей нет, сервис безопасно определяет
@@ -157,6 +173,64 @@ class ITInventService:
         if re_full_float_zero(text):
             return text[:-2]
         return text
+
+    @staticmethod
+    def _db_key(value: object) -> str:
+        return ITInventService.identifier_text(value)
+
+    @staticmethod
+    def _db_parameter(value: str) -> object:
+        text = str(value or "").strip()
+        if text.lstrip("+-").isdigit():
+            try:
+                return int(text)
+            except ValueError:
+                pass
+        return text
+
+    def list_locations(self) -> tuple[ITInventLocation, ...]:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT LOC_NO, DESCR
+                FROM dbo.LOCATIONS
+                ORDER BY DESCR, LOC_NO
+                """
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            ITInventLocation(
+                loc_no=self._db_key(row[0]),
+                description=str(row[1] or "").strip() or f"LOC_NO {self._db_key(row[0])}",
+            )
+            for row in rows
+            if row and self._db_key(row[0])
+        )
+
+    def list_equipment_types(self) -> tuple[ITInventEquipmentType, ...]:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT TYPE_NO, CI_TYPE, TYPE_NAME
+                FROM dbo.CI_TYPES
+                ORDER BY TYPE_NAME, TYPE_NO, CI_TYPE
+                """
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            ITInventEquipmentType(
+                type_no=self._db_key(row[0]),
+                ci_type=self._db_key(row[1]),
+                type_name=str(row[2] or "").strip()
+                or f"TYPE_NO {self._db_key(row[0])}",
+            )
+            for row in rows
+            if row and len(row) >= 3
+            and self._db_key(row[0])
+            and self._db_key(row[1])
+        )
 
     @classmethod
     def _quote_identifier(cls, value: str) -> str:
@@ -333,10 +407,37 @@ class ITInventService:
         )
         return _ModelLookup(select_sql=select_sql, join_sql=join_sql)
 
-    def equipment_for_login(self, login: str) -> ITInventEmployeeAssets:
+    def equipment_for_login(
+        self,
+        login: str,
+        *,
+        location_nos: tuple[str, ...] | None = None,
+        equipment_types: tuple[tuple[str, str], ...] | None = None,
+    ) -> ITInventEmployeeAssets:
         normalized = str(login or "").strip().lower()
         if not normalized:
             raise ValueError("Не передан доменный логин для поиска в IT Invent")
+
+        # Совместимость с первой версией интеграции: прямой вызов без
+        # настроек продолжает использовать прежнее местоположение из ENV.
+        if location_nos is None and equipment_types is None:
+            location_nos = (str(self.settings.itinvent_issued_location_no),)
+            equipment_types = ()
+        else:
+            location_nos = tuple(
+                dict.fromkeys(
+                    str(value).strip()
+                    for value in (location_nos or ())
+                    if str(value).strip()
+                )
+            )
+            equipment_types = tuple(
+                dict.fromkeys(
+                    (str(type_no).strip(), str(ci_type).strip())
+                    for type_no, ci_type in (equipment_types or ())
+                    if str(type_no).strip() and str(ci_type).strip()
+                )
+            )
 
         with self._connect() as conn:
             cursor = conn.cursor()
@@ -370,6 +471,36 @@ class ITInventService:
 
             owner_no, owner_name, owner_login = owners[0]
             model_lookup = self._discover_model_lookup(cursor)
+
+            filter_clauses: list[str] = []
+            filter_params: list[object] = []
+            if location_nos:
+                placeholders = ", ".join("%s" for _ in location_nos)
+                filter_clauses.append(f"i.LOC_NO IN ({placeholders})")
+                filter_params.extend(
+                    self._db_parameter(value) for value in location_nos
+                )
+
+            if equipment_types:
+                type_clauses: list[str] = []
+                for type_no, ci_type in equipment_types:
+                    type_clauses.append(
+                        "(i.TYPE_NO = %s AND i.CI_TYPE = %s)"
+                    )
+                    filter_params.extend(
+                        [
+                            self._db_parameter(type_no),
+                            self._db_parameter(ci_type),
+                        ]
+                    )
+                filter_clauses.append("(" + " OR ".join(type_clauses) + ")")
+
+            control_filter = (
+                "(" + " OR ".join(filter_clauses) + ")"
+                if filter_clauses
+                else "1 = 0"
+            )
+
             cursor.execute(
                 f"""
                 SELECT
@@ -385,15 +516,12 @@ class ITInventService:
                 {model_lookup.join_sql}
                 WHERE
                     i.EMPL_NO = %s
-                    AND i.LOC_NO = %s
+                    AND {control_filter}
                 ORDER BY
                     ct.TYPE_NAME,
                     i.INV_NO
                 """,
-                (
-                    owner_no,
-                    self.settings.itinvent_issued_location_no,
-                ),
+                tuple([owner_no, *filter_params]),
             )
             rows = cursor.fetchall()
 
