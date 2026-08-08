@@ -5,17 +5,125 @@
   <div>
     <h1>Настройки</h1>
     <p class="muted settings-lead">
-      Параметры подключения к действующим системам читаются из окружения.
-      Секреты в Web не отображаются и здесь не изменяются.
+      Изменяемые в Web параметры вынесены наверх. Технические параметры подключений из ENV собраны ниже.
     </p>
   </div>
 </div>
 
-<section class="settings-section">
-  <h2>Интеграции</h2>
+<section class="settings-section settings-web-section">
+  <div class="settings-section-heading">
+    <div>
+      <h2>Настраивается в Web</h2>
+      <p class="muted">Параметры, которые можно менять непосредственно из интерфейса.</p>
+    </div>
+  </div>
 
-  <div class="integration-list">
-    <article class="integration-card">
+  <div class="settings-web-grid">
+    <article class="settings-web-panel settings-web-panel-wide">
+      <div class="settings-web-panel-heading">
+        <div>
+          <h3>Контроль оборудования IT Invent</h3>
+          <span class="integration-badge{% if integrations.itinvent.configured %} active{% endif %}">{{ integrations.itinvent.badge }}</span>
+        </div>
+      </div>
+      <div class="itinvent-control-panel">
+        <div class="itinvent-control-heading">
+          <div>
+            <strong>Контроль оборудования</strong>
+            <span class="muted">Учитывается оборудование, которое совпало хотя бы с одним правилом.</span>
+            {% if not integrations.itinvent.control_persisted %}
+            <span class="muted">До первого сохранения используется прежнее правило «Выданы в пользование».</span>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="itinvent-control-rule">
+          <div class="itinvent-control-copy">
+            <strong>Тип оборудования</strong>
+            <span class="muted">Выбранные типы учитываются независимо от местоположения.</span>
+            <div class="itinvent-chip-list" id="itinvent-types-summary">
+              {% if integrations.itinvent.control_types %}
+                {% for item in integrations.itinvent.control_types[:4] %}<span class="itinvent-chip">{{ item }}</span>{% endfor %}
+                {% if integrations.itinvent.control_types_count > 4 %}<span class="itinvent-chip more">+{{ integrations.itinvent.control_types_count - 4 }}</span>{% endif %}
+              {% else %}
+                <span class="muted">Не выбрано</span>
+              {% endif %}
+            </div>
+          </div>
+          <button class="button secondary" type="button" data-itinvent-picker="types">Изменить</button>
+        </div>
+
+        <div class="itinvent-control-rule">
+          <div class="itinvent-control-copy">
+            <strong>Местоположение</strong>
+            <span class="muted">Оборудование в выбранных местоположениях учитывается независимо от типа.</span>
+            <div class="itinvent-chip-list" id="itinvent-locations-summary">
+              {% if integrations.itinvent.control_locations %}
+                {% for item in integrations.itinvent.control_locations[:4] %}<span class="itinvent-chip">{{ item }}</span>{% endfor %}
+                {% if integrations.itinvent.control_locations_count > 4 %}<span class="itinvent-chip more">+{{ integrations.itinvent.control_locations_count - 4 }}</span>{% endif %}
+              {% else %}
+                <span class="muted">Не выбрано</span>
+              {% endif %}
+            </div>
+          </div>
+          <button class="button secondary" type="button" data-itinvent-picker="locations">Изменить</button>
+        </div>
+      </div>
+      <p class="muted integration-note">
+        Выбранные «Тип оборудования» и «Местоположение» объединяются условием ИЛИ.
+      </p>
+      <dialog class="itinvent-picker-dialog" id="itinvent-picker-dialog">
+        <div class="itinvent-picker-head">
+          <div>
+            <h3 id="itinvent-picker-title">Выбор</h3>
+            <p class="muted" id="itinvent-picker-description"></p>
+          </div>
+          <button type="button" class="itinvent-dialog-close" id="itinvent-picker-close" aria-label="Закрыть">×</button>
+        </div>
+        <input type="search" id="itinvent-picker-search" placeholder="Поиск..." autocomplete="off">
+        <div class="itinvent-picker-tools">
+          <span class="muted" id="itinvent-picker-selected-count"></span>
+          <button type="button" class="itinvent-picker-clear" id="itinvent-picker-clear">Снять все</button>
+        </div>
+        <div class="itinvent-picker-list" id="itinvent-picker-list"></div>
+        <div class="itinvent-picker-error" id="itinvent-picker-error"></div>
+        <div class="itinvent-picker-actions">
+          <button type="button" class="button secondary" id="itinvent-picker-cancel">Отмена</button>
+          <button type="button" class="button" id="itinvent-picker-save">Сохранить</button>
+        </div>
+      </dialog>
+    </article>
+
+    <a class="settings-card-link" href="/admin/mail-templates">
+      <span class="settings-card-title">Шаблоны писем</span>
+      <span class="settings-card-description">Отправители и тексты служебных писем.</span>
+      <span class="settings-card-action">Открыть →</span>
+    </a>
+
+    <a class="settings-card-link" href="/admin/access">
+      <span class="settings-card-title">Доступ</span>
+      <span class="settings-card-description">Доменные пользователи, роли операторов и администраторов.</span>
+      <span class="settings-card-action">Открыть →</span>
+    </a>
+
+    <a class="settings-card-link" href="/settings/email-login-mapping">
+      <span class="settings-card-title">Сопоставление e-mail и логина</span>
+      <span class="settings-card-description">Ручные сопоставления кадровой записи, AD и Zimbra.</span>
+      <span class="settings-card-action">Открыть →</span>
+    </a>
+  </div>
+</section>
+
+<section class="settings-section settings-env-section">
+  <div class="settings-section-heading">
+    <div>
+      <h2>Подключения и параметры ENV</h2>
+      <p class="muted">Эти параметры отображаются для контроля. Изменяются в ENV / Portainer и не редактируются в Web.</p>
+    </div>
+  </div>
+
+  <div class="integration-compact-grid">
+    <article class="integration-card integration-card-compact">
       <div class="integration-card-heading">
         <div>
           <h3>Active Directory</h3>
@@ -44,8 +152,7 @@
       </dl>
       <div class="integration-test-result" id="integration-result-ad"></div>
     </article>
-
-    <article class="integration-card">
+    <article class="integration-card integration-card-compact">
       <div class="integration-card-heading">
         <div>
           <h3>Zimbra</h3>
@@ -74,8 +181,7 @@
       </dl>
       <div class="integration-test-result" id="integration-result-zimbra"></div>
     </article>
-
-    <article class="integration-card">
+    <article class="integration-card integration-card-compact">
       <div class="integration-card-heading">
         <div>
           <h3>SMTP</h3>
@@ -105,8 +211,40 @@
       </p>
       <div class="integration-test-result" id="integration-result-smtp"></div>
     </article>
+    <article class="integration-card integration-card-compact">
+      <div class="integration-card-heading">
+        <div>
+          <h3>IT Invent</h3>
+          <span class="integration-badge{% if integrations.itinvent.configured %} active{% endif %}"
+                id="integration-badge-itinvent">
+            {{ integrations.itinvent.badge }}
+          </span>
+        </div>
+        <button class="button secondary integration-test"
+                type="button"
+                data-integration="itinvent">
+          Проверить подключение
+        </button>
+      </div>
+      <dl class="integration-details">
+        <dt>Включено</dt><dd>{{ integrations.itinvent.enabled }}</dd>
+        <dt>MS SQL Server</dt><dd>{{ integrations.itinvent.server }}</dd>
+        <dt>Порт</dt><dd>{{ integrations.itinvent.port }}</dd>
+        <dt>База</dt><dd><code>{{ integrations.itinvent.database }}</code></dd>
+        <dt>Пользователь</dt><dd>{{ integrations.itinvent.username }}</dd>
+        <dt>Пароль</dt><dd>{{ integrations.itinvent.password }}</dd>
+        <dt>Режим</dt><dd>{{ integrations.itinvent.mode }}</dd>
+      </dl>
+      <p class="muted integration-note">
+        Подключение настраивается через ENV. Приложение выполняет только SELECT;
+        поиск владельца выполняется по OWNERS.OWNER_LOGIN.
+      </p>
+      <div class="integration-test-result" id="integration-result-itinvent"></div>
+    </article>
+  </div>
 
-    <article class="integration-card" id="onec-card">
+  <div class="integration-wide-row">
+    <article class="integration-card integration-card-wide" id="onec-card">
       <div class="integration-card-heading">
         <div>
           <h3>1С / кадровая выгрузка</h3>
@@ -133,7 +271,6 @@
           </button>
           <button class="button secondary" type="button" id="onec-reconcile">Пересверить AD/Zimbra</button>
           <a class="button secondary" href="/employees/registry">Открыть реестр</a>
-          <a class="button secondary" href="/settings/email-login-mapping">Сопоставление e-mail и логина</a>
         </div>
       </div>
 
@@ -246,132 +383,6 @@
         {% endif %}
       </div>
     </article>
-
-    <article class="integration-card">
-      <div class="integration-card-heading">
-        <div>
-          <h3>IT Invent</h3>
-          <span class="integration-badge{% if integrations.itinvent.configured %} active{% endif %}"
-                id="integration-badge-itinvent">
-            {{ integrations.itinvent.badge }}
-          </span>
-        </div>
-        <button class="button secondary integration-test"
-                type="button"
-                data-integration="itinvent">
-          Проверить подключение
-        </button>
-      </div>
-      <dl class="integration-details">
-        <dt>Включено</dt><dd>{{ integrations.itinvent.enabled }}</dd>
-        <dt>MS SQL Server</dt><dd>{{ integrations.itinvent.server }}</dd>
-        <dt>Порт</dt><dd>{{ integrations.itinvent.port }}</dd>
-        <dt>База</dt><dd><code>{{ integrations.itinvent.database }}</code></dd>
-        <dt>Пользователь</dt><dd>{{ integrations.itinvent.username }}</dd>
-        <dt>Пароль</dt><dd>{{ integrations.itinvent.password }}</dd>
-        <dt>Режим</dt><dd>{{ integrations.itinvent.mode }}</dd>
-      </dl>
-
-      <div class="itinvent-control-panel">
-        <div class="itinvent-control-heading">
-          <div>
-            <strong>Контроль оборудования</strong>
-            <span class="muted">Учитывается оборудование, которое совпало хотя бы с одним правилом.</span>
-            {% if not integrations.itinvent.control_persisted %}
-            <span class="muted">До первого сохранения используется прежнее правило «Выданы в пользование».</span>
-            {% endif %}
-          </div>
-        </div>
-
-        <div class="itinvent-control-rule">
-          <div class="itinvent-control-copy">
-            <strong>Тип оборудования</strong>
-            <span class="muted">Выбранные типы учитываются независимо от местоположения.</span>
-            <div class="itinvent-chip-list" id="itinvent-types-summary">
-              {% if integrations.itinvent.control_types %}
-                {% for item in integrations.itinvent.control_types[:4] %}<span class="itinvent-chip">{{ item }}</span>{% endfor %}
-                {% if integrations.itinvent.control_types_count > 4 %}<span class="itinvent-chip more">+{{ integrations.itinvent.control_types_count - 4 }}</span>{% endif %}
-              {% else %}
-                <span class="muted">Не выбрано</span>
-              {% endif %}
-            </div>
-          </div>
-          <button class="button secondary" type="button" data-itinvent-picker="types">Изменить</button>
-        </div>
-
-        <div class="itinvent-control-rule">
-          <div class="itinvent-control-copy">
-            <strong>Местоположение</strong>
-            <span class="muted">Оборудование в выбранных местоположениях учитывается независимо от типа.</span>
-            <div class="itinvent-chip-list" id="itinvent-locations-summary">
-              {% if integrations.itinvent.control_locations %}
-                {% for item in integrations.itinvent.control_locations[:4] %}<span class="itinvent-chip">{{ item }}</span>{% endfor %}
-                {% if integrations.itinvent.control_locations_count > 4 %}<span class="itinvent-chip more">+{{ integrations.itinvent.control_locations_count - 4 }}</span>{% endif %}
-              {% else %}
-                <span class="muted">Не выбрано</span>
-              {% endif %}
-            </div>
-          </div>
-          <button class="button secondary" type="button" data-itinvent-picker="locations">Изменить</button>
-        </div>
-      </div>
-
-      <p class="muted integration-note">
-        Приложение выполняет только SELECT. Для SQL-учетной записи рекомендуется
-        выдать только права чтения на БД ITInvent. Поиск имущества выполняется
-        по доменному логину OWNERS.OWNER_LOGIN. Правила «Тип оборудования» и
-        «Местоположение» объединяются условием ИЛИ.
-      </p>
-      <div class="integration-test-result" id="integration-result-itinvent"></div>
-
-      <dialog class="itinvent-picker-dialog" id="itinvent-picker-dialog">
-        <div class="itinvent-picker-head">
-          <div>
-            <h3 id="itinvent-picker-title">Выбор</h3>
-            <p class="muted" id="itinvent-picker-description"></p>
-          </div>
-          <button type="button" class="itinvent-dialog-close" id="itinvent-picker-close" aria-label="Закрыть">×</button>
-        </div>
-        <input type="search" id="itinvent-picker-search" placeholder="Поиск..." autocomplete="off">
-        <div class="itinvent-picker-tools">
-          <span class="muted" id="itinvent-picker-selected-count"></span>
-          <button type="button" class="itinvent-picker-clear" id="itinvent-picker-clear">Снять все</button>
-        </div>
-        <div class="itinvent-picker-list" id="itinvent-picker-list"></div>
-        <div class="itinvent-picker-error" id="itinvent-picker-error"></div>
-        <div class="itinvent-picker-actions">
-          <button type="button" class="button secondary" id="itinvent-picker-cancel">Отмена</button>
-          <button type="button" class="button" id="itinvent-picker-save">Сохранить</button>
-        </div>
-      </dialog>
-    </article>
-  </div>
-</section>
-
-<section class="settings-section">
-  <h2>Уведомления</h2>
-  <div class="settings-grid">
-    <a class="settings-card-link" href="/admin/mail-templates">
-      <span class="settings-card-title">Шаблоны писем</span>
-      <span class="settings-card-description">
-        Отправители и тексты писем с реквизитами почты и Active Directory.
-        Позже здесь появится стандартное письмо увольняющемуся работнику.
-      </span>
-      <span class="settings-card-action">Открыть →</span>
-    </a>
-  </div>
-</section>
-
-<section class="settings-section">
-  <h2>Безопасность</h2>
-  <div class="settings-grid">
-    <a class="settings-card-link" href="/admin/access">
-      <span class="settings-card-title">Доступ</span>
-      <span class="settings-card-description">
-        Доменные пользователи, роли операторов и администраторов.
-      </span>
-      <span class="settings-card-action">Открыть →</span>
-    </a>
   </div>
 </section>
 
