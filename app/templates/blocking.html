@@ -151,8 +151,9 @@
       <table class="blocking-equipment-table">
         <thead>
           <tr>
-            <th>Тип / название</th>
+            <th>Тип</th>
             <th>Инвентарный номер</th>
+            <th>Название</th>
             <th>Серийный номер</th>
             <th>Бухгалтерский инв. номер</th>
           </tr>
@@ -162,6 +163,7 @@
           <tr>
             <td>{{ item.equipment_type or '–' }}</td>
             <td>{{ item.inventory_number or '–' }}</td>
+            <td>{{ item.equipment_name or '–' }}</td>
             <td>{{ item.serial_number or '–' }}</td>
             <td>{{ item.accounting_inventory_number or '–' }}</td>
           </tr>

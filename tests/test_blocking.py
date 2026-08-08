@@ -106,6 +106,7 @@ class BlockingTests(unittest.TestCase):
             equipment=(
                 ITInventEquipment(
                     equipment_type="Ноутбук",
+                    equipment_name="Lenovo ThinkPad T14",
                     serial_number="SN-1",
                     inventory_number="12345",
                     accounting_inventory_number="BUH-42",

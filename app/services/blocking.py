@@ -266,6 +266,7 @@ class BlockingService:
                     [
                         {
                             "type": item.equipment_type,
+                            "name": item.equipment_name,
                             "serial_number": item.serial_number,
                             "inventory_number": item.inventory_number,
                             "accounting_inventory_number": (
