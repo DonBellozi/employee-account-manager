@@ -99,11 +99,12 @@ async def csrf_mismatch_handler(request: Request, _: CSRFMismatchError):
 async def security_headers(request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; style-src 'self'; script-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; frame-ancestors 'none'; form-action 'self'"
+        "img-src 'self' data:; frame-src 'self'; frame-ancestors 'self'; "
+        "form-action 'self'"
     )
     if not request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
