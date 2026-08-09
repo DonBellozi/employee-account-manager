@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -24,3 +24,20 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def ensure_compatibility_schema() -> None:
+    """Добавляет совместимые поля в существующую локальную БД без ее сброса."""
+    inspector = inspect(engine)
+    if "hr_source_records" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("hr_source_records")}
+    if "personal_email" in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE hr_source_records "
+                "ADD COLUMN personal_email VARCHAR(320) NOT NULL DEFAULT ''"
+            )
+        )

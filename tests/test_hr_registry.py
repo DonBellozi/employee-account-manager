@@ -69,6 +69,7 @@ class HRRegistryTests(unittest.TestCase):
                     "ivanov.ii@example.com",
                     "ivanov.ii",
                     (OneCPlacement("ИТ", "Специалист"),),
+                    personal_email="ivan.personal@example.net",
                 ),
                 OneCWorker(
                     "b" * 64,
@@ -92,6 +93,9 @@ class HRRegistryTests(unittest.TestCase):
             (2, 1, 1),
         )
         self.assertEqual(len(service.list_rows(status="issues")), 1)
+        all_rows = service.list_rows(query="ivan.personal@example.net")
+        self.assertEqual(len(all_rows), 1)
+        self.assertEqual(all_rows[0]["personal_email"], "ivan.personal@example.net")
 
 
 if __name__ == "__main__":

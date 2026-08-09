@@ -143,6 +143,41 @@ class BlockingOperation(Base):
     )
 
 
+class BlockingQueueItem(Base):
+    """Отдельное желаемое состояние AD/Zimbra для операции блокировки."""
+
+    __tablename__ = "blocking_queue_items"
+    __table_args__ = (
+        UniqueConstraint("operation_id", "system", name="uq_blocking_queue_operation_system"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    operation_id: Mapped[int] = mapped_column(Integer, index=True)
+    system: Mapped[str] = mapped_column(String(32), index=True)
+    target_identifier: Mapped[str] = mapped_column(String(320), default="")
+    stable_id: Mapped[str] = mapped_column(String(128), default="")
+    desired_state: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    last_result: Mapped[str] = mapped_column(String(64), default="")
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class ITInventControlSettings(Base):
     """Глобальные правила отбора контролируемого имущества IT Invent."""
 
@@ -204,6 +239,7 @@ class HRSourceRecord(Base):
     source_name: Mapped[str] = mapped_column(String(256), default="")
     fio: Mapped[str] = mapped_column(String(512), index=True)
     corporate_email: Mapped[str] = mapped_column(String(320), default="", index=True)
+    personal_email: Mapped[str] = mapped_column(String(320), default="", index=True)
     login: Mapped[str] = mapped_column(String(128), default="", index=True)
     placements_json: Mapped[str] = mapped_column(Text, default="[]")
     is_present: Mapped[bool] = mapped_column(Boolean, default=True, index=True)

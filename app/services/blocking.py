@@ -6,18 +6,24 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import (
     AuditLog,
     BlockingOperation,
+    BlockingQueueItem,
     EmailLoginMapping,
     HRSourceRecord,
     OperationStatus,
 )
 from app.services.ad import ADDirectoryUser, ActiveDirectoryService
+from app.services.blocking_queue import (
+    BlockingOperationView,
+    BlockingQueueService,
+    BlockingTargetView,
+)
 from app.services.hr_registry import HRRegistryService
 from app.services.itinvent import ITInventEmployeeAssets, ITInventService
 from app.services.itinvent_control import ITInventControlService
@@ -37,6 +43,9 @@ class BlockingCard:
     corporate_email: str
     placements: tuple[str, ...]
     effective_login: str
+    ad_target_guid: str
+    zimbra_target_id: str
+    zimbra_target_email: str
     ad_user: ADDirectoryUser | None
     ad_error: str
     zimbra: ZimbraAccountIdentity | None
@@ -46,6 +55,26 @@ class BlockingCard:
     itinvent_state: str
     itinvent_error: str
     itinvent_checked_at: str
+
+    @property
+    def ad_is_blocked(self) -> bool:
+        return self.ad_user is not None and not self.ad_user.is_enabled
+
+    @property
+    def zimbra_is_closed(self) -> bool:
+        return bool(
+            self.zimbra is not None
+            and self.zimbra.account_status.strip().lower() == "closed"
+        )
+
+    @property
+    def has_blocking_target(self) -> bool:
+        return bool(
+            self.effective_login
+            or self.ad_target_guid
+            or self.zimbra_target_email
+            or self.zimbra_target_id
+        )
 
 
 @dataclass(frozen=True)
@@ -65,11 +94,30 @@ class BlockingResult:
     corporate_email: str
     status: str
     status_label: str
-    ad_disabled: bool
-    zimbra_locked: bool
+    ad: BlockingTargetView | None
+    zimbra: BlockingTargetView | None
     equipment_count: int
     dry_run: bool
     error_message: str
+
+    @property
+    def ad_disabled(self) -> bool:
+        return bool(
+            self.ad is not None
+            and self.ad.status in {"completed", "already_completed"}
+        )
+
+    @property
+    def zimbra_closed(self) -> bool:
+        return bool(
+            self.zimbra is not None
+            and self.zimbra.status in {"completed", "already_completed"}
+        )
+
+    @property
+    def zimbra_locked(self) -> bool:
+        # Совместимость со старым шаблоном/кодом. Целевое состояние теперь closed.
+        return self.zimbra_closed
 
 
 class BlockingService:
@@ -231,21 +279,36 @@ class BlockingService:
         ad_error = ""
         zimbra_error = ""
 
+        zimbra_target_id = (
+            mapping.zimbra_id.strip() if mapping is not None else ""
+        )
+        zimbra_target_email = (
+            mapping.zimbra_email.strip().lower()
+            if mapping is not None and mapping.zimbra_email.strip()
+            else record.corporate_email.strip().lower()
+        )
+
         zimbra_service = ZimbraService(self.settings)
-        if record.corporate_email.strip() and self.settings.zimbra_check_enabled:
+        if zimbra_target_email and self.settings.zimbra_check_enabled:
             try:
-                if mapping is not None and mapping.zimbra_id.strip():
+                if zimbra_target_id:
                     z_identity = zimbra_service.accounts_by_ids(
-                        [mapping.zimbra_id]
-                    ).get(mapping.zimbra_id)
+                        [zimbra_target_id]
+                    ).get(zimbra_target_id)
                 if z_identity is None:
                     z_identity = zimbra_service.account_by_address(
-                        record.corporate_email
+                        zimbra_target_email
                     )
+                if z_identity is not None:
+                    zimbra_target_id = z_identity.zimbra_id or zimbra_target_id
+                    zimbra_target_email = z_identity.primary_email
             except Exception as exc:
                 zimbra_error = str(exc)
 
         candidate_login = ""
+        ad_target_guid = (
+            mapping.ad_object_guid.strip() if mapping is not None else ""
+        )
         if mapping is not None and mapping.ad_login.strip():
             candidate_login = mapping.ad_login.strip().lower()
         elif z_identity is not None:
@@ -256,21 +319,17 @@ class BlockingService:
         if self.settings.ad_check_enabled:
             try:
                 ad_service = ActiveDirectoryService(self.settings)
-                if mapping is not None and mapping.ad_object_guid.strip():
-                    ad_user = ad_service.get_user_by_object_guid(
-                        mapping.ad_object_guid
-                    )
+                if ad_target_guid:
+                    ad_user = ad_service.get_user_by_object_guid(ad_target_guid)
                 if ad_user is None and candidate_login:
                     ad_user = ad_service.get_user(candidate_login)
+                if ad_user is not None:
+                    candidate_login = ad_user.username
+                    ad_target_guid = ad_user.object_guid or ad_target_guid
             except Exception as exc:
                 ad_error = str(exc)
 
-        effective_login = (
-            ad_user.username
-            if ad_user is not None
-            else candidate_login
-        )
-
+        effective_login = ad_user.username if ad_user is not None else candidate_login
         itinvent_result = self._itinvent_lookup(effective_login)
 
         return BlockingCard(
@@ -281,6 +340,9 @@ class BlockingService:
             corporate_email=record.corporate_email,
             placements=self._placements(record),
             effective_login=effective_login,
+            ad_target_guid=ad_target_guid,
+            zimbra_target_id=zimbra_target_id,
+            zimbra_target_email=zimbra_target_email,
             ad_user=ad_user,
             ad_error=ad_error,
             zimbra=z_identity,
@@ -291,6 +353,81 @@ class BlockingService:
             itinvent_error=itinvent_result.error,
             itinvent_checked_at=itinvent_result.checked_at,
         )
+
+    @staticmethod
+    def _equipment_snapshot(card: BlockingCard) -> tuple[list, str]:
+        equipment = list(card.itinvent.equipment) if card.itinvent is not None else []
+        payload = json.dumps(
+            [
+                {
+                    "type": item.equipment_type,
+                    "name": item.equipment_name,
+                    "serial_number": item.serial_number,
+                    "inventory_number": item.inventory_number,
+                    "accounting_inventory_number": item.accounting_inventory_number,
+                }
+                for item in equipment
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return equipment, payload
+
+    def _result_from_view(
+        self,
+        operation: BlockingOperation,
+        view: BlockingOperationView,
+    ) -> BlockingResult:
+        return BlockingResult(
+            operation_id=operation.id,
+            fio=operation.full_name,
+            login=operation.login,
+            corporate_email=operation.corporate_email,
+            status=view.status,
+            status_label=view.status_label,
+            ad=view.ad,
+            zimbra=view.zimbra,
+            equipment_count=operation.equipment_count,
+            dry_run=operation.dry_run,
+            error_message=view.error_message,
+        )
+
+    def _open_operation_for_worker(self, worker_key: str) -> BlockingOperation | None:
+        return self.db.scalar(
+            select(BlockingOperation)
+            .join(
+                BlockingQueueItem,
+                BlockingQueueItem.operation_id == BlockingOperation.id,
+            )
+            .where(
+                BlockingOperation.worker_key == worker_key,
+                BlockingQueueItem.status.in_(["pending", "intervention"]),
+            )
+            .order_by(desc(BlockingOperation.created_at))
+            .limit(1)
+        )
+
+    def operation_result(self, operation_id: int) -> BlockingResult:
+        operation = self.db.get(BlockingOperation, operation_id)
+        if operation is None:
+            raise LookupError("Операция блокировки не найдена")
+        view = BlockingQueueService(self.settings, self.db).view(operation_id)
+        return self._result_from_view(operation, view)
+
+    def latest_result_for_record(self, record_id: int) -> BlockingResult | None:
+        operation = self.db.scalar(
+            select(BlockingOperation)
+            .join(
+                BlockingQueueItem,
+                BlockingQueueItem.operation_id == BlockingOperation.id,
+            )
+            .where(BlockingOperation.source_record_id == record_id)
+            .order_by(desc(BlockingOperation.created_at))
+            .limit(1)
+        )
+        if operation is None:
+            return None
+        return self.operation_result(operation.id)
 
     def block(self, record_id: int, operator: str) -> BlockingResult:
         first = self.card(record_id)
@@ -303,12 +440,20 @@ class BlockingService:
             )
 
         try:
+            existing = self._open_operation_for_worker(first.worker_key)
+            if existing is not None:
+                view = BlockingQueueService(self.settings, self.db).process_operation(
+                    existing.id,
+                    force=True,
+                )
+                self.db.refresh(existing)
+                return self._result_from_view(existing, view)
+
+            # Повторно читаем внешние системы и IT Invent непосредственно перед
+            # созданием задания. Если сервер недоступен, известные стабильные
+            # идентификаторы все равно попадут в очередь и будут обработаны позже.
             card = self.card(record_id)
-            equipment = (
-                list(card.itinvent.equipment)
-                if card.itinvent is not None
-                else []
-            )
+            equipment, equipment_snapshot = self._equipment_snapshot(card)
             operation = BlockingOperation(
                 worker_key=card.worker_key,
                 source_id=card.source_id,
@@ -319,134 +464,83 @@ class BlockingService:
                 corporate_email=card.corporate_email,
                 status=OperationStatus.RUNNING,
                 dry_run=self.settings.dry_run,
-                itinvent_checked=(
-                    card.itinvent_state
-                    in {"found", "owner_not_found"}
-                ),
+                itinvent_checked=card.itinvent_state in {"found", "owner_not_found"},
                 itinvent_owner_name=(
-                    card.itinvent.owner_display_name
-                    if card.itinvent is not None
-                    else ""
+                    card.itinvent.owner_display_name if card.itinvent is not None else ""
                 ),
                 equipment_count=len(equipment),
-                equipment_snapshot_json=json.dumps(
-                    [
-                        {
-                            "type": item.equipment_type,
-                            "name": item.equipment_name,
-                            "serial_number": item.serial_number,
-                            "inventory_number": item.inventory_number,
-                            "accounting_inventory_number": (
-                                item.accounting_inventory_number
-                            ),
-                        }
-                        for item in equipment
-                    ],
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
+                equipment_snapshot_json=equipment_snapshot,
             )
             self.db.add(operation)
-            self.db.commit()
-            self.db.refresh(operation)
+            self.db.flush()
 
-            errors: list[str] = []
-            completed_actions = 0
-
-            if card.ad_user is None:
-                errors.append(
-                    "AD: учетная запись не найдена"
-                    + (f" ({card.ad_error})" if card.ad_error else "")
-                )
-            else:
-                try:
-                    ActiveDirectoryService(self.settings).disable_user(
-                        card.ad_user.username
-                    )
-                    operation.ad_disabled = True
-                    completed_actions += 1
-                except Exception as exc:
-                    errors.append(f"AD: {exc}")
-
-            if card.zimbra is None:
-                errors.append(
-                    "Zimbra: учетная запись не найдена"
-                    + (
-                        f" ({card.zimbra_error})"
-                        if card.zimbra_error
-                        else ""
-                    )
-                )
-            else:
-                try:
-                    ZimbraService(self.settings).lock_account(
-                        card.zimbra.primary_email
-                    )
-                    operation.zimbra_locked = True
-                    completed_actions += 1
-                except Exception as exc:
-                    errors.append(f"Zimbra: {exc}")
-
-            if completed_actions == 0:
-                operation.status = OperationStatus.FAILED
-            elif errors:
-                operation.status = OperationStatus.PARTIAL
-            else:
-                operation.status = OperationStatus.SUCCESS
-
-            operation.error_message = "\n".join(errors)[:4000]
-            operation.completed_at = utcnow()
-
-            audit_result = (
-                "success"
-                if operation.status == OperationStatus.SUCCESS
-                else "partial"
-                if operation.status == OperationStatus.PARTIAL
-                else "failed"
+            self.db.add_all(
+                [
+                    BlockingQueueItem(
+                        operation_id=operation.id,
+                        system="ad",
+                        target_identifier=card.effective_login,
+                        stable_id=card.ad_target_guid,
+                        desired_state="disabled",
+                        status="pending",
+                        next_attempt_at=utcnow(),
+                    ),
+                    BlockingQueueItem(
+                        operation_id=operation.id,
+                        system="zimbra",
+                        target_identifier=(
+                            card.zimbra.primary_email
+                            if card.zimbra is not None
+                            else card.zimbra_target_email
+                        ),
+                        stable_id=(
+                            card.zimbra.zimbra_id
+                            if card.zimbra is not None
+                            else card.zimbra_target_id
+                        ),
+                        desired_state="closed",
+                        status="pending",
+                        next_attempt_at=utcnow(),
+                    ),
+                ]
             )
             self.db.add(
                 AuditLog(
                     actor=operator,
-                    action="block_accounts",
+                    action="block_accounts_requested",
                     target=card.effective_login or card.corporate_email,
-                    result=audit_result,
+                    result="accepted",
                     details=(
                         f"worker_key={card.worker_key}; "
-                        f"AD={operation.ad_disabled}; "
-                        f"Zimbra={operation.zimbra_locked}; "
-                        f"ITInvent={operation.equipment_count}; "
-                        f"dry_run={operation.dry_run}"
+                        f"AD={card.effective_login or card.ad_target_guid}; "
+                        f"Zimbra={card.zimbra_target_email or card.zimbra_target_id}; "
+                        f"ITInvent={len(equipment)}; dry_run={operation.dry_run}"
                     )[:1000],
                 )
             )
             self.db.commit()
+            self.db.refresh(operation)
 
-            status_key = operation.status.value
-            labels = {
-                "success": "Успешно",
-                "partial": "Частично выполнено",
-                "failed": "Ошибка",
-            }
-            if operation.dry_run:
-                status_label = "DRY RUN"
-            else:
-                status_label = labels.get(status_key, status_key)
-
-            return BlockingResult(
-                operation_id=operation.id,
-                fio=operation.full_name,
-                login=operation.login,
-                corporate_email=operation.corporate_email,
-                status=status_key,
-                status_label=status_label,
-                ad_disabled=operation.ad_disabled,
-                zimbra_locked=operation.zimbra_locked,
-                equipment_count=operation.equipment_count,
-                dry_run=operation.dry_run,
-                error_message=operation.error_message,
+            # Первая попытка всегда выполняется немедленно. Недоступные серверы
+            # переводятся в pending и дальше обслуживаются фоновым worker'ом.
+            view = BlockingQueueService(self.settings, self.db).process_operation(
+                operation.id,
+                force=True,
             )
+            self.db.refresh(operation)
+            return self._result_from_view(operation, view)
         except Exception:
             self.db.rollback()
             raise
         finally:
             self._release_lock(lock_key, lock)
+
+    def retry_operation(self, operation_id: int) -> BlockingResult:
+        view = BlockingQueueService(self.settings, self.db).process_operation(
+            operation_id,
+            force=True,
+        )
+        operation = self.db.get(BlockingOperation, operation_id)
+        if operation is None:
+            raise LookupError("Операция блокировки не найдена")
+        return self._result_from_view(operation, view)

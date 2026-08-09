@@ -8,9 +8,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import get_settings
-from app.db import Base, SessionLocal, engine
+from app.db import Base, SessionLocal, engine, ensure_compatibility_schema
 from app.routers import admin, auth, employees, settings_ui
 from app.security import CSRFMismatchError, ensure_bootstrap_admin
+from app.services.blocking_worker import BlockingQueueWorker
 from app.services.onec_scheduler import OneCAutoImportScheduler
 
 settings = get_settings()
@@ -21,14 +22,18 @@ async def lifespan(_: FastAPI):
     if not settings.dry_run and settings.app_secret_key.startswith("change-me"):
         raise RuntimeError("Замените APP_SECRET_KEY перед рабочим запуском")
     Base.metadata.create_all(bind=engine)
+    ensure_compatibility_schema()
     with SessionLocal() as db:
         ensure_bootstrap_admin(db, settings)
 
     onec_scheduler = OneCAutoImportScheduler(settings, SessionLocal)
+    blocking_worker = BlockingQueueWorker(settings, SessionLocal)
     onec_scheduler.start()
+    blocking_worker.start()
     try:
         yield
     finally:
+        blocking_worker.stop()
         onec_scheduler.stop()
 
 

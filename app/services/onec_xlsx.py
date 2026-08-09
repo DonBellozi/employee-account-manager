@@ -17,6 +17,7 @@ DEFAULT_COLUMNS = {
     "snils": "СНИЛС",
     "fio": "Сотрудник.Физическое лицо.ФИО",
     "email": "Физическое лицо.Адрес электронной почты",
+    "personal_email": "Физическое лицо.Email",
     "position": "Должность",
 }
 
@@ -34,6 +35,7 @@ class OneCWorker:
     email: str | None
     login: str | None
     placements: tuple[OneCPlacement, ...]
+    personal_email: str | None = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +237,7 @@ def parse_onec_xlsx(
         snils_col = mapping["snils"]
         fio_col = mapping["fio"]
         email_col = mapping.get("email")
+        personal_email_col = mapping.get("personal_email")
         position_col = mapping.get("position")
 
         department_hierarchy: dict[int, str] = {}
@@ -279,6 +282,11 @@ def parse_onec_xlsx(
                 else None
             )
             login = email.split("@", 1)[0] if email else None
+            personal_email = (
+                normalize_email(values[personal_email_col - 1])
+                if personal_email_col
+                else None
+            )
 
             position = (
                 normalize_text(values[position_col - 1])
@@ -302,6 +310,7 @@ def parse_onec_xlsx(
                         existing.placements,
                         placement,
                     ),
+                    personal_email=personal_email or existing.personal_email,
                 )
             else:
                 merged[key] = OneCWorker(
@@ -310,6 +319,7 @@ def parse_onec_xlsx(
                     email=email,
                     login=login,
                     placements=(placement,),
+                    personal_email=personal_email,
                 )
 
         detected_columns = {
@@ -333,6 +343,7 @@ def worker_snapshot(worker: OneCWorker) -> dict:
         "worker_key": worker.worker_key,
         "fio": worker.fio,
         "email": worker.email,
+        "personal_email": worker.personal_email,
         "login": worker.login,
         "placements": [
             asdict(placement)

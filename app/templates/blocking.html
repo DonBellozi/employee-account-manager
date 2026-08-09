@@ -12,15 +12,54 @@
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
 {% if result %}
-<div class="alert {{ 'success' if result.status == 'success' else 'warning' if result.status == 'partial' else 'error' }}">
-  <strong>{{ result.status_label }}.</strong>
+<section class="card blocking-operation-card">
+  <div class="blocking-results-heading">
+    <div>
+      <span class="muted">Операция №{{ result.operation_id }}</span>
+      <h3>Блокировка учетных записей</h3>
+    </div>
+    <span class="status {{ 'success' if result.status == 'success' else 'partial' if result.status == 'partial' else 'failed' if result.status == 'failed' else 'running' }}">{{ result.status_label }}</span>
+  </div>
+
   {% if result.dry_run %}
-  Внешние системы не изменялись: приложение работает в режиме DRY RUN.
-  {% else %}
-  Блокировка для {{ result.fio }} завершена.
+  <div class="alert warning">DRY RUN: внешние системы фактически не изменялись.</div>
   {% endif %}
-  {% if result.error_message %}<div class="blocking-result-error">{{ result.error_message }}</div>{% endif %}
-</div>
+
+  <div class="blocking-operation-grid">
+    <div class="blocking-operation-target">
+      <strong>Active Directory</strong>
+      {% if result.ad %}
+        <span class="blocking-target-state {{ result.ad.status }}">{{ result.ad.status_label }}</span>
+        {% if result.ad.target_identifier %}<code>{{ result.ad.target_identifier }}</code>{% endif %}
+        {% if result.ad.last_error %}<small>{{ result.ad.last_error }}</small>{% endif %}
+        {% if result.ad.status == 'pending' and result.ad.next_attempt_label %}<small>Следующая попытка: {{ result.ad.next_attempt_label }}</small>{% endif %}
+      {% else %}
+        <span class="blocking-target-state intervention">Нет задания</span>
+      {% endif %}
+    </div>
+    <div class="blocking-operation-target">
+      <strong>Zimbra</strong>
+      {% if result.zimbra %}
+        <span class="blocking-target-state {{ result.zimbra.status }}">{{ result.zimbra.status_label }}</span>
+        {% if result.zimbra.target_identifier %}<code>{{ result.zimbra.target_identifier }}</code>{% endif %}
+        {% if result.zimbra.last_error %}<small>{{ result.zimbra.last_error }}</small>{% endif %}
+        {% if result.zimbra.status == 'pending' and result.zimbra.next_attempt_label %}<small>Следующая попытка: {{ result.zimbra.next_attempt_label }}</small>{% endif %}
+      {% else %}
+        <span class="blocking-target-state intervention">Нет задания</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if result.status in ['running', 'partial', 'failed'] and not result.dry_run %}
+  <div class="blocking-operation-actions">
+    <form method="post" action="/blocking/operations/{{ result.operation_id }}/retry">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="button secondary">↻ Повторить сейчас</button>
+    </form>
+    <span class="muted">Временные ошибки повторяются автоматически. Кнопка запускает внеочередную проверку.</span>
+  </div>
+  {% endif %}
+</section>
 {% endif %}
 
 {% if not card %}
@@ -101,8 +140,12 @@
         <dt>Статус</dt><dd><span class="status {{ 'success' if card.ad_user.is_enabled else 'failed' }}">{{ 'Включена' if card.ad_user.is_enabled else 'Заблокирована' }}</span></dd>
       </dl>
     {% else %}
-      <div class="alert warning">Учетная запись AD не найдена{% if card.ad_error %}: {{ card.ad_error }}{% endif %}</div>
-      {% if card.effective_login %}<p>Предполагаемый логин: <code>{{ card.effective_login }}</code></p>{% endif %}
+      {% if card.ad_error %}
+        <div class="alert warning">Состояние Active Directory не удалось проверить: {{ card.ad_error }}</div>
+      {% else %}
+        <div class="alert warning">Учетная запись AD не найдена.</div>
+      {% endif %}
+      {% if card.effective_login %}<p>Целевая учетная запись: <code>{{ card.effective_login }}</code></p>{% endif %}
     {% endif %}
   </section>
 
@@ -115,7 +158,12 @@
         <dt>Статус</dt><dd>{{ card.zimbra_status_label }}</dd>
       </dl>
     {% else %}
-      <div class="alert warning">Учетная запись Zimbra не найдена{% if card.zimbra_error %}: {{ card.zimbra_error }}{% endif %}</div>
+      {% if card.zimbra_error %}
+        <div class="alert warning">Состояние Zimbra не удалось проверить: {{ card.zimbra_error }}</div>
+      {% else %}
+        <div class="alert warning">Учетная запись Zimbra не найдена.</div>
+      {% endif %}
+      {% if card.zimbra_target_email %}<p>Целевая учетная запись: <code>{{ card.zimbra_target_email }}</code></p>{% endif %}
     {% endif %}
   </section>
 </div>
@@ -212,17 +260,61 @@
 <section class="card blocking-action-card">
   <h3>Блокировка учетных записей</h3>
   {% if dry_run %}
-  <div class="alert warning">DRY RUN включен: нажатие проверит сценарий и запишет операцию в журнал, но AD и Zimbra фактически не изменятся.</div>
+  <div class="alert warning">DRY RUN включен: операция будет записана в журнал, но AD и Zimbra фактически не изменятся.</div>
   {% endif %}
-  {% if card.ad_user or card.zimbra %}
-  <form method="post" action="/blocking/{{ card.record_id }}" onsubmit="return submitBlockingOnce(this);">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button type="submit" class="blocking-danger-button" data-blocking-submit>Заблокировать</button>
-  </form>
+
+  {% if card.ad_is_blocked and card.zimbra_is_closed %}
+    <div class="alert success">AD уже заблокирована, Zimbra уже имеет статус «Закрыта». Дополнительных действий не требуется.</div>
+  {% elif card.has_blocking_target %}
+    <button type="button" class="blocking-danger-button" data-blocking-open-confirm>Заблокировать</button>
+    <form method="post" action="/blocking/{{ card.record_id }}" id="blocking-submit-form" onsubmit="return submitBlockingOnce(this);">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+    </form>
   {% else %}
-  <div class="alert error">Ни одна учетная запись не найдена. Выполнять блокировку нечего.</div>
+    <div class="alert error">Не удалось определить ни одну целевую учетную запись для блокировки.</div>
   {% endif %}
 </section>
+
+<dialog class="blocking-confirm-dialog" id="blocking-confirm-dialog">
+  <div class="blocking-confirm-head">
+    <div>
+      <span class="muted">Подтверждение операции</span>
+      <h3>Заблокировать учетные записи?</h3>
+    </div>
+    <button type="button" class="blocking-dialog-close" data-blocking-close aria-label="Закрыть">×</button>
+  </div>
+  <p><strong>{{ card.fio }}</strong></p>
+  <div class="blocking-confirm-grid">
+    <div>
+      <span class="muted">Active Directory</span>
+      <strong>{{ card.effective_login or 'Не определена' }}</strong>
+      <small>{% if card.ad_user %}{{ 'Включена' if card.ad_user.is_enabled else 'Уже заблокирована' }}{% elif card.ad_error %}Состояние не проверено{% else %}Не найдена{% endif %}</small>
+    </div>
+    <div>
+      <span class="muted">Zimbra</span>
+      <strong>{{ card.zimbra_target_email or card.corporate_email or 'Не определена' }}</strong>
+      <small>{% if card.zimbra %}{{ card.zimbra_status_label }}{% elif card.zimbra_error %}Состояние не проверено{% else %}Не найдена{% endif %}</small>
+    </div>
+  </div>
+  <div class="blocking-confirm-equipment" id="blocking-confirm-equipment">
+    {% if card.itinvent_state == 'found' and card.itinvent %}
+      {% if card.itinvent.equipment %}
+      <strong>IT Invent: найдено оборудования – {{ card.itinvent.equipment|length }}</strong>
+      {% else %}
+      <strong>IT Invent: контролируемое оборудование не найдено</strong>
+      {% endif %}
+    {% elif card.itinvent_state == 'error' %}
+      <strong>IT Invent: сведения не удалось обновить</strong>
+    {% else %}
+      <strong>IT Invent: сведения не получены</strong>
+    {% endif %}
+    <span>Наличие оборудования в базе не запрещает блокировку учетных записей.</span>
+  </div>
+  <div class="blocking-confirm-actions">
+    <button type="button" class="button secondary" data-blocking-close>Отмена</button>
+    <button type="submit" form="blocking-submit-form" class="blocking-danger-button" data-blocking-submit>Заблокировать</button>
+  </div>
+</dialog>
 {% endif %}
 
 <script>
@@ -237,9 +329,8 @@ function escapeBlockingHtml(value) {
 
 function submitBlockingOnce(form) {
   if (form.dataset.submitting === 'true') return false;
-  if (!window.confirm('Заблокировать учетные записи выбранного работника?')) return false;
   form.dataset.submitting = 'true';
-  const button = form.querySelector('[data-blocking-submit]');
+  const button = document.querySelector('[data-blocking-submit]');
   if (button) {
     button.disabled = true;
     button.textContent = 'Блокировка...';
@@ -254,7 +345,9 @@ function submitBlockingOnce(form) {
   const checkedAt = document.getElementById('blocking-itinvent-checked-at');
   const refresh = document.getElementById('blocking-itinvent-refresh');
   const refreshError = document.getElementById('blocking-itinvent-refresh-error');
-  const blockButton = document.querySelector('[data-blocking-submit]');
+  const blockButton = document.querySelector('[data-blocking-open-confirm]');
+  const confirmDialog = document.getElementById('blocking-confirm-dialog');
+  const confirmEquipment = document.getElementById('blocking-confirm-equipment');
   const csrf = {{ csrf|tojson }};
 
   function equipmentTable(items) {
@@ -330,10 +423,11 @@ function submitBlockingOnce(form) {
     }
   }
 
-  refresh?.addEventListener('click', async () => {
+  async function refreshItinventData({quiet = false} = {}) {
+    if (!refresh) return null;
     const originalText = refresh.textContent;
     refresh.disabled = true;
-    refresh.textContent = '↻ Обновляю...';
+    if (!quiet) refresh.textContent = '↻ Обновляю...';
     if (refreshError) {
       refreshError.hidden = true;
       refreshError.textContent = '';
@@ -350,6 +444,19 @@ function submitBlockingOnce(form) {
         throw new Error(payload.error || 'Не удалось обновить сведения IT Invent');
       }
       renderItinvent(payload);
+      if (confirmEquipment) {
+        const count = Number(payload.equipment_count || 0);
+        let title = 'IT Invent: сведения не получены';
+        if (payload.state === 'found') {
+          title = count
+            ? `IT Invent: найдено оборудования – ${count}`
+            : 'IT Invent: контролируемое оборудование не найдено';
+        } else if (payload.state === 'owner_not_found') {
+          title = 'IT Invent: сотрудник не найден';
+        }
+        confirmEquipment.innerHTML = `<strong>${escapeBlockingHtml(title)}</strong><span>Наличие оборудования в базе не запрещает блокировку учетных записей.</span>`;
+      }
+      return payload;
     } catch (error) {
       if (refreshError) {
         refreshError.hidden = false;
@@ -359,10 +466,34 @@ function submitBlockingOnce(form) {
           ? `Не удалось обновить сведения IT Invent. Показаны данные предыдущей проверки (${previous.replace('Проверено: ', '')}). ${error.message || error}`
           : `Не удалось обновить сведения IT Invent. Текущие данные на экране сохранены. ${error.message || error}`;
       }
+      if (confirmEquipment) {
+        confirmEquipment.innerHTML = '<strong>IT Invent: обновить сведения не удалось</strong><span>Показанные ранее данные сохранены. Наличие оборудования в базе не запрещает блокировку учетных записей.</span>';
+      }
+      return null;
     } finally {
       refresh.disabled = false;
       refresh.textContent = originalText;
     }
+  }
+
+  refresh?.addEventListener('click', () => refreshItinventData());
+
+  blockButton?.addEventListener('click', async () => {
+    blockButton.disabled = true;
+    const originalText = blockButton.textContent;
+    blockButton.textContent = 'Проверяю IT Invent...';
+    await refreshItinventData({quiet: true});
+    blockButton.disabled = false;
+    blockButton.textContent = originalText;
+    confirmDialog?.showModal();
+  });
+
+  document.querySelectorAll('[data-blocking-close]').forEach(button => {
+    button.addEventListener('click', () => confirmDialog?.close());
+  });
+
+  confirmDialog?.addEventListener('click', event => {
+    if (event.target === confirmDialog) confirmDialog.close();
   });
 
   blockButton?.addEventListener('mouseenter', () => {

@@ -66,6 +66,15 @@ class ZimbraSshAuthTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ZIMBRA_SSH_PASSWORD"):
             ZimbraService(settings)._read_ssh_password()
 
+    def test_close_account_sets_closed_status(self):
+        settings = self._settings(dry_run=False)
+        service = ZimbraService(settings)
+        with patch.object(service, "_run_zmprov_direct") as run:
+            service.close_account("User@Example.Local")
+        run.assert_called_once_with(
+            ["ma", "user@example.local", "zimbraAccountStatus", "closed"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

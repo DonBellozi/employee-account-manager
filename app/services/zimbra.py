@@ -881,13 +881,20 @@ class ZimbraService:
         if login:
             self._cache_remove(login)
 
-    def lock_account(self, email: str) -> None:
+    def close_account(self, email: str) -> None:
+        """Перевести учетную запись Zimbra в штатный статус closed / «Закрыта»."""
         normalized = str(email or "").strip().lower()
         if not normalized or "@" not in normalized:
             raise ValueError("Не передан адрес учетной записи Zimbra")
+        if self.settings.dry_run:
+            return
         self._run_zmprov_direct(
-            ["ma", normalized, "zimbraAccountStatus", "locked"]
+            ["ma", normalized, "zimbraAccountStatus", "closed"]
         )
+
+    def lock_account(self, email: str) -> None:
+        """Совместимость со старым вызовом: блокировка теперь означает «Закрыта»."""
+        self.close_account(email)
 
     def set_dismissal_note(self, email: str, dismissal_date: date) -> None:
         self._run_zmprov(

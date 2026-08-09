@@ -141,6 +141,7 @@ class HRRegistryService:
                     source_name=source_id,
                     fio=worker.fio,
                     corporate_email=worker.email or "",
+                    personal_email=worker.personal_email or "",
                     login=worker.login or "",
                     placements_json=placements_json,
                     is_present=True,
@@ -154,6 +155,7 @@ class HRRegistryService:
                 record.source_name = source_id
                 record.fio = worker.fio
                 record.corporate_email = worker.email or ""
+                record.personal_email = worker.personal_email or ""
                 record.login = worker.login or ""
                 record.placements_json = placements_json
                 record.is_present = True
@@ -515,6 +517,7 @@ class HRRegistryService:
                     record.login,
                     effective_login,
                     record.corporate_email,
+                    record.personal_email,
                 ]
             ).casefold():
                 continue
@@ -600,6 +603,7 @@ class HRRegistryService:
                     "fio": record.fio,
                     "source_name": record.source_name,
                     "email": record.corporate_email,
+                    "personal_email": record.personal_email,
                     # В реестре показываем фактический логин AD из явного
                     # сопоставления. Логин, вычисленный из e-mail 1С,
                     # остается только исходным кандидатом.

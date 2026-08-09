@@ -164,9 +164,9 @@ class BlockingTests(unittest.TestCase):
 
 
     @patch.object(BlockingService, "card")
-    @patch("app.services.blocking.ZimbraService")
-    @patch("app.services.blocking.ActiveDirectoryService")
-    def test_block_disables_ad_and_locks_zimbra(
+    @patch("app.services.blocking_queue.ZimbraService")
+    @patch("app.services.blocking_queue.ActiveDirectoryService")
+    def test_block_disables_ad_and_closes_zimbra(
         self,
         ad_cls,
         zimbra_cls,
@@ -202,6 +202,9 @@ class BlockingTests(unittest.TestCase):
             corporate_email="mironova.as@org.ru",
             placements=(),
             effective_login="ahmetova.as",
+            ad_target_guid="11111111-1111-1111-1111-111111111111",
+            zimbra_target_id="zimbra-1",
+            zimbra_target_email="ahmetova.as@org.ru",
             ad_user=ad_user,
             ad_error="",
             zimbra=zimbra,
@@ -213,13 +216,16 @@ class BlockingTests(unittest.TestCase):
             itinvent_checked_at="",
         )
 
+        ad_cls.return_value.get_user_by_object_guid.return_value = ad_user
+        zimbra_cls.return_value.accounts_by_ids.return_value = {"zimbra-1": zimbra}
+
         result = BlockingService(settings, self.db).block(
             self.record.id,
             "operator",
         )
 
         ad_cls.return_value.disable_user.assert_called_once_with("ahmetova.as")
-        zimbra_cls.return_value.lock_account.assert_called_once_with(
+        zimbra_cls.return_value.close_account.assert_called_once_with(
             "ahmetova.as@org.ru"
         )
         self.assertEqual(result.status, "success")

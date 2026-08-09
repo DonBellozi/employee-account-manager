@@ -17,6 +17,7 @@ from app.models import (
     ADProvisioningOperation,
     AuditLog,
     BlockingOperation,
+    BlockingQueueItem,
     DismissalSchedule,
     ProvisioningOperation,
 )
@@ -164,18 +165,46 @@ def _ad_provisioning_journal_item(
 
 
 
-def _blocking_journal_item(operation: BlockingOperation) -> dict[str, object]:
+def _blocking_journal_item(
+    operation: BlockingOperation,
+    queue_items: list[BlockingQueueItem] | tuple[BlockingQueueItem, ...] = (),
+) -> dict[str, object]:
     status_key = operation.status.value
     status_labels = {
-        "running": "Выполняется",
+        "running": "Ожидает завершения",
         "partial": "Частично выполнено",
-        "success": "Успешно",
-        "failed": "Ошибка",
+        "success": "Выполнено",
+        "failed": "Требует вмешательства",
     }
     status_label = "DRY RUN" if operation.dry_run else status_labels.get(
         status_key,
         status_key,
     )
+    queue_by_system = {item.system: item for item in queue_items}
+    ad_item = queue_by_system.get("ad")
+    zimbra_item = queue_by_system.get("zimbra")
+
+    def queue_result(item: BlockingQueueItem | None, system: str) -> str:
+        if item is None:
+            return "Нет данных"
+        labels = {
+            "ad": {
+                "pending": "Ожидает блокировки",
+                "completed": "Заблокирована системой",
+                "already_completed": "На момент выполнения уже была заблокирована",
+                "intervention": "Требует вмешательства",
+                "dry_run": "DRY RUN",
+            },
+            "zimbra": {
+                "pending": "Ожидает закрытия",
+                "completed": "Закрыта системой",
+                "already_completed": "На момент выполнения уже была закрыта",
+                "intervention": "Требует вмешательства",
+                "dry_run": "DRY RUN",
+            },
+        }
+        return labels.get(system, {}).get(item.status, item.status)
+
     return {
         "kind": "blocking",
         "record_id": operation.id,
@@ -193,8 +222,8 @@ def _blocking_journal_item(operation: BlockingOperation) -> dict[str, object]:
             ("ФИО", operation.full_name),
             ("Логин AD", operation.login),
             ("Корпоративная почта", operation.corporate_email),
-            ("AD заблокирована", _yes_no(operation.ad_disabled)),
-            ("Zimbra заблокирована", _yes_no(operation.zimbra_locked)),
+            ("Active Directory", queue_result(ad_item, "ad")),
+            ("Zimbra", queue_result(zimbra_item, "zimbra")),
             ("IT Invent проверен", _yes_no(operation.itinvent_checked)),
             ("Имущества в IT Invent", str(operation.equipment_count)),
             ("Режим DRY RUN", _yes_no(operation.dry_run)),
@@ -275,6 +304,21 @@ def dashboard(
         .order_by(desc(BlockingOperation.created_at))
         .limit(50)
     ).all()
+    blocking_operation_ids = [item.id for item in blocking_operations]
+    blocking_queue_items = (
+        db.scalars(
+            select(BlockingQueueItem).where(
+                BlockingQueueItem.operation_id.in_(blocking_operation_ids)
+            )
+        ).all()
+        if blocking_operation_ids
+        else []
+    )
+    blocking_queue_by_operation: dict[int, list[BlockingQueueItem]] = {}
+    for queue_item in blocking_queue_items:
+        blocking_queue_by_operation.setdefault(queue_item.operation_id, []).append(
+            queue_item
+        )
 
     journal_items = [
         *(_provisioning_journal_item(item) for item in provisioning_operations),
@@ -282,7 +326,13 @@ def dashboard(
             _ad_provisioning_journal_item(item)
             for item in ad_provisioning_operations
         ),
-        *(_blocking_journal_item(item) for item in blocking_operations),
+        *(
+            _blocking_journal_item(
+                item,
+                blocking_queue_by_operation.get(item.id, []),
+            )
+            for item in blocking_operations
+        ),
         *(_dismissal_journal_item(item) for item in dismissal_operations),
     ]
     journal_items.sort(key=lambda item: item["created_at"], reverse=True)
@@ -867,7 +917,9 @@ def blocking_card(
 ):
     get_current_user(request)
     try:
-        card = BlockingService(settings, db).card(record_id)
+        service = BlockingService(settings, db)
+        card = service.card(record_id)
+        latest_result = service.latest_result_for_record(record_id)
         return templates.TemplateResponse(
             request,
             "blocking.html",
@@ -876,7 +928,7 @@ def blocking_card(
                 query="",
                 rows=[],
                 card=card,
-                result=None,
+                result=latest_result,
                 error="",
                 dry_run=settings.dry_run,
             ),
@@ -1002,6 +1054,58 @@ def block_employee_accounts(
                 rows=[],
                 card=card,
                 result=None,
+                error=str(exc),
+                dry_run=settings.dry_run,
+            ),
+            status_code=400,
+        )
+
+
+@router.post("/blocking/operations/{operation_id}/retry")
+def retry_blocking_operation(
+    operation_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    get_current_user(request)
+    operation = db.get(BlockingOperation, operation_id)
+    if operation is None:
+        return RedirectResponse("/blocking", status_code=303)
+
+    service = BlockingService(settings, db)
+    try:
+        result = service.retry_operation(operation_id)
+        card = service.card(operation.source_record_id)
+        return templates.TemplateResponse(
+            request,
+            "blocking.html",
+            _context(
+                request,
+                query="",
+                rows=[],
+                card=card,
+                result=result,
+                error="",
+                dry_run=settings.dry_run,
+            ),
+        )
+    except Exception as exc:
+        try:
+            card = service.card(operation.source_record_id)
+        except Exception:
+            card = None
+        return templates.TemplateResponse(
+            request,
+            "blocking.html",
+            _context(
+                request,
+                query="",
+                rows=[],
+                card=card,
+                result=service.operation_result(operation_id),
                 error=str(exc),
                 dry_run=settings.dry_run,
             ),
