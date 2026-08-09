@@ -29,15 +29,47 @@ def get_db() -> Generator[Session, None, None]:
 def ensure_compatibility_schema() -> None:
     """Добавляет совместимые поля в существующую локальную БД без ее сброса."""
     inspector = inspect(engine)
-    if "hr_source_records" not in inspector.get_table_names():
-        return
-    columns = {column["name"] for column in inspector.get_columns("hr_source_records")}
-    if "personal_email" in columns:
-        return
+    tables = set(inspector.get_table_names())
+
     with engine.begin() as connection:
-        connection.execute(
-            text(
-                "ALTER TABLE hr_source_records "
-                "ADD COLUMN personal_email VARCHAR(320) NOT NULL DEFAULT ''"
-            )
-        )
+        if "hr_source_records" in tables:
+            columns = {
+                column["name"]
+                for column in inspector.get_columns("hr_source_records")
+            }
+            if "personal_email" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE hr_source_records "
+                        "ADD COLUMN personal_email VARCHAR(320) NOT NULL DEFAULT ''"
+                    )
+                )
+
+        if "onec_additional_sources" in tables:
+            columns = {
+                column["name"]
+                for column in inspector.get_columns("onec_additional_sources")
+            }
+            folder_added = "imap_folder" not in columns
+            if folder_added:
+                connection.execute(
+                    text(
+                        "ALTER TABLE onec_additional_sources "
+                        "ADD COLUMN imap_folder VARCHAR(512) NOT NULL DEFAULT 'INBOX'"
+                    )
+                )
+            if "is_primary" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE onec_additional_sources "
+                        "ADD COLUMN is_primary BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
+            if folder_added:
+                connection.execute(
+                    text(
+                        "UPDATE onec_additional_sources "
+                        "SET imap_folder = :folder"
+                    ),
+                    {"folder": settings.onec_imap_folder.strip() or "INBOX"},
+                )

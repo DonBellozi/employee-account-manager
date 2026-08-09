@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, timedelta
-from types import SimpleNamespace
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from app.services.onec_xlsx import OneCPlacement, OneCWorkbook, OneCWorker
 
 class FakeSettings:
     onec_source_domain = "company1.ru"
+    onec_imap_folder = "HR"
     onec_imap_from_contains = "robot1@"
     onec_attachment_filename = "main.xlsx"
     onec_data_dir = "/tmp/onec-tests"
@@ -50,9 +51,9 @@ class OneCSourcesTests(unittest.TestCase):
             source_id=None,
             name="Организация 2",
             mail_domain="company2.ru",
+            imap_folder="INBOX",
             sender_filter="robot2@",
             attachment_filename="second.xlsx",
-            has_corporate_email=False,
             enabled=True,
             operator="admin",
         )
@@ -79,22 +80,106 @@ class OneCSourcesTests(unittest.TestCase):
             potential_dismissal_columns=(),
         )
 
-    def test_source_without_corporate_email_is_allowed(self):
-        row = self.source()
-        self.assertFalse(row.has_corporate_email)
-        self.assertEqual(row.source_id, "company2.ru")
+    def test_primary_is_seeded_from_existing_settings(self):
+        primary = self.registry().ensure_primary()
+        self.assertTrue(primary.is_primary)
+        self.assertEqual(primary.mail_domain, "company1.ru")
+        self.assertEqual(primary.imap_folder, "HR")
+        self.assertEqual(primary.sender_filter, "robot1@")
+        self.assertEqual(primary.attachment_filename, "main.xlsx")
 
-    def test_primary_domain_cannot_be_added_again(self):
-        with self.assertRaisesRegex(ValueError, "основным источником"):
-            self.source(mail_domain="company1.ru")
+    def test_primary_web_save_updates_runtime_settings(self):
+        registry = self.registry()
+        primary = registry.ensure_primary()
+        registry.save(
+            source_id=primary.id,
+            name="Компания 1",
+            mail_domain="company1.ru",
+            imap_folder="Staff",
+            sender_filter="newrobot@",
+            attachment_filename="staff.xlsx",
+            enabled=True,
+            operator="admin",
+        )
+        self.assertEqual(self.settings.onec_imap_folder, "Staff")
+        self.assertEqual(self.settings.onec_imap_from_contains, "newrobot@")
+        self.assertEqual(self.settings.onec_source_domain, "company1.ru")
+        self.assertEqual(self.settings.onec_attachment_filename, "staff.xlsx")
 
-    def test_sender_filename_pair_is_unique(self):
-        self.source()
-        with self.assertRaisesRegex(ValueError, "отправителем"):
-            self.source(
-                mail_domain="company3.ru",
-                name="Организация 3",
+    def test_additional_source_has_same_four_source_settings(self):
+        row = self.source(imap_folder="Reports")
+        self.assertFalse(row.is_primary)
+        self.assertEqual(row.imap_folder, "Reports")
+        self.assertEqual(row.sender_filter, "robot2@")
+        self.assertEqual(row.mail_domain, "company2.ru")
+        self.assertEqual(row.attachment_filename, "second.xlsx")
+
+    def test_sender_can_be_empty_when_filename_identifies_source(self):
+        row = self.source(sender_filter="")
+        self.assertEqual(row.sender_filter, "")
+
+    def test_source_specific_folder_is_passed_to_imap(self):
+        source = self.source(imap_folder="Company2")
+        service = OneCAdditionalImportService(
+            self.settings,
+            self.db,
+            source,
+        )
+        with patch(
+            "app.services.onec_additional_import.OneCImapService"
+        ) as imap_cls:
+            service.find_latest()
+            imap_cls.return_value.find_latest_attachment.assert_called_once_with(
+                folder="Company2",
+                sender_filter="robot2@",
+                attachment_filename="second.xlsx",
             )
+
+    def test_missing_corporate_email_uses_standard_issue_state(self):
+        source = self.source()
+        service = OneCAdditionalImportService(
+            self.settings,
+            self.db,
+            source,
+        )
+        service._sync_registry(
+            workbook=self.workbook(self.worker()),
+            dismissal_dates={},
+        )
+        record = self.db.scalar(
+            select(HRSourceRecord).where(
+                HRSourceRecord.source_id == "company2.ru"
+            )
+        )
+        self.assertEqual(record.zimbra_status, "no_email")
+        self.assertEqual(record.ad_status, "no_login")
+        self.assertEqual(record.reconciliation_status, "issue")
+
+    def test_email_appearance_clears_temporary_no_email_state(self):
+        source = self.source()
+        service = OneCAdditionalImportService(
+            self.settings,
+            self.db,
+            source,
+        )
+        service._sync_registry(
+            workbook=self.workbook(self.worker()),
+            dismissal_dates={},
+        )
+        service._sync_registry(
+            workbook=self.workbook(
+                self.worker(email="ivanov@company2.ru")
+            ),
+            dismissal_dates={},
+        )
+        record = self.db.scalar(
+            select(HRSourceRecord).where(
+                HRSourceRecord.source_id == "company2.ru"
+            )
+        )
+        self.assertEqual(record.zimbra_status, "not_checked")
+        self.assertEqual(record.ad_status, "not_checked")
+        self.assertEqual(record.reconciliation_status, "not_checked")
 
     def test_active_worker_creates_shared_person_and_source_record(self):
         source = self.source()
@@ -112,9 +197,6 @@ class OneCSourcesTests(unittest.TestCase):
             self.db.scalar(select(HRPerson)).worker_key,
             "w1",
         )
-        record = self.db.scalar(select(HRSourceRecord))
-        self.assertEqual(record.source_id, "company2.ru")
-        self.assertEqual(record.corporate_email, "")
 
     def test_future_dismissal_is_scheduled(self):
         source = self.source()

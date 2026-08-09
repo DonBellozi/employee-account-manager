@@ -58,7 +58,7 @@ def schedule_info(settings: Settings) -> dict[str, str | bool]:
 
 
 class OneCAutoImportScheduler:
-    """Ежедневный импорт основного и дополнительных кадровых источников."""
+    """Ежедневный импорт всех включенных кадровых источников."""
 
     def __init__(self, settings: Settings, session_factory):
         self.settings = settings
@@ -85,19 +85,31 @@ class OneCAutoImportScheduler:
         if self._thread is not None:
             self._thread.join(timeout=5)
 
-    def _primary_configured(self) -> bool:
+    def _imap_configured(self) -> bool:
         return bool(
             self.settings.onec_imap_host
             and self.settings.onec_imap_username
             and self.settings.onec_imap_password
-            and self.settings.onec_attachment_filename
         )
 
     def _run_import(self, trigger: str) -> None:
         with self.session_factory() as db:
+            if not self._imap_configured():
+                logger.warning(
+                    "Автоимпорт 1С пропущен: IMAP-подключение не настроено"
+                )
+                return
+
+            registry = OneCSourceRegistryService(self.settings, db)
+            primary = registry.primary_source()
+            registry.apply_primary_to_settings(primary)
             ran_any = False
 
-            if self._primary_configured():
+            if (
+                primary.enabled
+                and primary.mail_domain.strip()
+                and primary.attachment_filename.strip()
+            ):
                 ran_any = True
                 try:
                     report = OneCImportService(
@@ -105,27 +117,20 @@ class OneCAutoImportScheduler:
                         db,
                     ).analyze_latest(trigger=trigger)
                     logger.info(
-                        "Импорт 1С основной (%s): %s",
+                        "Импорт 1С %s (%s): %s",
+                        primary.source_id,
                         trigger,
                         report.get("import_status", "success"),
                     )
                 except Exception:
                     logger.exception(
-                        "Основной импорт 1С завершился ошибкой"
+                        "Основной импорт 1С %s завершился ошибкой",
+                        primary.source_id or "без домена",
                     )
 
-            try:
-                sources = OneCSourceRegistryService(
-                    self.settings,
-                    db,
-                ).enabled_sources()
-            except Exception:
-                logger.exception(
-                    "Не удалось получить дополнительные источники 1С"
-                )
-                sources = []
-
-            for source in sources:
+            for source in registry.enabled_sources(include_primary=False):
+                if not source.mail_domain.strip() or not source.attachment_filename.strip():
+                    continue
                 ran_any = True
                 try:
                     report = OneCAdditionalImportService(
@@ -147,7 +152,7 @@ class OneCAutoImportScheduler:
 
             if not ran_any:
                 logger.warning(
-                    "Автоимпорт 1С пропущен: источники не настроены"
+                    "Автоимпорт 1С пропущен: нет включенных источников"
                 )
 
     def _run_loop(self) -> None:

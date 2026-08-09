@@ -13,16 +13,17 @@ def utcnow() -> datetime:
 
 
 class OneCAdditionalSource(Base):
-    """Дополнительная кадровая выгрузка из общего IMAP-ящика."""
+    """Кадровый источник 1С из общего IMAP-подключения."""
 
     __tablename__ = "onec_additional_sources"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(256))
     mail_domain: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    sender_filter: Mapped[str] = mapped_column(String(512))
+    imap_folder: Mapped[str] = mapped_column(String(512), default="INBOX")
+    sender_filter: Mapped[str] = mapped_column(String(512), default="")
     attachment_filename: Mapped[str] = mapped_column(String(512))
-    has_corporate_email: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     updated_by: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

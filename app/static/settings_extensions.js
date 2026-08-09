@@ -46,6 +46,22 @@
     key: 'onec-sources',
     href: '/settings/onec-sources',
     titleText: 'Источники 1С',
-    descriptionText: 'Дополнительные организации, отправители, файлы и домены.',
+    descriptionText: 'Организации, папки, отправители, домены и имена вложений.',
   });
+
+  const onecCard = document.getElementById('onec-card');
+  if (onecCard) {
+    const moved = new Set([
+      'Папка',
+      'Фильтр отправителя',
+      'Домен выгрузки 1С',
+      'Имя вложения',
+    ]);
+    onecCard.querySelectorAll('dt').forEach(dt => {
+      if (!moved.has((dt.textContent || '').trim())) return;
+      const dd = dt.nextElementSibling;
+      if (dd && dd.tagName === 'DD') dd.remove();
+      dt.remove();
+    });
+  }
 })();

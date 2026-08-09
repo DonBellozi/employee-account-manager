@@ -23,6 +23,7 @@ from app.routers import (
 from app.security import CSRFMismatchError, ensure_bootstrap_admin
 from app.services.blocking_worker import BlockingQueueWorker
 from app.services.onec_scheduler import OneCAutoImportScheduler
+from app.services.onec_sources import OneCSourceRegistryService
 from app.services.telegram_worker import TelegramNotificationWorker
 from app.services.zimbra_observer_scheduler import ZimbraObserverScheduler
 
@@ -36,6 +37,9 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     ensure_compatibility_schema()
     with SessionLocal() as db:
+        source_registry = OneCSourceRegistryService(settings, db)
+        source_registry.ensure_primary()
+        source_registry.apply_primary_to_settings()
         ensure_bootstrap_admin(db, settings)
 
     onec_scheduler = OneCAutoImportScheduler(settings, SessionLocal)

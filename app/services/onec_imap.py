@@ -85,6 +85,7 @@ class OneCImapService:
     def find_latest_attachment(
         self,
         *,
+        folder: str | None = None,
         sender_filter: str | None = None,
         attachment_filename: str | None = None,
     ) -> OneCAttachment:
@@ -98,18 +99,23 @@ class OneCImapService:
             if attachment_filename is None
             else attachment_filename
         ).strip()
+        selected_folder = (
+            self.settings.onec_imap_folder
+            if folder is None
+            else folder
+        ).strip() or "INBOX"
         if not expected:
             raise RuntimeError("Не задано имя вложения кадровой выгрузки")
 
         with self._connect() as imap:
             status, _ = imap.select(
-                self.settings.onec_imap_folder,
+                selected_folder,
                 readonly=True,
             )
             if status != "OK":
                 raise RuntimeError(
                     f"Не удалось открыть папку "
-                    f"{self.settings.onec_imap_folder} в режиме readonly"
+                    f"{selected_folder} в режиме readonly"
                 )
 
             since = (

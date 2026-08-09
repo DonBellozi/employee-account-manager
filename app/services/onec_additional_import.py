@@ -116,6 +116,7 @@ class OneCAdditionalImportService:
 
     def find_latest(self) -> OneCAttachment:
         return OneCImapService(self.settings).find_latest_attachment(
+            folder=self.source.imap_folder,
             sender_filter=self.source.sender_filter,
             attachment_filename=self.source.attachment_filename,
         )
@@ -202,7 +203,6 @@ class OneCAdditionalImportService:
                 "source": self.source.name,
                 "source_id": self.source.source_id,
                 "mail_domain": self.source.mail_domain,
-                "has_corporate_email": self.source.has_corporate_email,
                 "mail": {
                     "uid": attachment.uid,
                     "message_date": attachment.message_date,
@@ -438,6 +438,22 @@ class OneCAdditionalImportService:
                 record.placements_json = placements_json
                 record.is_present = True
                 record.last_seen_at = now
+
+            if worker.email:
+                if record.zimbra_status == "no_email":
+                    record.zimbra_status = "not_checked"
+                if worker.login and record.ad_status == "no_login":
+                    record.ad_status = "not_checked"
+                if record.reconciliation_status == "issue" and not record.reconciliation_error:
+                    record.reconciliation_status = "not_checked"
+                    record.reconciled_at = None
+            else:
+                record.zimbra_status = "no_email"
+                if not worker.login:
+                    record.ad_status = "no_login"
+                record.reconciliation_status = "issue"
+                record.reconciliation_error = ""
+                record.reconciled_at = now
 
             dismissal_date = dismissal_dates.get(worker.worker_key)
             if dismissal_date is None:
