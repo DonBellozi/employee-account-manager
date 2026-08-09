@@ -146,6 +146,10 @@ def source_import(
                 "source": source.name,
                 "status": report.get("import_status", "success"),
                 "workers_count": report.get("workers_count", 0),
+                "missing_email_count": report.get(
+                    "missing_email_count",
+                    0,
+                ),
                 "message": report.get("import_message", ""),
             }
         else:

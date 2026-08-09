@@ -13,6 +13,7 @@ from app.routers import (
     admin,
     auth,
     employees,
+    hr_reconcile_multisource,
     hr_registry_multisource,
     onec_sources,
     settings_ui,
@@ -76,6 +77,7 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(auth.router)
 app.include_router(hr_registry_multisource.router)
 app.include_router(employees.router)
+app.include_router(hr_reconcile_multisource.router)
 app.include_router(settings_ui.router)
 app.include_router(onec_sources.router)
 app.include_router(telegram_settings.router)

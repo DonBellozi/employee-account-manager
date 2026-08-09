@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import HRPerson, HRSourceRecord, OneCImportRun
 from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
+from app.services.hr_registry_multisource import MultiSourceHRRegistryViewService
 from app.services.onec_imap import OneCAttachment, OneCImapService
 from app.services.onec_xlsx import (
     DEFAULT_COLUMNS,
@@ -158,8 +159,25 @@ class OneCAdditionalImportService:
             ).first()
 
             if duplicate is not None:
+                active_records = list(
+                    self.db.scalars(
+                        select(HRSourceRecord).where(
+                            HRSourceRecord.source_id
+                            == self.source.source_id,
+                            HRSourceRecord.is_present.is_(True),
+                        )
+                    ).all()
+                )
+                reconciliation = MultiSourceHRRegistryViewService(
+                    self.settings,
+                    self.db,
+                ).reconcile_all()
+
                 run.status = "duplicate"
-                run.message = f"Файл уже обработан в импорте № {duplicate.id}."
+                run.message = (
+                    f"Файл уже обработан в импорте № {duplicate.id}. "
+                    "Сверка AD/Zimbra обновлена."
+                )
                 run.workers_count = duplicate.workers_count
                 run.placements_count = duplicate.placements_count
                 run.completed_at = utcnow()
@@ -168,7 +186,13 @@ class OneCAdditionalImportService:
                     "source": self.source.name,
                     "source_id": self.source.source_id,
                     "status": "duplicate",
-                    "workers_count": duplicate.workers_count,
+                    "workers_count": len(active_records),
+                    "missing_email_count": sum(
+                        1
+                        for record in active_records
+                        if not record.corporate_email.strip()
+                    ),
+                    "registry": reconciliation,
                     "message": run.message,
                 }
 
@@ -197,6 +221,10 @@ class OneCAdditionalImportService:
                 workbook=workbook,
                 dismissal_dates=dismissal["dates"],
             )
+            reconciliation = MultiSourceHRRegistryViewService(
+                self.settings,
+                self.db,
+            ).reconcile_all()
 
             report = {
                 "analyzed_at": datetime.now().replace(microsecond=0).isoformat(),
@@ -221,6 +249,7 @@ class OneCAdditionalImportService:
                     1 for value in dismissal["dates"].values() if value
                 ),
                 "employment": sync,
+                "registry": reconciliation,
             }
 
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -236,17 +265,27 @@ class OneCAdditionalImportService:
             self._atomic_write_json(self.snapshot_file, current_snapshot)
             self._atomic_write_json(self.report_file, report)
 
-            run.status = "success"
+            reconcile_errors = reconciliation.get("errors") or []
+            run.status = "partial" if reconcile_errors else "success"
             run.archive_filename = archive_filename
             run.workers_count = len(workbook.workers)
             run.placements_count = workbook.placements_count
             run.new_workers = comparison["new_workers"]
             run.missing_workers = comparison["missing_workers"]
             run.changed_workers = comparison["changed_workers"]
-            run.message = "Выгрузка обработана."
+            run.message = (
+                "Выгрузка обработана, сверка частично завершилась с ошибкой."
+                if reconcile_errors
+                else "Выгрузка обработана и сверена."
+            )
             run.completed_at = utcnow()
             self.db.commit()
-            return {**report, "status": "success", "run_id": run.id}
+            return {
+                **report,
+                "status": run.status,
+                "run_id": run.id,
+                "message": run.message,
+            }
 
         except Exception as exc:
             self.db.rollback()

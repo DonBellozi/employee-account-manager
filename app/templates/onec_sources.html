@@ -15,6 +15,11 @@
 <div class="alert success">
   {{ result.source }}: {{ result.status }}.
   Работников: {{ result.workers_count or 0 }}.
+  {% if result.missing_email_count is defined %}
+  Корпоративный e-mail:
+  {{ (result.workers_count or 0) - (result.missing_email_count or 0) }}
+  из {{ result.workers_count or 0 }}.
+  {% endif %}
   {% if result.dismissal_dates_count is defined %}
   Дат увольнения: {{ result.dismissal_dates_count }}.
   {% endif %}
