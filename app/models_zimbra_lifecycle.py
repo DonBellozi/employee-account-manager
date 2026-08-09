@@ -21,7 +21,7 @@ class ZimbraLifecycleSettings(Base):
     allow_close: Mapped[bool] = mapped_column(Boolean, default=False)
     allow_backup: Mapped[bool] = mapped_column(Boolean, default=False)
     allow_delete: Mapped[bool] = mapped_column(Boolean, default=False)
-    backup_dir: Mapped[str] = mapped_column(String(1024), default="/app/data/zimbra-backups")
+    backup_dir: Mapped[str] = mapped_column(String(1024), default="/opt/tmp")
     updated_by: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(

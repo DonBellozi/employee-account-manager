@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import os
 import re
 import shlex
 import threading
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
@@ -57,15 +55,24 @@ class ZimbraLifecycleService:
                 allow_close=False,
                 allow_backup=False,
                 allow_delete=False,
-                backup_dir="/app/data/zimbra-backups",
+                backup_dir="/opt/tmp",
             )
             self.db.add(row)
+            self.db.commit()
+            self.db.refresh(row)
+        # Одноразово исправляем путь из предыдущей ошибочной реализации,
+        # где backup сохранялся в Docker volume приложения. Реальная схема –
+        # временный TGZ на самом Zimbra-сервере, который затем забирает NAS.
+        if row.backup_dir == "/app/data/zimbra-backups":
+            row.backup_dir = "/opt/tmp"
+            row.updated_at = utcnow()
             self.db.commit()
             self.db.refresh(row)
         return row
 
     @staticmethod
     def _normalize_backup_dir(value: str) -> str:
+        """Проверяет абсолютный каталог на Zimbra-сервере."""
         text = str(value or "").strip()
         if not text:
             raise ValueError("Укажите каталог резервных копий на сервере Zimbra")
@@ -77,12 +84,8 @@ class ZimbraLifecycleService:
         if ".." in path.parts:
             raise ValueError("Каталог резервных копий не должен содержать '..'")
         normalized = str(path)
-        persistent_root = "/app/data"
-        if normalized != persistent_root and not normalized.startswith(persistent_root + "/"):
-            raise ValueError(
-                "Резервные копии должны храниться внутри /app/data, "
-                "который подключен как постоянный Docker volume"
-            )
+        if normalized == "/":
+            raise ValueError("Корневой каталог / нельзя использовать для резервных копий")
         return normalized.rstrip("/")
 
     def settings_view(self) -> dict[str, object]:
@@ -301,6 +304,26 @@ class ZimbraLifecycleService:
                 return line.split(":", 1)[1].strip().lower()
         return ""
 
+    def _remote_zimbra_command(
+        self,
+        client,
+        args: list[str],
+        *,
+        timeout: int = 60,
+    ) -> tuple[int, str, str]:
+        """Выполняет конкретную команду от имени zimbra без sudo shell."""
+        if self.settings.zimbra_ssh_user.strip().lower() == "zimbra":
+            command = shlex.join(args)
+        else:
+            command = "sudo -n -u zimbra " + shlex.join(args)
+
+        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+        stdin.channel.shutdown_write()
+        code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode("utf-8", errors="replace").strip()
+        err = stderr.read().decode("utf-8", errors="replace").strip()
+        return code, out, err
+
     def _backup_account(
         self,
         email: str,
@@ -308,99 +331,108 @@ class ZimbraLifecycleService:
         backup_dir: str,
         run_id: int,
     ) -> BackupResult:
-        """Потоково сохраняет TGZ из zmmailbox в persistent volume приложения.
+        """Создает TGZ непосредственно на Zimbra-сервере.
 
-        На Zimbra-сервере не используется shell-редирект и не требуется широкое
-        sudo на /bin/sh. SSH-пользователю достаточно права запускать конкретный
-        /opt/zimbra/bin/zmmailbox от имени zimbra.
+        NAS забирает готовые *.tgz своим существующим механизмом и после
+        успешного копирования сам удаляет файл с Zimbra. Приложение TGZ не
+        переносит к себе и после успешного создания не удаляет.
         """
         if self.settings.dry_run:
             raise RuntimeError("APP DRY_RUN запрещает создание резервной копии")
 
-        directory_text = self._normalize_backup_dir(backup_dir)
-        directory = Path(directory_text)
-        directory.mkdir(parents=True, exist_ok=True)
-
+        directory = self._normalize_backup_dir(backup_dir)
         safe_email = re.sub(r"[^A-Za-z0-9._@+-]+", "_", email)
         stamp = utcnow().strftime("%Y%m%d-%H%M%S")
         filename = f"{safe_email}-run{run_id}-{stamp}.tgz"
-        final_path = directory / filename
-        temp_path = directory / (filename + ".part")
-
-        if temp_path.exists():
-            temp_path.unlink()
-
-        env_and_binary = (
-            "/usr/bin/env LC_ALL=ru_RU.utf8 LANG=ru_RU.utf8 "
-            "/opt/zimbra/bin/zmmailbox"
-        )
-        args = ["-z", "-m", email, "getRestURL", "//?fmt=tgz"]
-        if self.settings.zimbra_ssh_user.strip().lower() == "zimbra":
-            command = f"{env_and_binary} {shlex.join(args)}"
-        else:
-            command = (
-                "sudo -n -u zimbra "
-                f"{env_and_binary} {shlex.join(args)}"
-            )
+        final_path = f"{directory}/{filename}"
+        temp_path = final_path + ".part"
 
         zimbra = ZimbraService(self.settings)
         client = zimbra._client()
         try:
-            stdin, stdout, stderr = client.exec_command(command, timeout=3600)
-            stdin.channel.shutdown_write()
-            channel = stdout.channel
-            deadline = time.monotonic() + 3600.0
-            err_chunks: list[bytes] = []
+            # getRestURL имеет штатный -o/--output, поэтому экспорт сразу
+            # сохраняется на Zimbra-сервере без передачи TGZ через приложение.
+            export_args = [
+                "/usr/bin/env",
+                "LC_ALL=ru_RU.utf8",
+                "LANG=ru_RU.utf8",
+                "/opt/zimbra/bin/zmmailbox",
+                "-z",
+                "-m",
+                email,
+                "-t",
+                "0",
+                "getRestURL",
+                "-o",
+                temp_path,
+                "//?fmt=tgz",
+            ]
+            code, out, err = self._remote_zimbra_command(
+                client,
+                export_args,
+                timeout=3600,
+            )
+            if code != 0:
+                # Частичный .part стараемся удалить. Ошибка cleanup не должна
+                # скрывать исходную ошибку экспорта.
+                try:
+                    self._remote_zimbra_command(
+                        client,
+                        ["/usr/bin/rm", "-f", "--", temp_path],
+                        timeout=30,
+                    )
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "zmmailbox не смог создать резервную копию: "
+                    f"{err or out or f'код {code}'}"
+                )
 
+            code, out, err = self._remote_zimbra_command(
+                client,
+                ["/usr/bin/stat", "-c", "%s", "--", temp_path],
+                timeout=30,
+            )
+            if code != 0:
+                raise RuntimeError(
+                    "Не удалось проверить размер резервной копии на Zimbra: "
+                    f"{err or out or f'код {code}'}"
+                )
             try:
-                with temp_path.open("wb") as backup_file:
-                    while True:
-                        progressed = False
-                        while channel.recv_ready():
-                            backup_file.write(channel.recv(1024 * 1024))
-                            progressed = True
-                        while channel.recv_stderr_ready():
-                            err_chunks.append(channel.recv_stderr(65536))
-                            progressed = True
+                size = int(out.splitlines()[-1].strip())
+            except (ValueError, IndexError) as exc:
+                raise RuntimeError(
+                    f"Zimbra вернула некорректный размер резервной копии: {out or 'нет ответа'}"
+                ) from exc
 
-                        if (
-                            channel.exit_status_ready()
-                            and not channel.recv_ready()
-                            and not channel.recv_stderr_ready()
-                        ):
-                            break
-                        if time.monotonic() >= deadline:
-                            channel.close()
-                            raise RuntimeError(
-                                f"Превышено время создания резервной копии {email}"
-                            )
-                        if not progressed:
-                            time.sleep(0.05)
+            if size <= 0:
+                try:
+                    self._remote_zimbra_command(
+                        client,
+                        ["/usr/bin/rm", "-f", "--", temp_path],
+                        timeout=30,
+                    )
+                finally:
+                    raise RuntimeError(
+                        f"Резервная копия {email} имеет нулевой размер; удаление запрещено"
+                    )
 
-                code = channel.recv_exit_status()
-            except Exception:
-                temp_path.unlink(missing_ok=True)
-                raise
+            # NAS должен видеть только законченные *.tgz, поэтому сначала
+            # экспортируем в .part и публикуем готовый файл атомарным rename.
+            code, out, err = self._remote_zimbra_command(
+                client,
+                ["/usr/bin/mv", "-f", "--", temp_path, final_path],
+                timeout=30,
+            )
+            if code != 0:
+                raise RuntimeError(
+                    "Backup создан, но не удалось переименовать .part в готовый TGZ: "
+                    f"{err or out or f'код {code}'}"
+                )
         finally:
             client.close()
 
-        err = b"".join(err_chunks).decode("utf-8", errors="replace").strip()
-        if code != 0:
-            temp_path.unlink(missing_ok=True)
-            raise RuntimeError(
-                "zmmailbox не смог создать резервную копию: "
-                f"{err or f'код {code}'}"
-            )
-
-        size = temp_path.stat().st_size if temp_path.exists() else 0
-        if size <= 0:
-            temp_path.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"Резервная копия {email} имеет нулевой размер; удаление запрещено"
-            )
-
-        os.replace(temp_path, final_path)
-        return BackupResult(path=str(final_path), size_bytes=size)
+        return BackupResult(path=final_path, size_bytes=size)
 
     def _finish_run(self, run: ZimbraLifecycleRun) -> ZimbraLifecycleRun:
         if run.failed_count:

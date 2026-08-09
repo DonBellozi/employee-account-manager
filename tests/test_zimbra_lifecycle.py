@@ -65,7 +65,7 @@ class ZimbraLifecycleTests(unittest.TestCase):
         self.assertFalse(row.allow_close)
         self.assertFalse(row.allow_backup)
         self.assertFalse(row.allow_delete)
-        self.assertEqual(row.backup_dir, "/app/data/zimbra-backups")
+        self.assertEqual(row.backup_dir, "/opt/tmp")
 
     def test_delete_requires_backup(self):
         with self.assertRaisesRegex(ValueError, "без резервного копирования"):
@@ -73,7 +73,7 @@ class ZimbraLifecycleTests(unittest.TestCase):
                 allow_close=False,
                 allow_backup=False,
                 allow_delete=True,
-                backup_dir="/app/data/zimbra-backups",
+                backup_dir="/opt/tmp",
                 operator="admin",
             )
 
@@ -117,7 +117,7 @@ class ZimbraLifecycleTests(unittest.TestCase):
             allow_close=True,
             allow_backup=False,
             allow_delete=False,
-            backup_dir="/app/data/zimbra-backups",
+            backup_dir="/opt/tmp",
             operator="admin",
         )
         with patch(
@@ -142,7 +142,7 @@ class ZimbraLifecycleTests(unittest.TestCase):
             allow_close=False,
             allow_backup=True,
             allow_delete=True,
-            backup_dir="/app/data/zimbra-backups",
+            backup_dir="/opt/tmp",
             operator="admin",
         )
         with patch(
@@ -169,7 +169,7 @@ class ZimbraLifecycleTests(unittest.TestCase):
             allow_close=False,
             allow_backup=True,
             allow_delete=True,
-            backup_dir="/app/data/zimbra-backups",
+            backup_dir="/opt/tmp",
             operator="admin",
         )
         with patch(
@@ -180,7 +180,7 @@ class ZimbraLifecycleTests(unittest.TestCase):
         ), patch.object(
             service,
             "_backup_account",
-            return_value=BackupResult("/app/data/zimbra-backups/old.tgz", 12345),
+            return_value=BackupResult("/opt/tmp/old.tgz", 12345),
         ), patch(
             "app.services.zimbra_lifecycle.ZimbraService.delete_account"
         ) as delete:
@@ -212,7 +212,7 @@ class ZimbraLifecycleTests(unittest.TestCase):
             allow_close=True,
             allow_backup=False,
             allow_delete=False,
-            backup_dir="/app/data/zimbra-backups",
+            backup_dir="/opt/tmp",
             operator="admin",
         )
         with patch(
@@ -234,7 +234,7 @@ class ZimbraLifecycleTests(unittest.TestCase):
             allow_close=True,
             allow_backup=True,
             allow_delete=True,
-            backup_dir="/app/data/zimbra-backups",
+            backup_dir="/opt/tmp",
             operator="admin",
         )
         with patch(
@@ -248,6 +248,29 @@ class ZimbraLifecycleTests(unittest.TestCase):
         close.assert_not_called()
         self.assertEqual(run.closed_success, 0)
         self.assertEqual(run.skipped_count, 1)
+
+    def test_old_app_volume_path_is_migrated_to_zimbra_tmp(self):
+        row = ZimbraLifecycleSettings(
+            id=1,
+            allow_close=False,
+            allow_backup=False,
+            allow_delete=False,
+            backup_dir="/app/data/zimbra-backups",
+        )
+        self.db.add(row)
+        self.db.commit()
+        loaded = self.service().get_settings_record()
+        self.assertEqual(loaded.backup_dir, "/opt/tmp")
+
+    def test_backup_directory_is_remote_absolute_path(self):
+        self.assertEqual(
+            self.service()._normalize_backup_dir("/opt/tmp"),
+            "/opt/tmp",
+        )
+        with self.assertRaisesRegex(ValueError, "абсолютным"):
+            self.service()._normalize_backup_dir("opt/tmp")
+        with self.assertRaisesRegex(ValueError, "Корневой"):
+            self.service()._normalize_backup_dir("/")
 
 
 if __name__ == "__main__":
