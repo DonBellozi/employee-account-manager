@@ -308,6 +308,91 @@ class MultiSourceHRRegistryViewService:
         self.db.commit()
         return resolved
 
+    def _mapping_safety_snapshot(
+        self,
+        source_id: str,
+    ) -> dict[str, dict]:
+        """Сохраняет ручные связи, которые кадровая строка еще не заменяет."""
+        records = list(
+            self.db.scalars(
+                select(HRSourceRecord).where(
+                    HRSourceRecord.source_id == source_id,
+                    HRSourceRecord.is_present.is_(True),
+                )
+            ).all()
+        )
+        by_worker = {record.worker_key: record for record in records}
+        if not by_worker:
+            return {}
+
+        mappings = list(
+            self.db.scalars(
+                select(EmailLoginMapping).where(
+                    EmailLoginMapping.source_domain == source_id,
+                    EmailLoginMapping.worker_key.in_(list(by_worker)),
+                )
+            ).all()
+        )
+
+        result: dict[str, dict] = {}
+        for mapping in mappings:
+            record = by_worker.get(mapping.worker_key)
+            if record is None:
+                continue
+
+            # Пока 1С не содержит полного набора исходных данных,
+            # явная операторская связь не считается избыточной.
+            if (
+                record.login.strip()
+                and record.corporate_email.strip()
+            ):
+                continue
+
+            result[mapping.worker_key] = {
+                "worker_key": mapping.worker_key,
+                "source_domain": mapping.source_domain,
+                "source_email": mapping.source_email,
+                "ad_object_guid": mapping.ad_object_guid,
+                "ad_login": mapping.ad_login,
+                "zimbra_id": mapping.zimbra_id,
+                "zimbra_email": mapping.zimbra_email,
+                "created_by": mapping.created_by,
+                "created_at": mapping.created_at,
+                "updated_at": mapping.updated_at,
+                "last_verified_at": mapping.last_verified_at,
+            }
+
+        return result
+
+    def _restore_mapping_safety_snapshot(
+        self,
+        source_id: str,
+        snapshot: dict[str, dict],
+    ) -> int:
+        if not snapshot:
+            return 0
+
+        existing = {
+            mapping.worker_key
+            for mapping in self.db.scalars(
+                select(EmailLoginMapping).where(
+                    EmailLoginMapping.source_domain == source_id,
+                    EmailLoginMapping.worker_key.in_(list(snapshot)),
+                )
+            ).all()
+        }
+
+        restored = 0
+        for worker_key, values in snapshot.items():
+            if worker_key in existing:
+                continue
+            self.db.add(EmailLoginMapping(**values))
+            restored += 1
+
+        if restored:
+            self.db.commit()
+        return restored
+
     def reconcile_all(self) -> dict:
         """Пересверить все текущие организации, затем применить общий AD."""
         sources = self._source_ids_with_records()
@@ -317,7 +402,14 @@ class MultiSourceHRRegistryViewService:
         for source_id in sources:
             try:
                 service = self._service_for(source_id)
+                protected_mappings = self._mapping_safety_snapshot(
+                    source_id
+                )
                 service.reconcile_current()
+                restored_mappings = self._restore_mapping_safety_snapshot(
+                    source_id,
+                    protected_mappings,
+                )
                 shared_ad_resolved = self._resolve_shared_ad_for_source(
                     source_id
                 )
@@ -325,6 +417,7 @@ class MultiSourceHRRegistryViewService:
                     {
                         "source_id": source_id,
                         "shared_ad_resolved": shared_ad_resolved,
+                        "restored_mappings": restored_mappings,
                     }
                 )
             except Exception as exc:
@@ -486,17 +579,11 @@ class MultiSourceHRRegistryViewService:
                         row["linked_email"] = mapped_email
                     row["mapping_action_label"] = "Изменить"
 
-                effective_status = str(
-                    row.get("reconciliation_status") or ""
+                # Ручное сопоставление доступно всегда для действующей
+                # кадровой записи: и для проблемной, и для уже проверенной.
+                row["mapping_url"] = (
+                    f"/employees/registry/{row['id']}/map"
                 )
-                if (
-                    mapping is not None
-                    or effective_status
-                    in {"issue", "error", "not_checked"}
-                ):
-                    row["mapping_url"] = (
-                        f"/employees/registry/{row['id']}/map"
-                    )
                 rows.append(row)
 
         rows.sort(
