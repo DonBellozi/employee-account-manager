@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Алиас почты{% endblock %}
+{% block content %}
+<div class="heading-row">
+  <div>
+    <h1>Алиас почты</h1>
+    <p class="muted">Использование существующего физического ящика для второй организации.</p>
+  </div>
+</div>
+
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+{% if result and result.dry_run %}
+<div class="alert warning">
+  DRY_RUN: алиас {{ result.proposed_alias }} не создавался.
+</div>
+{% endif %}
+
+<section class="card">
+  <h2>{{ item.fio }}</h2>
+  <dl class="integration-details">
+    <dt>Организация</dt>
+    <dd>{{ item.source_name }} <code>{{ item.source_id }}</code></dd>
+
+    <dt>E-mail в 1С</dt>
+    <dd>Не указан</dd>
+
+    <dt>Соседняя организация</dt>
+    <dd>
+      {{ item.sibling_source_name }}
+      {% if item.sibling_source_id %}<code>{{ item.sibling_source_id }}</code>{% endif %}
+    </dd>
+
+    <dt>Существующая почта</dt>
+    <dd><code>{{ item.sibling_email }}</code></dd>
+
+    <dt>Физический ящик Zimbra</dt>
+    <dd><code>{{ item.mailbox_primary }}</code></dd>
+
+    <dt>Предлагаемый алиас</dt>
+    <dd><code>{{ item.proposed_alias }}</code></dd>
+  </dl>
+</section>
+
+<section class="card">
+  {% if item.alias_exists %}
+  <div class="alert success">
+    Алиас уже существует на этом физическом ящике. Будет создано только
+    сопоставление с кадровой записью.
+  </div>
+  {% else %}
+  <div class="alert warning">
+    Новый почтовый ящик не создается. Адрес
+    <strong>{{ item.proposed_alias }}</strong> будет добавлен как алиас к
+    существующему ящику <strong>{{ item.mailbox_primary }}</strong>.
+  </div>
+  {% endif %}
+
+  <form method="post" action="/employees/registry/{{ item.record_id }}/alias">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="modal" value="{{ '1' if embedded else '0' }}">
+    <div class="observer-form-actions">
+      <button class="button" type="submit">
+        {{ 'Привязать алиас' if item.alias_exists else 'Создать алиас' }}
+      </button>
+    </div>
+  </form>
+</section>
+
+{% if saved and embedded %}
+<script>
+window.parent.postMessage(
+  {type: 'workspace-modal-saved'},
+  window.location.origin
+);
+</script>
+{% endif %}
+{% endblock %}

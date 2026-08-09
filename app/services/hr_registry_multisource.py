@@ -10,6 +10,8 @@ from app.models import EmailLoginMapping, HRSourceRecord
 from app.models_onec_sources import OneCAdditionalSource
 from app.services.ad import ActiveDirectoryService
 from app.services.hr_registry import HRRegistryService
+from app.services.hr_registry_alias import HRRegistryAliasService
+from app.services.zimbra import ZimbraService
 
 
 SUMMARY_KEYS = (
@@ -218,6 +220,89 @@ class MultiSourceHRRegistryViewService:
 
         return result
 
+    def _resolve_explicit_mail_for_source(
+        self,
+        source_id: str,
+    ) -> int:
+        """Явный e-mail mapping заменяет отсутствующий e-mail из XLSX для Zimbra."""
+        records = list(
+            self.db.scalars(
+                select(HRSourceRecord).where(
+                    HRSourceRecord.source_id == source_id,
+                    HRSourceRecord.is_present.is_(True),
+                    HRSourceRecord.corporate_email == "",
+                )
+            ).all()
+        )
+        if not records or not self.settings.zimbra_check_enabled:
+            return 0
+
+        worker_keys = [record.worker_key for record in records]
+        mappings = list(
+            self.db.scalars(
+                select(EmailLoginMapping).where(
+                    EmailLoginMapping.source_domain == source_id,
+                    EmailLoginMapping.worker_key.in_(worker_keys),
+                )
+            ).all()
+        )
+        mapping_by_worker = {
+            mapping.worker_key: mapping
+            for mapping in mappings
+            if str(mapping.source_email or "").strip()
+            and str(mapping.zimbra_id or "").strip()
+        }
+        if not mapping_by_worker:
+            return 0
+
+        try:
+            identities = ZimbraService(self.settings).accounts_by_ids(
+                [
+                    mapping.zimbra_id
+                    for mapping in mapping_by_worker.values()
+                ]
+            )
+        except Exception as exc:
+            for record in records:
+                mapping = mapping_by_worker.get(record.worker_key)
+                if mapping is None:
+                    continue
+                record.zimbra_status = "error"
+                record.reconciliation_error = (
+                    f"Zimbra: {exc}"
+                )
+                self._recalculate_status(record)
+            self.db.commit()
+            return 0
+
+        resolved = 0
+        for record in records:
+            mapping = mapping_by_worker.get(record.worker_key)
+            if mapping is None:
+                continue
+
+            identity = identities.get(mapping.zimbra_id)
+            mapped_email = str(
+                mapping.source_email or ""
+            ).strip().lower()
+
+            if identity is None:
+                record.zimbra_status = "missing"
+            elif mapped_email not in {
+                str(address or "").strip().lower()
+                for address in identity.addresses
+            }:
+                record.zimbra_status = "address_mismatch"
+            else:
+                record.zimbra_status = "present"
+                mapping.zimbra_email = identity.primary_email
+                resolved += 1
+
+            self._recalculate_status(record)
+
+        self.db.commit()
+        return resolved
+
     def _resolve_shared_ad_for_source(
         self,
         source_id: str,
@@ -410,6 +495,9 @@ class MultiSourceHRRegistryViewService:
                     source_id,
                     protected_mappings,
                 )
+                explicit_mail_resolved = (
+                    self._resolve_explicit_mail_for_source(source_id)
+                )
                 shared_ad_resolved = self._resolve_shared_ad_for_source(
                     source_id
                 )
@@ -417,6 +505,7 @@ class MultiSourceHRRegistryViewService:
                     {
                         "source_id": source_id,
                         "shared_ad_resolved": shared_ad_resolved,
+                        "explicit_mail_resolved": explicit_mail_resolved,
                         "restored_mappings": restored_mappings,
                     }
                 )
@@ -532,6 +621,13 @@ class MultiSourceHRRegistryViewService:
             ): mapping
             for mapping in manual_mappings
         }
+        alias_suggestions = HRRegistryAliasService(
+            self.settings,
+            self.db,
+        ).suggestions(
+            active_records=active_records,
+            mappings=manual_mappings,
+        )
 
         for domain in sources:
             shared_hints = self._shared_ad_hints(domain, worker_keys)
@@ -578,6 +674,58 @@ class MultiSourceHRRegistryViewService:
                     if mapped_email and mapped_email != source_email:
                         row["linked_email"] = mapped_email
                     row["mapping_action_label"] = "Изменить"
+
+                row["sibling_email"] = ""
+                row["sibling_source_name"] = ""
+                row["proposed_alias"] = ""
+                row["alias_note"] = ""
+                row["alias_url"] = ""
+                row["alias_action_label"] = ""
+
+                if record is not None:
+                    alias_item = alias_suggestions.get(record.id)
+                    if alias_item is not None:
+                        row["sibling_email"] = alias_item.get(
+                            "sibling_email",
+                            "",
+                        )
+                        row["sibling_source_name"] = alias_item.get(
+                            "sibling_source_name",
+                            "",
+                        )
+                        row["proposed_alias"] = alias_item.get(
+                            "proposed_alias",
+                            "",
+                        )
+                        row["alias_note"] = alias_item.get("note", "")
+                        already_bound = bool(
+                            mapping is not None
+                            and str(mapping.source_email or "").strip().lower()
+                            == str(
+                                alias_item.get("proposed_alias") or ""
+                            ).strip().lower()
+                            and str(mapping.zimbra_id or "").strip()
+                            == str(
+                                alias_item.get("mailbox_zimbra_id") or ""
+                            ).strip()
+                        )
+                        if already_bound:
+                            row["alias_note"] = (
+                                f"Алиас {alias_item.get('proposed_alias')} "
+                                "уже привязан к этой кадровой записи."
+                            )
+                        elif (
+                            alias_item.get("can_create")
+                            or alias_item.get("can_bind")
+                        ):
+                            row["alias_url"] = (
+                                f"/employees/registry/{row['id']}/alias"
+                            )
+                            row["alias_action_label"] = (
+                                "Привязать алиас"
+                                if alias_item.get("alias_exists")
+                                else "Создать алиас"
+                            )
 
                 # Ручное сопоставление доступно всегда для действующей
                 # кадровой записи: и для проблемной, и для уже проверенной.

@@ -67,8 +67,14 @@
           <strong>{{ item.fio }}</strong>
           <div class="journal-object-meta">
             {% if item.login %}<code>{{ item.login }}</code>{% endif %}
-            {% if item.email %}<span>{{ item.email }}</span>{% endif %}
+            {% if item.email %}
+            <span>{{ item.email }}</span>
+            {% elif item.sibling_email %}
+            <span>В 1С: e-mail не указан</span>
+            <span>Соседняя: {{ item.sibling_email }}{% if item.sibling_source_name %} – {{ item.sibling_source_name }}{% endif %}</span>
+            {% endif %}
             {% if item.linked_email %}<span>Связано: {{ item.linked_email }}</span>{% endif %}
+            {% if item.proposed_alias %}<span>Алиас: {{ item.proposed_alias }}</span>{% endif %}
             {% if item.personal_email %}<span>Личный: {{ item.personal_email }}</span>{% endif %}
           </div>
         </td>
@@ -97,6 +103,9 @@
           <div class="muted">{{ item.manual_check_previous_note }}</div>
           {% endif %}
           {% if item.error %}<div class="registry-error">{{ item.error }}</div>{% endif %}
+          {% if item.alias_note and not item.email %}
+          <div class="muted">{{ item.alias_note }}</div>
+          {% endif %}
         </td>
         <td>
           <div class="registry-actions">
@@ -106,6 +115,14 @@
               <input type="hidden" name="return_to" value="{{ return_to }}">
               <button class="button secondary small" type="submit" title="Подтвердить, что учетные записи этому работнику не требуются">Проверен</button>
             </form>
+            {% endif %}
+
+            {% if user.role == 'admin' and item.alias_url %}
+            <a class="button small"
+               href="{{ item.alias_url }}"
+               data-workspace-modal
+               data-workspace-title="Создание алиаса"
+               data-workspace-refresh="false">{{ item.alias_action_label }}</a>
             {% endif %}
 
             {% if item.mapping_url %}
