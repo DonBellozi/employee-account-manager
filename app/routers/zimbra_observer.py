@@ -41,7 +41,7 @@ def _context(
 ):
     current = require_admin(request)
     service = ManagedZimbraObserverService(settings, db)
-    states = service.current_states(limit=300)
+    states = service.current_states()
     return {
         "user": current,
         "csrf": get_or_create_csrf(request),

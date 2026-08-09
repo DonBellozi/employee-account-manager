@@ -257,7 +257,14 @@ class ZimbraObserverService:
             ).all()
         )
 
-    def current_states(self, limit: int = 200) -> list[ZimbraLifecycleState]:
+    def current_states(self, limit: int | None = None) -> list[ZimbraLifecycleState]:
+        """Возвращает все последние состояния всех найденных ящиков Zimbra.
+
+        Полный серверный обход не зависит от домена, поэтому Web-список также
+        не должен скрывать нормальные учетные записи или обрезать его старым
+        лимитом в 300/1000 строк. Проблемные состояния остаются выше списка,
+        затем показываются учетные записи без требуемых действий.
+        """
         ordering = (
             case(
                 (ZimbraLifecycleState.recommendation == "close", 1),
@@ -270,14 +277,10 @@ class ZimbraObserverService:
             ),
             ZimbraLifecycleState.primary_email,
         )
-        return list(
-            self.db.scalars(
-                select(ZimbraLifecycleState)
-                .where(ZimbraLifecycleState.recommendation != "none")
-                .order_by(*ordering)
-                .limit(max(1, min(int(limit), 1000)))
-            ).all()
-        )
+        query = select(ZimbraLifecycleState).order_by(*ordering)
+        if limit is not None:
+            query = query.limit(max(1, int(limit)))
+        return list(self.db.scalars(query).all())
 
     def run(self, trigger: str = "manual") -> ZimbraObservationRun:
         trigger = str(trigger or "manual").strip().lower()

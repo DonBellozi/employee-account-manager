@@ -384,6 +384,43 @@ class ZimbraObserverTests(unittest.TestCase):
         state = self.db.scalars(select(ZimbraLifecycleState)).one()
         self.assertEqual(state.recommendation, "close")
 
+    def test_current_states_lists_all_accounts_from_all_domains_without_old_limit(self):
+        rows = []
+        for index in range(350):
+            domain = "domain-a.ru" if index % 2 == 0 else "domain-b.com"
+            rows.append(
+                ZimbraLifecycleState(
+                    account_key=f"state-{index}",
+                    zimbra_id=f"zimbra-{index}",
+                    primary_email=f"user{index:03d}@{domain}",
+                    account_status="active",
+                    recommendation="none",
+                    reason="Действий не требуется",
+                )
+            )
+        rows.append(
+            ZimbraLifecycleState(
+                account_key="state-close",
+                zimbra_id="zimbra-close",
+                primary_email="old@third-domain.net",
+                account_status="active",
+                recommendation="close",
+                reason="Превышен срок неактивности",
+            )
+        )
+        self.db.add_all(rows)
+        self.db.commit()
+
+        states = self.service().current_states()
+        emails = {row.primary_email for row in states}
+
+        self.assertEqual(len(states), 351)
+        self.assertIn("user000@domain-a.ru", emails)
+        self.assertIn("user001@domain-b.com", emails)
+        self.assertIn("old@third-domain.net", emails)
+        self.assertTrue(any(row.recommendation == "none" for row in states))
+        self.assertEqual(states[0].recommendation, "close")
+
     def test_gaa_verbose_parser_reads_addresses_status_and_dates(self):
         output = """# name user@domain.com
 mail: user@domain.com
