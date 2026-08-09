@@ -61,7 +61,7 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.app_secret_key,
-    session_cookie_name=settings.session_cookie_name,
+    session_cookie=settings.session_cookie_name,
     same_site=settings.session_cookie_samesite,
     https_only=settings.session_cookie_secure,
     max_age=8 * 60 * 60,
