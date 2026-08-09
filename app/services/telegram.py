@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.models_telegram import TelegramNotification, TelegramSettings
 
 
-RETRY_DELAYS_MINUTES = (1, 2, 5, 10, 15, 30)
+RETRY_DELAYS_MINUTES = (1, 2, 5, 10, 15, 30, 60)
 BOT_TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{20,}$")
 CHAT_ID_RE = re.compile(r"^(?:-?\d+|@[A-Za-z0-9_]{5,})$")
 
@@ -87,7 +87,7 @@ class TelegramSecretBox:
 class TelegramBotClient:
     """Минимальный клиент Telegram Bot API без стороннего HTTP-клиента."""
 
-    def __init__(self, token: str, *, timeout_seconds: int = 10):
+    def __init__(self, token: str, *, timeout_seconds: int = 60):
         self.token = str(token or "").strip()
         self.timeout_seconds = max(1, int(timeout_seconds))
         if not BOT_TOKEN_RE.fullmatch(self.token):
@@ -364,7 +364,7 @@ class TelegramService:
         index = max(0, min(attempts - 1, len(RETRY_DELAYS_MINUTES) - 1))
         return utcnow() + timedelta(minutes=RETRY_DELAYS_MINUTES[index])
 
-    def _send_item(self, item: TelegramNotification) -> None:
+    def _send_item(self, item: TelegramNotification) -> str:
         item.attempts += 1
         try:
             record, client = self._connection()
@@ -379,6 +379,7 @@ class TelegramService:
             item.next_attempt_at = None
             item.sent_at = utcnow()
             item.telegram_message_id = str(result.get("message_id") or "")[:64]
+            return "sent"
         except TelegramAPIError as exc:
             item.last_error = str(exc)[:4000]
             item.sent_at = None
@@ -390,19 +391,23 @@ class TelegramService:
                     )
                 else:
                     item.next_attempt_at = self._next_retry(item.attempts)
+                return "retry"
             else:
                 item.status = "failed"
                 item.next_attempt_at = None
+                return "failed"
         except (RuntimeError, ValueError) as exc:
             item.status = "failed"
             item.last_error = str(exc)[:4000]
             item.sent_at = None
             item.next_attempt_at = None
+            return "failed"
         except Exception as exc:
             item.status = "pending"
             item.last_error = str(exc)[:4000]
             item.sent_at = None
             item.next_attempt_at = self._next_retry(item.attempts)
+            return "retry"
 
     def process_due(self, *, limit: int = 20) -> int:
         view = self.view()
@@ -423,10 +428,16 @@ class TelegramService:
                 .limit(max(1, min(limit, 100)))
             ).all()
         )
+        processed = 0
         for item in items:
-            self._send_item(item)
+            outcome = self._send_item(item)
             self.db.commit()
-        return len(items)
+            processed += 1
+            # При сетевой проблеме не долбим Telegram всей пачкой подряд.
+            # Следующий проход worker попробует следующую запись позже.
+            if outcome == "retry":
+                break
+        return processed
 
 
     def retry_failed(self, *, limit: int = 100) -> int:

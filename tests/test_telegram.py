@@ -22,6 +22,7 @@ sys.modules["app.db"] = db_stub
 from app.models_telegram import TelegramNotification, TelegramSettings  # noqa: E402
 from app.services.telegram import (  # noqa: E402
     TelegramAPIError,
+    TelegramBotClient,
     TelegramService,
 )
 
@@ -62,6 +63,37 @@ class TelegramTests(unittest.TestCase):
         self.db.refresh(record)
         self.assertEqual(record.bot_token_encrypted, encrypted)
         self.assertEqual(record.topic_id, "42")
+
+
+    def test_default_timeout_is_sixty_seconds(self):
+        client = TelegramBotClient(
+            "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_1234567890"
+        )
+        self.assertEqual(client.timeout_seconds, 60)
+
+    @patch("app.services.telegram.urllib.request.urlopen")
+    def test_timeout_stays_pending_and_stops_current_batch(self, urlopen):
+        self.service.save(
+            enabled=True,
+            bot_token="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_1234567890",
+            chat_id="-1001234567890",
+            topic_id="",
+            operator="operator",
+        )
+        first = self.service.enqueue("Первое", event_type="test")
+        second = self.service.enqueue("Второе", event_type="test")
+        urlopen.side_effect = TimeoutError("timed out")
+
+        processed = self.service.process_due()
+
+        self.assertEqual(processed, 1)
+        self.db.refresh(first)
+        self.db.refresh(second)
+        self.assertEqual(first.status, "pending")
+        self.assertEqual(first.attempts, 1)
+        self.assertIsNotNone(first.next_attempt_at)
+        self.assertEqual(second.status, "pending")
+        self.assertEqual(second.attempts, 0)
 
     def test_enqueue_deduplicates_by_key(self):
         self.service.save(

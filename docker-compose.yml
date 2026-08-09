@@ -108,7 +108,11 @@ services:
       - /opt/account-provisioner/ssh/known_hosts:/app/known_hosts:ro
 
     ports:
-      - "${APP_PORT:-8081}:8000"
+      - "0.0.0.0:${APP_PORT:-8081}:8000"
+
+    networks:
+      - default
+      - telegram-egress
 
     healthcheck:
       test:
@@ -120,6 +124,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+networks:
+  telegram-egress:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd42:8086:506:2::/64
 
 volumes:
   account-provisioner-data:
