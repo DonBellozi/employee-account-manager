@@ -33,6 +33,7 @@
   <h2>{{ 'Изменить сопоставление' if item.has_mapping else 'Сопоставить' }}</h2>
   <form method="post" action="/employees/registry/{{ item.record_id }}/map">
     <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="modal" value="{{ '1' if embedded else '0' }}">
     <label>
       <span>Логин AD или адрес почты</span>
       <input
@@ -58,8 +59,18 @@
   <p class="muted">Удаление не изменяет данные 1С, AD или Zimbra.</p>
   <form method="post" action="/employees/registry/{{ item.record_id }}/map/delete">
     <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="modal" value="{{ '1' if embedded else '0' }}">
     <button class="button secondary" type="submit">Удалить сопоставление</button>
   </form>
 </section>
 {% endif %}
 {% endblock %}
+
+{% if saved and embedded %}
+<script>
+window.parent.postMessage(
+  {type: 'workspace-modal-saved'},
+  window.location.origin
+);
+</script>
+{% endif %}

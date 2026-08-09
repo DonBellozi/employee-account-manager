@@ -32,6 +32,8 @@ def _context(
     settings: Settings,
     db: Session,
     error: str = "",
+    embedded: bool = False,
+    saved: bool = False,
 ):
     current = require_admin(request)
     service = HRRegistryManualMappingService(settings, db)
@@ -40,6 +42,8 @@ def _context(
         "csrf": get_or_create_csrf(request),
         "item": service.page_data(record_id),
         "error": error,
+        "embedded": embedded,
+        "saved": saved,
     }
 
 
@@ -47,6 +51,7 @@ def _context(
 def mapping_page(
     record_id: int,
     request: Request,
+    modal: int = 0,
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
 ):
@@ -58,6 +63,7 @@ def mapping_page(
             record_id=record_id,
             settings=settings,
             db=db,
+            embedded=bool(modal),
         ),
     )
 
@@ -68,6 +74,7 @@ def mapping_save(
     request: Request,
     identifier: str = Form(...),
     csrf: str = Form(...),
+    modal: str = Form("0"),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
 ):
@@ -84,6 +91,20 @@ def mapping_save(
             settings,
             db,
         ).reconcile_all()
+
+        if modal.strip().lower() in {"1", "true", "yes", "on"}:
+            return templates.TemplateResponse(
+                request,
+                "hr_registry_mapping.html",
+                _context(
+                    request,
+                    record_id=record_id,
+                    settings=settings,
+                    db=db,
+                    embedded=True,
+                    saved=True,
+                ),
+            )
 
         return RedirectResponse(
             "/employees/registry?"
@@ -106,6 +127,7 @@ def mapping_save(
                 settings=settings,
                 db=db,
                 error=str(exc),
+                embedded=modal.strip().lower() in {"1", "true", "yes", "on"},
             ),
             status_code=400,
         )
@@ -116,6 +138,7 @@ def mapping_delete(
     record_id: int,
     request: Request,
     csrf: str = Form(...),
+    modal: str = Form("0"),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
 ):
@@ -133,6 +156,20 @@ def mapping_delete(
         settings,
         db,
     ).reconcile_all()
+
+    if modal.strip().lower() in {"1", "true", "yes", "on"}:
+        return templates.TemplateResponse(
+            request,
+            "hr_registry_mapping.html",
+            _context(
+                request,
+                record_id=record_id,
+                settings=settings,
+                db=db,
+                embedded=True,
+                saved=True,
+            ),
+        )
 
     return RedirectResponse(
         "/employees/registry?"

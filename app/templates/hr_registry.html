@@ -109,15 +109,27 @@
             {% endif %}
 
             {% if item.mapping_url %}
-            <a class="button secondary small" href="{{ item.mapping_url }}">{{ item.mapping_action_label or 'Сопоставить' }}</a>
+            <a class="button secondary small"
+               href="{{ item.mapping_url }}"
+               data-workspace-modal
+               data-workspace-title="Сопоставление"
+               data-workspace-refresh="false">{{ item.mapping_action_label or 'Сопоставить' }}</a>
             {% elif item.has_mapping %}
             <span class="registry-mapped">Сопоставлено</span>
             {% endif %}
             {% if not item.has_mapping %}
               {% if item.create_ad_url %}
-              <a class="button small" href="{{ item.create_ad_url }}">Создать AD</a>
+              <a class="button small"
+                 href="{{ item.create_ad_url }}"
+                 data-workspace-modal
+                 data-workspace-title="Создать AD"
+                 data-workspace-refresh="true">Создать AD</a>
               {% elif item.create_url %}
-              <a class="button secondary small" href="{{ item.create_url }}">Создать</a>
+              <a class="button secondary small"
+                 href="{{ item.create_url }}"
+                 data-workspace-modal
+                 data-workspace-title="Создание учетных записей"
+                 data-workspace-refresh="true">Создать</a>
               {% endif %}
             {% endif %}
           </div>

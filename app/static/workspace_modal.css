@@ -1,0 +1,93 @@
+.workspace-modal {
+  width: min(1180px, calc(100vw - 36px));
+  height: min(900px, calc(100vh - 36px));
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+}
+
+.workspace-modal::backdrop {
+  background: rgba(15, 23, 42, 0.48);
+}
+
+.workspace-modal-head {
+  height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 16px 0 20px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #fff;
+}
+
+.workspace-modal-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-modal-close {
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #475569;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.workspace-modal-close:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+.workspace-modal-frame {
+  display: block;
+  width: 100%;
+  height: calc(100% - 54px);
+  border: 0;
+  background: #fff;
+}
+
+body.workspace-embedded {
+  background: #fff;
+}
+
+body.workspace-embedded .topbar {
+  display: none !important;
+}
+
+body.workspace-embedded > .container {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 20px 22px 30px;
+}
+
+body.workspace-embedded #workspace-modal {
+  display: none !important;
+}
+
+@media (max-width: 760px) {
+  .workspace-modal {
+    width: calc(100vw - 16px);
+    height: calc(100vh - 16px);
+    border-radius: 10px;
+  }
+
+  body.workspace-embedded > .container {
+    padding: 14px;
+  }
+}
