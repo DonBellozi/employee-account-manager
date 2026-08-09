@@ -6,8 +6,8 @@
     <div>
       <h1>Наблюдение Zimbra</h1>
       <p class="muted">
-        Read-only контроль неактивных и закрытых учетных записей. Система только
-        рассчитывает рекомендации и фиксирует изменения вывода в журнале.
+        Read-only контроль всех почтовых ящиков Zimbra независимо от домена и организации.
+        Система только рассчитывает рекомендации и фиксирует изменения вывода в журнале.
       </p>
     </div>
     <a class="button secondary" href="/settings">Назад к настройкам</a>
@@ -61,12 +61,12 @@
         </label>
 
         <label>
-          <span>Хранение закрытой учетной записи</span>
+          <span>Архивация и удаление после неактивности</span>
           <div class="observer-number-field">
             <input type="number" name="retention_months" min="1" max="120" value="{{ observer.retention_months }}" required>
             <span>мес.</span>
           </div>
-          <small class="muted">После срока система только рекомендует backup + удаление.</small>
+          <small class="muted">Общий порог от последнего входа, а если входов не было – от даты создания. По умолчанию 12 месяцев.</small>
         </label>
 
         <label>
@@ -80,9 +80,10 @@
           <span>
             <strong>Исключать действующих работников по 1С</strong>
             <small class="muted">
-              Если корпоративный адрес или алиас найден у действующего работника,
-              рекомендация закрытия по неактивности подавляется. При отсутствии
-              свежего реестра 1С рискованная рекомендация не формируется.
+              Все актуальные кадровые выгрузки объединяются в один список исключений.
+              Если основной адрес или алиас найден хотя бы в одной организации, закрытие
+              и удаление подавляются. Если хотя бы одна известная выгрузка устарела,
+              рискованная рекомендация не формируется.
             </small>
           </span>
         </label>
@@ -111,7 +112,7 @@
     <div class="observer-card-heading">
       <div>
         <h2>Последняя проверка</h2>
-        <p class="muted">Итоги полного чтения настроенных доменов Zimbra.</p>
+        <p class="muted">Итоги полного чтения всех учетных записей Zimbra на сервере.</p>
       </div>
       {% if latest_run %}
       <span class="status {{ 'success' if latest_run.status == 'success' else 'failed' if latest_run.status == 'failed' else 'running' }}">
@@ -132,8 +133,8 @@
     <dl class="observer-details-grid">
       <dt>Начало</dt><dd>{{ latest_run.started_at|app_datetime('%d.%m.%Y %H:%M:%S') }}</dd>
       <dt>Завершение</dt><dd>{{ latest_run.completed_at|app_datetime('%d.%m.%Y %H:%M:%S') if latest_run.completed_at else '–' }}</dd>
-      <dt>Кадровый снимок 1С</dt><dd>{{ latest_run.hr_snapshot_at|app_datetime('%d.%m.%Y %H:%M:%S') if latest_run.hr_snapshot_at else 'нет данных' }}</dd>
-      <dt>Возраст снимка 1С</dt><dd>{% if latest_run.hr_snapshot_age_minutes is not none %}{{ latest_run.hr_snapshot_age_minutes // 60 }} ч. {{ latest_run.hr_snapshot_age_minutes % 60 }} мин.{% else %}–{% endif %}</dd>
+      <dt>Самая старая выгрузка 1С</dt><dd>{{ latest_run.hr_snapshot_at|app_datetime('%d.%m.%Y %H:%M:%S') if latest_run.hr_snapshot_at else 'нет данных' }}</dd>
+      <dt>Максимальный возраст выгрузки 1С</dt><dd>{% if latest_run.hr_snapshot_age_minutes is not none %}{{ latest_run.hr_snapshot_age_minutes // 60 }} ч. {{ latest_run.hr_snapshot_age_minutes % 60 }} мин.{% else %}–{% endif %}</dd>
     </dl>
     {% if latest_run.error_message %}
     <div class="journal-error"><strong>Предупреждение / ошибка</strong><pre>{{ latest_run.error_message }}</pre></div>

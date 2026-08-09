@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 import threading
 import time
 from calendar import monthrange
@@ -26,8 +25,9 @@ from app.services.zimbra import ZimbraService
 
 HR_SNAPSHOT_MAX_AGE_HOURS = 36
 SUCCESSFUL_HR_STATUSES = {"success", "partial", "duplicate"}
-DATE_RE = re.compile(r"(?<!\d)(\d{1,2}\.\d{1,2}\.\d{4})(?!\d)")
-DISMISSAL_WORD_RE = re.compile(r"увол(?:ен|ьнение|ьняется|ить)", re.IGNORECASE)
+LEGACY_NOTE_DATE_RE = re.compile(
+    r"(?<!\d)(\d{2})[\s.,/_-]?(\d{2})[\s.,/_-]?(\d{4})(?!\d)"
+)
 NEVER_DISABLE_RE = re.compile(r"(?:^|[^a-z0-9_])never_disable(?:$|[^a-z0-9_])", re.IGNORECASE)
 SCHEDULE_RE = re.compile(r"^(\d{2}):(\d{2})$")
 
@@ -78,26 +78,27 @@ def parse_zimbra_timestamp(value: str) -> datetime | None:
 
 
 def parse_note_date(value: str) -> date | None:
-    match = DATE_RE.search(str(value or ""))
+    """Временный legacy-парсер даты увольнения из zimbraNotes.
+
+    Повторяет форматы старого production-скрипта: DD.MM.YYYY, DD,MM,YYYY,
+    DD MM YYYY, DD-MM-YYYY, DD/MM/YYYY, DD_MM_YYYY и DDMMYYYY. После
+    появления отдельной даты увольнения в кадровой выгрузке 1С этот fallback
+    должен быть отключен и затем удален.
+    """
+    match = LEGACY_NOTE_DATE_RE.search(str(value or ""))
     if not match:
         return None
     try:
-        return datetime.strptime(match.group(1), "%d.%m.%Y").date()
+        return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
     except ValueError:
         return None
 
 
 def parse_dismissal_note_date(value: str) -> date | None:
-    text = str(value or "").strip()
-    note_date = parse_note_date(text)
-    if note_date is None:
-        return None
-    if re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{4}", text):
-        return note_date
-    if DISMISSAL_WORD_RE.search(text):
-        return note_date
-    return None
-
+    # Совместимое имя функции для существующих вызовов/тестов. Пока в 1С нет
+    # штатного поля даты увольнения, любая legacy-дата в Notes трактуется так же,
+    # как это делал старый скрипт zimbra_batch_close_accounts.
+    return parse_note_date(value)
 
 def date_to_utc(value: date, timezone_name: str) -> datetime:
     local = datetime.combine(value, dt_time.min, tzinfo=ZoneInfo(timezone_name))
@@ -134,6 +135,8 @@ class HRProtectionSnapshot:
     age_minutes: int | None
     fresh: bool
     records_count: int
+    source_count: int = 0
+    stale_sources: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -203,7 +206,11 @@ class ZimbraObserverService:
         if not 1 <= inactive_months <= 60:
             raise ValueError("Срок неактивности должен быть от 1 до 60 месяцев")
         if not 1 <= retention_months <= 120:
-            raise ValueError("Срок хранения должен быть от 1 до 120 месяцев")
+            raise ValueError("Порог архивации/удаления должен быть от 1 до 120 месяцев")
+        if retention_months <= inactive_months:
+            raise ValueError(
+                "Порог архивации/удаления должен быть больше порога закрытия"
+            )
 
         match = SCHEDULE_RE.fullmatch(str(schedule_time or "").strip())
         if not match:
@@ -453,9 +460,11 @@ class ZimbraObserverService:
             run.hr_snapshot_at = hr.snapshot_at
             run.hr_snapshot_age_minutes = hr.age_minutes
             if config.exclude_active_hr and not hr.fresh:
+                stale = ", ".join(hr.stale_sources) or "нет подтвержденных кадровых источников"
                 run.error_message = (
-                    "Актуальность кадровой выгрузки 1С не подтверждена. "
-                    "Рискованные рекомендации переведены в «Требует проверки»."
+                    "Актуальность всех кадровых выгрузок 1С не подтверждена. "
+                    f"Проблемные источники: {stale}. Рискованные рекомендации "
+                    "переведены в «Требует проверки»."
                 )
             run.completed_at = utcnow()
             self.db.commit()
@@ -476,15 +485,11 @@ class ZimbraObserverService:
             self._run_lock.release()
 
     def _fetch_accounts(self) -> list[ObservedZimbraAccount]:
-        domains = [
-            item.strip().lower()
-            for item in self.settings.zimbra_domains
-            if item.strip()
-        ]
-        if not domains and self.settings.zimbra_primary_domain.strip():
-            domains = [self.settings.zimbra_primary_domain.strip().lower()]
-        if not domains:
-            raise RuntimeError("Не настроены домены Zimbra")
+        """Читает все реальные учетные записи на Zimbra-сервере.
+
+        Политика жизненного цикла глобальная и не зависит от почтового домена
+        или организации. Поэтому здесь намеренно нет фильтра zimbra_domains.
+        """
         if self.settings.zimbra_backend == "disabled":
             raise RuntimeError("Zimbra backend отключен")
 
@@ -494,56 +499,56 @@ class ZimbraObserverService:
         with service._query_lock:
             client = service._client()  # read-only использование общей SSH-конфигурации
             try:
-                combined_accounts: dict[str, ObservedZimbraAccount] = {}
-                for domain in domains:
-                    command = f"{service._zmprov_command()} -l gaa -v {shlex.quote(domain)}"
-                    stdin, stdout, stderr = client.exec_command(command, timeout=120)
-                    stdin.channel.shutdown_write()
-                    channel = stdout.channel
-                    deadline = time.monotonic() + 120.0
-                    out_chunks: list[bytes] = []
-                    err_chunks: list[bytes] = []
+                command = f"{service._zmprov_command()} -l gaa -v"
+                stdin, stdout, stderr = client.exec_command(command, timeout=180)
+                stdin.channel.shutdown_write()
+                channel = stdout.channel
+                deadline = time.monotonic() + 180.0
+                out_chunks: list[bytes] = []
+                err_chunks: list[bytes] = []
 
-                    # gaa -v может вернуть много данных. Вычитываем канал в процессе
-                    # выполнения, чтобы удаленный процесс не остановился на полном
-                    # SSH-буфере до того, как успеет завершиться.
-                    while True:
-                        made_progress = False
-                        while channel.recv_ready():
-                            out_chunks.append(channel.recv(65536))
-                            made_progress = True
-                        while channel.recv_stderr_ready():
-                            err_chunks.append(channel.recv_stderr(65536))
-                            made_progress = True
+                # Полный серверный gaa -v может вернуть большой объем данных.
+                # Вычитываем канал во время выполнения, чтобы SSH-буфер не
+                # остановил удаленный процесс.
+                while True:
+                    made_progress = False
+                    while channel.recv_ready():
+                        out_chunks.append(channel.recv(65536))
+                        made_progress = True
+                    while channel.recv_stderr_ready():
+                        err_chunks.append(channel.recv_stderr(65536))
+                        made_progress = True
 
-                        if (
-                            channel.exit_status_ready()
-                            and not channel.recv_ready()
-                            and not channel.recv_stderr_ready()
-                        ):
-                            break
-                        if time.monotonic() >= deadline:
-                            channel.close()
-                            raise RuntimeError(
-                                f"Превышено время чтения учетных записей Zimbra ({domain})"
-                            )
-                        if not made_progress:
-                            time.sleep(0.05)
-
-                    code = channel.recv_exit_status()
-                    output = b"".join(out_chunks).decode("utf-8", errors="replace")
-                    error = b"".join(err_chunks).decode(
-                        "utf-8", errors="replace"
-                    ).strip()
-                    if code != 0:
+                    if (
+                        channel.exit_status_ready()
+                        and not channel.recv_ready()
+                        and not channel.recv_stderr_ready()
+                    ):
+                        break
+                    if time.monotonic() >= deadline:
+                        channel.close()
                         raise RuntimeError(
-                            f"Не удалось прочитать учетные записи Zimbra ({domain}): "
-                            f"{error or f'код {code}'}"
+                            "Превышено время полного чтения учетных записей Zimbra"
                         )
-                    for account in self._parse_gaa_verbose(output):
-                        key = account.zimbra_id or account.primary_email
-                        if key:
-                            combined_accounts[key.lower()] = account
+                    if not made_progress:
+                        time.sleep(0.05)
+
+                code = channel.recv_exit_status()
+                output = b"".join(out_chunks).decode("utf-8", errors="replace")
+                error = b"".join(err_chunks).decode(
+                    "utf-8", errors="replace"
+                ).strip()
+                if code != 0:
+                    raise RuntimeError(
+                        "Не удалось прочитать все учетные записи Zimbra: "
+                        f"{error or f'код {code}'}"
+                    )
+
+                combined_accounts: dict[str, ObservedZimbraAccount] = {}
+                for account in self._parse_gaa_verbose(output):
+                    key = (account.zimbra_id or account.primary_email).strip().lower()
+                    if key:
+                        combined_accounts[key] = account
                 return list(combined_accounts.values())
             finally:
                 client.close()
@@ -635,43 +640,78 @@ class ZimbraObserverService:
         return ""
 
     def _hr_snapshot(self) -> HRProtectionSnapshot:
-        rows = self.db.scalars(
-            select(HRSourceRecord).where(HRSourceRecord.is_present.is_(True))
-        ).all()
+        """Объединяет исключения из всех кадровых источников 1С.
+
+        Каждый source_id считается самостоятельной организацией/выгрузкой. Для
+        безопасной рекомендации должны быть свежими ВСЕ источники, которые уже
+        известны приложению. Свежая выгрузка одной организации не маскирует
+        просроченную выгрузку другой.
+        """
+        all_rows = list(self.db.scalars(select(HRSourceRecord)).all())
+        present_rows = [row for row in all_rows if row.is_present]
         emails = frozenset(
             row.corporate_email.strip().lower()
-            for row in rows
+            for row in present_rows
             if row.corporate_email and "@" in row.corporate_email
         )
 
-        latest = self.db.scalars(
-            select(OneCImportRun)
-            .where(OneCImportRun.status.in_(SUCCESSFUL_HR_STATUSES))
-            .order_by(desc(OneCImportRun.completed_at), desc(OneCImportRun.id))
-            .limit(1)
-        ).first()
-        snapshot_at = as_utc(
-            (latest.completed_at or latest.started_at) if latest is not None else None
+        source_ids = sorted(
+            {str(row.source_id or "").strip() for row in all_rows if str(row.source_id or "").strip()}
         )
-        if snapshot_at is None:
-            age_minutes = None
-        else:
-            age_minutes = max(
-                0,
-                int((utcnow() - snapshot_at).total_seconds() // 60),
-            )
-        fresh = bool(
-            snapshot_at is not None
-            and age_minutes is not None
-            and age_minutes <= HR_SNAPSHOT_MAX_AGE_HOURS * 60
-            and rows
+        # На самом первом запуске реестр может еще не иметь HRSourceRecord, но
+        # успешный импорт уже зафиксирован. Учитываем и такие source_id.
+        successful_runs = list(
+            self.db.scalars(
+                select(OneCImportRun)
+                .where(OneCImportRun.status.in_(SUCCESSFUL_HR_STATUSES))
+                .order_by(desc(OneCImportRun.completed_at), desc(OneCImportRun.id))
+            ).all()
         )
+        for run in successful_runs:
+            source_id = str(run.source_id or "").strip()
+            if source_id and source_id not in source_ids:
+                source_ids.append(source_id)
+        source_ids.sort()
+
+        latest_by_source: dict[str, datetime] = {}
+        for run in successful_runs:
+            source_id = str(run.source_id or "").strip()
+            if not source_id or source_id in latest_by_source:
+                continue
+            value = as_utc(run.completed_at or run.started_at)
+            if value is not None:
+                latest_by_source[source_id] = value
+
+        now = utcnow()
+        stale_sources: list[str] = []
+        source_ages: list[tuple[str, datetime, int]] = []
+        max_age = HR_SNAPSHOT_MAX_AGE_HOURS * 60
+        for source_id in source_ids:
+            snapshot = latest_by_source.get(source_id)
+            if snapshot is None:
+                stale_sources.append(source_id)
+                continue
+            age = max(0, int((now - snapshot).total_seconds() // 60))
+            source_ages.append((source_id, snapshot, age))
+            if age > max_age:
+                stale_sources.append(source_id)
+
+        # Для совместимости с существующим журналом snapshot_at/age_minutes
+        # показывают самый старый из обязательных источников – именно он определяет
+        # общую свежесть объединенного списка исключений.
+        oldest = max(source_ages, key=lambda item: item[2], default=None)
+        snapshot_at = oldest[1] if oldest is not None else None
+        age_minutes = oldest[2] if oldest is not None else None
+        fresh = bool(source_ids) and not stale_sources
+
         return HRProtectionSnapshot(
             emails=emails,
             snapshot_at=snapshot_at,
             age_minutes=age_minutes,
             fresh=fresh,
-            records_count=len(rows),
+            records_count=len(present_rows),
+            source_count=len(source_ids),
+            stale_sources=tuple(stale_sources),
         )
 
     def _dismissal_schedule_map(self) -> dict[str, date]:
@@ -702,11 +742,7 @@ class ZimbraObserverService:
         hr_active = bool(matched_hr)
 
         scheduled_dismissal = next(
-            (
-                dismissal_map[address]
-                for address in addresses
-                if address in dismissal_map
-            ),
+            (dismissal_map[address] for address in addresses if address in dismissal_map),
             None,
         )
         note_dismissal = parse_dismissal_note_date(account.note)
@@ -714,18 +750,16 @@ class ZimbraObserverService:
 
         status = (account.account_status or "unknown").strip().lower()
 
-        # never_disable – безусловный административный запрет на жизненный цикл.
-        # Он имеет приоритет над увольнением, неактивностью, статусом closed и
-        # сроком хранения: наблюдатель не должен даже рекомендовать закрытие
-        # или удаление такой учетной записи. Сравнение намеренно
-        # регистронезависимое, но ищет отдельный маркер, а не часть другого слова.
+        # До завершения миграции Web-исключений legacy never_disable остается
+        # безусловной защитой. После миграции ManagedZimbraObserverService
+        # вырезает этот маркер из локальной копии Notes перед вызовом сюда.
         if NEVER_DISABLE_RE.search(str(account.note or "")):
             return Evaluation(
                 recommendation="protected_note",
                 reason=(
                     "В zimbraNotes установлен never_disable. Учетная запись "
                     "исключена из закрытия, архивации и удаления независимо от "
-                    "неактивности, даты увольнения и срока хранения."
+                    "неактивности и даты увольнения."
                 ),
                 hr_active=hr_active,
                 matched_hr_email=matched_hr,
@@ -737,14 +771,73 @@ class ZimbraObserverService:
             )
 
         activity = account.last_logon_at or account.created_at
-        inactivity_cutoff = subtract_months(now, config.inactive_months)
-        inactive = bool(activity is not None and activity <= inactivity_cutoff)
+        inactive_cutoff = subtract_months(now, config.inactive_months)
+        archive_cutoff = subtract_months(now, config.retention_months)
+        inactive = bool(activity is not None and activity <= inactive_cutoff)
+        archive_due = bool(activity is not None and activity <= archive_cutoff)
+
+        # Исключения 1С – общий пул по всем организациям. Если адрес найден хотя
+        # бы в одной актуальной выгрузке, не рекомендуем ни закрытие, ни удаление.
+        # Даже при просроченном снимке совпавший адрес безопасно оставляем
+        # защищенным; отсутствие совпадения при stale-снимке не считается
+        # доказательством и блокирует рискованную рекомендацию ниже.
+        if config.exclude_active_hr and hr_active:
+            if status == "closed":
+                reason = (
+                    f"Учетная запись уже закрыта, но адрес {matched_hr} найден "
+                    "среди действующих работников 1С. Архивация и удаление подавлены."
+                )
+            else:
+                reason = (
+                    f"Адрес {matched_hr} найден среди действующих работников 1С. "
+                    "Закрытие, архивация и удаление подавлены."
+                )
+            return Evaluation(
+                recommendation="protected_hr",
+                reason=reason,
+                hr_active=True,
+                matched_hr_email=matched_hr,
+                first_observed_closed_at=(
+                    as_utc(previous_state.first_observed_closed_at)
+                    if previous_state is not None
+                    else None
+                ),
+            )
 
         if status == "active":
-            if dismissal_date is not None and dismissal_date <= local_today:
+            # Legacy-дата увольнения временно имеет приоритет над неактивностью.
+            # Будущая дата, как и в старом production-скрипте, полностью
+            # приостанавливает проверку неактивности до наступления даты.
+            if dismissal_date is not None:
+                if dismissal_date > local_today:
+                    return Evaluation(
+                        recommendation="none",
+                        reason=(
+                            f"Временная дата увольнения из источника – "
+                            f"{dismissal_date.strftime('%d.%m.%Y')}. До этой даты "
+                            "проверка неактивности не применяется."
+                        ),
+                        hr_active=hr_active,
+                        matched_hr_email=matched_hr,
+                    )
+                if config.exclude_active_hr and not hr.fresh:
+                    stale = ", ".join(hr.stale_sources) or "кадровые источники"
+                    return Evaluation(
+                        recommendation="manual_review",
+                        reason=(
+                            f"Увольнение {dismissal_date.strftime('%d.%m.%Y')}, но "
+                            f"не подтверждена актуальность исключений 1С: {stale}. "
+                            "Рекомендация закрытия намеренно не формируется."
+                        ),
+                        hr_active=hr_active,
+                        matched_hr_email=matched_hr,
+                    )
                 return Evaluation(
                     recommendation="close",
-                    reason=f"Увольнение {dismissal_date.strftime('%d.%m.%Y')}. Учетная запись Zimbra остается активной.",
+                    reason=(
+                        f"Увольнение {dismissal_date.strftime('%d.%m.%Y')}. "
+                        "Учетная запись Zimbra остается активной."
+                    ),
                     hr_active=hr_active,
                     matched_hr_email=matched_hr,
                 )
@@ -764,33 +857,23 @@ class ZimbraObserverService:
                 return Evaluation(
                     recommendation="none",
                     reason=(
-                        f"Последняя активность {format_date(activity)} – срок "
-                        f"{config.inactive_months} мес. не превышен."
+                        f"Последняя активность {format_date(activity)} – порог "
+                        f"закрытия {config.inactive_months} мес. не достигнут."
                     ),
                     hr_active=hr_active,
                     matched_hr_email=matched_hr,
                 )
 
             if config.exclude_active_hr and not hr.fresh:
+                stale = ", ".join(hr.stale_sources) or "кадровые источники"
                 return Evaluation(
                     recommendation="manual_review",
                     reason=(
-                        f"Неактивна с {format_date(activity)}, но актуальность списка "
-                        f"действующих работников 1С не подтверждена (допуск {HR_SNAPSHOT_MAX_AGE_HOURS} ч.). "
+                        f"Неактивна с {format_date(activity)}, но не подтверждена "
+                        f"актуальность всех списков действующих работников 1С: {stale}. "
                         "Рекомендация закрытия намеренно не формируется."
                     ),
                     hr_active=hr_active,
-                    matched_hr_email=matched_hr,
-                )
-
-            if config.exclude_active_hr and hr_active:
-                return Evaluation(
-                    recommendation="protected_hr",
-                    reason=(
-                        f"Неактивна с {format_date(activity)}, но адрес {matched_hr} "
-                        "найден у действующего работника в актуальном реестре 1С. Закрытие подавлено."
-                    ),
-                    hr_active=True,
                     matched_hr_email=matched_hr,
                 )
 
@@ -802,56 +885,41 @@ class ZimbraObserverService:
             return Evaluation(
                 recommendation="close",
                 reason=(
-                    f"{activity_kind} {format_date(activity)}. Превышен срок "
-                    f"неактивности {config.inactive_months} мес."
+                    f"{activity_kind} {format_date(activity)}. Достигнут порог "
+                    f"неактивности {config.inactive_months} мес. "
+                    f"Порог архивации/удаления – {config.retention_months} мес."
                 ),
                 hr_active=hr_active,
                 matched_hr_email=matched_hr,
             )
 
         if status == "closed":
-            if config.exclude_active_hr and hr_active:
-                return Evaluation(
-                    recommendation="manual_review",
-                    reason=(
-                        f"Учетная запись уже закрыта, но адрес {matched_hr} найден "
-                        "у действующего работника в последнем реестре 1С."
-                    ),
-                    hr_active=True,
-                    matched_hr_email=matched_hr,
-                    first_observed_closed_at=(
-                        as_utc(previous_state.first_observed_closed_at)
-                        if previous_state is not None
-                        else now
-                    ),
-                )
-
-            note_date = parse_note_date(account.note)
             first_closed = (
                 as_utc(previous_state.first_observed_closed_at)
                 if previous_state is not None
                 else None
             ) or now
-            if note_date is not None:
-                retention_basis = date_to_utc(note_date, self.settings.app_timezone)
-                basis_text = (
-                    f"дата {note_date.strftime('%d.%m.%Y')} из zimbraNotes"
-                )
-            else:
-                retention_basis = first_closed
-                basis_text = (
-                    f"первое наблюдение статуса closed {format_date(first_closed)}"
+
+            if activity is None:
+                return Evaluation(
+                    recommendation="manual_review",
+                    reason=(
+                        "Учетная запись закрыта, но Zimbra не вернула ни "
+                        "zimbraLastLogonTimestamp, ни дату создания. Порог "
+                        "архивации/удаления определить нельзя."
+                    ),
+                    hr_active=hr_active,
+                    matched_hr_email=matched_hr,
+                    first_observed_closed_at=first_closed,
                 )
 
-            retention_cutoff = subtract_months(now, config.retention_months)
-            retention_due = retention_basis <= retention_cutoff
-
-            if not retention_due:
+            if not archive_due:
                 return Evaluation(
                     recommendation="none",
                     reason=(
-                        f"Учетная запись закрыта. Срок хранения {config.retention_months} мес. "
-                        f"еще не истек; основание – {basis_text}."
+                        f"Учетная запись закрыта. Последняя активность "
+                        f"{format_date(activity)} – общий порог архивации/удаления "
+                        f"{config.retention_months} мес. еще не достигнут."
                     ),
                     hr_active=hr_active,
                     matched_hr_email=matched_hr,
@@ -859,11 +927,13 @@ class ZimbraObserverService:
                 )
 
             if config.exclude_active_hr and not hr.fresh:
+                stale = ", ".join(hr.stale_sources) or "кадровые источники"
                 return Evaluation(
                     recommendation="manual_review",
                     reason=(
-                        f"Срок хранения {config.retention_months} мес. истек ({basis_text}), "
-                        "но актуальность списка действующих работников 1С не подтверждена. "
+                        f"Учетная запись закрыта и неактивна с {format_date(activity)}; "
+                        f"порог {config.retention_months} мес. достигнут, но не "
+                        f"подтверждена актуальность всех исключений 1С: {stale}. "
                         "Архивация/удаление намеренно не рекомендуются."
                     ),
                     hr_active=hr_active,
@@ -871,12 +941,18 @@ class ZimbraObserverService:
                     first_observed_closed_at=first_closed,
                 )
 
+            activity_kind = (
+                "последнего входа"
+                if account.last_logon_at is not None
+                else "даты создания (входов не было)"
+            )
             return Evaluation(
                 recommendation="archive_delete",
                 reason=(
-                    f"Учетная запись закрыта, срок хранения {config.retention_months} мес. "
-                    f"истек; основание – {basis_text}. Перед удалением требуется успешная "
-                    "резервная копия. Сейчас никаких действий не выполняется."
+                    f"Учетная запись закрыта. От {activity_kind} "
+                    f"{format_date(activity)} прошло не менее "
+                    f"{config.retention_months} мес. Перед удалением требуется "
+                    "успешная резервная копия. Сейчас никаких действий не выполняется."
                 ),
                 hr_active=hr_active,
                 matched_hr_email=matched_hr,
