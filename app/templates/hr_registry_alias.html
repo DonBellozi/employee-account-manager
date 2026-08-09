@@ -35,36 +35,54 @@
     <dd><code>{{ item.sibling_email }}</code></dd>
 
     <dt>Физический ящик Zimbra</dt>
-    <dd><code>{{ item.mailbox_primary }}</code></dd>
+    <dd>
+      {% if item.mailbox_primary %}
+      <code>{{ item.mailbox_primary }}</code>
+      {% else %}
+      Не подтвержден
+      {% endif %}
+    </dd>
 
     <dt>Предлагаемый алиас</dt>
-    <dd><code>{{ item.proposed_alias }}</code></dd>
+    <dd>
+      {% if item.proposed_alias %}
+      <code>{{ item.proposed_alias }}</code>
+      {% else %}
+      Не определен
+      {% endif %}
+    </dd>
   </dl>
 </section>
 
 <section class="card">
-  {% if item.alias_exists %}
-  <div class="alert success">
-    Алиас уже существует на этом физическом ящике. Будет создано только
-    сопоставление с кадровой записью.
-  </div>
-  {% else %}
-  <div class="alert warning">
-    Новый почтовый ящик не создается. Адрес
-    <strong>{{ item.proposed_alias }}</strong> будет добавлен как алиас к
-    существующему ящику <strong>{{ item.mailbox_primary }}</strong>.
-  </div>
-  {% endif %}
-
-  <form method="post" action="/employees/registry/{{ item.record_id }}/alias">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="modal" value="{{ '1' if embedded else '0' }}">
-    <div class="observer-form-actions">
-      <button class="button" type="submit">
-        {{ 'Привязать алиас' if item.alias_exists else 'Создать алиас' }}
-      </button>
+  {% if item.can_create or item.can_bind %}
+    {% if item.alias_exists %}
+    <div class="alert success">
+      Алиас уже существует на этом физическом ящике. Будет создано только
+      сопоставление с кадровой записью.
     </div>
-  </form>
+    {% else %}
+    <div class="alert warning">
+      Новый почтовый ящик не создается. Адрес
+      <strong>{{ item.proposed_alias }}</strong> будет добавлен как алиас к
+      существующему ящику <strong>{{ item.mailbox_primary }}</strong>.
+    </div>
+    {% endif %}
+
+    <form method="post" action="/employees/registry/{{ item.record_id }}/alias">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="modal" value="{{ '1' if embedded else '0' }}">
+      <div class="observer-form-actions">
+        <button class="button" type="submit">
+          {{ 'Привязать алиас' if item.alias_exists else 'Создать алиас' }}
+        </button>
+      </div>
+    </form>
+  {% else %}
+    <div class="alert error">
+      {{ item.note or 'Создание алиаса сейчас недоступно.' }}
+    </div>
+  {% endif %}
 </section>
 
 {% if saved and embedded %}

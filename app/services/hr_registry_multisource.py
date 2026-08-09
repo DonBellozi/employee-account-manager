@@ -705,27 +705,17 @@ class MultiSourceHRRegistryViewService:
                                 alias_item.get("proposed_alias") or ""
                             ).strip().lower()
                             and str(mapping.zimbra_id or "").strip()
-                            == str(
-                                alias_item.get("mailbox_zimbra_id") or ""
-                            ).strip()
                         )
                         if already_bound:
                             row["alias_note"] = (
                                 f"Алиас {alias_item.get('proposed_alias')} "
                                 "уже привязан к этой кадровой записи."
                             )
-                        elif (
-                            alias_item.get("can_create")
-                            or alias_item.get("can_bind")
-                        ):
+                        elif alias_item.get("can_open"):
                             row["alias_url"] = (
                                 f"/employees/registry/{row['id']}/alias"
                             )
-                            row["alias_action_label"] = (
-                                "Привязать алиас"
-                                if alias_item.get("alias_exists")
-                                else "Создать алиас"
-                            )
+                            row["alias_action_label"] = "Создать алиас"
 
                 # Ручное сопоставление доступно всегда для действующей
                 # кадровой записи: и для проблемной, и для уже проверенной.

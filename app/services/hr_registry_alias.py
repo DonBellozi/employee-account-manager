@@ -130,9 +130,23 @@ class HRRegistryAliasService:
         active_records: list[HRSourceRecord] | None = None,
         mappings: list[EmailLoginMapping] | None = None,
     ) -> dict[int, dict]:
-        records = active_records if active_records is not None else self._active_records()
+        """Быстрые локальные подсказки для кадрового реестра.
+
+        Здесь намеренно НЕТ обращений к Zimbra. Страница кадрового реестра
+        должна строиться только из локальной БД. Точная проверка физического
+        ящика и занятости алиаса выполняется в plan() только после клика.
+        """
+        records = (
+            active_records
+            if active_records is not None
+            else self._active_records()
+        )
         worker_keys = list({record.worker_key for record in records})
-        mapping_rows = mappings if mappings is not None else self._mappings(worker_keys)
+        mapping_rows = (
+            mappings
+            if mappings is not None
+            else self._mappings(worker_keys)
+        )
 
         by_worker: dict[str, list[HRSourceRecord]] = defaultdict(list)
         for record in records:
@@ -146,8 +160,7 @@ class HRRegistryAliasService:
             for mapping in mapping_rows
         }
 
-        preliminary: dict[int, dict] = {}
-        all_neighbor_addresses: list[str] = []
+        result: dict[int, dict] = {}
 
         for record in records:
             if normalize(record.corporate_email):
@@ -161,11 +174,36 @@ class HRRegistryAliasService:
             if not candidates:
                 continue
 
-            preliminary[record.id] = {
+            unique_localparts = {
+                candidate["email"].split("@", 1)[0]
+                for candidate in candidates
+                if "@" in candidate["email"]
+            }
+            source_domain = normalize(record.source_id)
+            proposed_alias = ""
+            can_open = False
+            note = "Соседняя почта найдена."
+
+            if len(unique_localparts) == 1 and source_domain:
+                proposed_alias = (
+                    f"{next(iter(unique_localparts))}@{source_domain}"
+                )
+                can_open = True
+                note = (
+                    "Соседняя почта найдена. "
+                    "Zimbra будет проверена при открытии алиаса."
+                )
+            elif len(unique_localparts) > 1:
+                note = (
+                    "В соседних организациях найдены разные логины почты. "
+                    "Алиас автоматически не предлагается."
+                )
+
+            result[record.id] = {
                 "record_id": record.id,
                 "worker_key": record.worker_key,
                 "fio": record.fio,
-                "source_id": normalize(record.source_id),
+                "source_id": source_domain,
                 "source_name": self._source_name(record),
                 "candidates": candidates,
                 "sibling_email": candidates[0]["email"],
@@ -174,142 +212,174 @@ class HRRegistryAliasService:
                 "mailbox_found": False,
                 "mailbox_primary": "",
                 "mailbox_zimbra_id": "",
-                "proposed_alias": "",
+                "proposed_alias": proposed_alias,
                 "alias_exists": False,
                 "alias_conflict": False,
                 "can_create": False,
                 "can_bind": False,
-                "note": "",
+                "can_open": can_open,
+                "note": note,
             }
-            all_neighbor_addresses.extend(
-                candidate["email"] for candidate in candidates
-            )
 
-        if not preliminary:
-            return {}
-
-        zimbra_enabled = bool(
-            getattr(self.settings, "zimbra_check_enabled", False)
-        ) and str(
-            getattr(self.settings, "zimbra_backend", "")
-        ).strip().lower() != "disabled"
-
-        if not zimbra_enabled:
-            for item in preliminary.values():
-                item["note"] = "Соседняя почта найдена, Zimbra не проверяется."
-            return preliminary
-
-        zimbra = ZimbraService(self.settings)
-        try:
-            neighbor_accounts = zimbra.accounts_by_addresses(
-                list(dict.fromkeys(all_neighbor_addresses))
-            )
-        except Exception as exc:
-            message = f"Соседняя почта найдена, ошибка проверки Zimbra: {exc}"
-            for item in preliminary.values():
-                item["note"] = message
-            return preliminary
-
-        alias_targets: list[str] = []
-        domains = self._mail_domains(self.settings)
-
-        for item in preliminary.values():
-            identities: dict[str, ZimbraAccountIdentity] = {}
-            source_for_identity: dict[str, dict[str, str]] = {}
-
-            for candidate in item["candidates"]:
-                identity = neighbor_accounts.get(candidate["email"])
-                if identity is None:
-                    continue
-                identities[identity.zimbra_id] = identity
-                source_for_identity.setdefault(identity.zimbra_id, candidate)
-
-            if not identities:
-                item["note"] = "Соседняя почта есть в кадрах, но ящик Zimbra не найден."
-                continue
-
-            if len(identities) > 1:
-                item["note"] = (
-                    "В соседних организациях найдены разные физические ящики Zimbra. "
-                    "Алиас автоматически не предлагается."
-                )
-                continue
-
-            identity = next(iter(identities.values()))
-            source = source_for_identity[identity.zimbra_id]
-            item["sibling_email"] = source["email"]
-            item["sibling_source_id"] = source["source_id"]
-            item["sibling_source_name"] = source["source_name"]
-            item["mailbox_found"] = True
-            item["mailbox_primary"] = identity.primary_email
-            item["mailbox_zimbra_id"] = identity.zimbra_id
-
-            source_domain = item["source_id"]
-            if source_domain not in domains:
-                item["note"] = (
-                    f"Домен {source_domain} не входит в настроенные домены Zimbra."
-                )
-                continue
-
-            proposed_alias = f"{identity.login}@{source_domain}"
-            item["proposed_alias"] = proposed_alias
-            alias_targets.append(proposed_alias)
-
-        alias_owners: dict[str, ZimbraAccountIdentity] = {}
-        if alias_targets:
-            try:
-                alias_owners = zimbra.accounts_by_addresses(
-                    list(dict.fromkeys(alias_targets))
-                )
-            except Exception as exc:
-                for item in preliminary.values():
-                    if item["proposed_alias"]:
-                        item["note"] = f"Не удалось проверить предлагаемый алиас: {exc}"
-                return preliminary
-
-        for item in preliminary.values():
-            proposed_alias = item["proposed_alias"]
-            if not proposed_alias:
-                continue
-
-            existing = alias_owners.get(proposed_alias)
-            if existing is None:
-                item["can_create"] = True
-                item["note"] = (
-                    f"Можно добавить алиас {proposed_alias} "
-                    f"к ящику {item['mailbox_primary']}."
-                )
-                continue
-
-            if existing.zimbra_id == item["mailbox_zimbra_id"]:
-                item["alias_exists"] = True
-                item["can_bind"] = True
-                item["note"] = (
-                    f"Алиас {proposed_alias} уже принадлежит этому ящику. "
-                    "Можно привязать его к кадровой записи."
-                )
-                continue
-
-            item["alias_conflict"] = True
-            item["note"] = (
-                f"Адрес {proposed_alias} уже занят другим ящиком Zimbra."
-            )
-
-        return preliminary
+        return result
 
     def plan(self, record_id: int) -> dict:
+        """Точная Zimbra-проверка только для одного выбранного работника."""
         record = self.db.get(HRSourceRecord, int(record_id))
         if record is None or not record.is_present:
             raise LookupError("Работник не найден в текущем кадровом реестре")
         if normalize(record.corporate_email):
-            raise ValueError("В кадровой выгрузке уже указан корпоративный e-mail")
-
-        suggestions = self.suggestions()
-        item = suggestions.get(record.id)
-        if item is None:
             raise ValueError(
-                "У работника не найден подходящий ящик в соседней организации"
+                "В кадровой выгрузке уже указан корпоративный e-mail"
             )
+
+        local_item = self.suggestions().get(record.id)
+        if local_item is None:
+            raise ValueError(
+                "У работника не найдена почта в соседней организации"
+            )
+
+        if not bool(getattr(self.settings, "zimbra_check_enabled", False)):
+            return {
+                **local_item,
+                "can_open": False,
+                "note": "Проверка Zimbra отключена.",
+            }
+
+        if str(
+            getattr(self.settings, "zimbra_backend", "")
+        ).strip().lower() == "disabled":
+            return {
+                **local_item,
+                "can_open": False,
+                "note": "Zimbra backend отключен.",
+            }
+
+        domains = self._mail_domains(self.settings)
+        source_domain = local_item["source_id"]
+        if source_domain not in domains:
+            return {
+                **local_item,
+                "can_open": False,
+                "note": (
+                    f"Домен {source_domain} не входит "
+                    "в настроенные домены Zimbra."
+                ),
+            }
+
+        zimbra = ZimbraService(self.settings)
+        candidate_addresses = [
+            candidate["email"]
+            for candidate in local_item["candidates"]
+        ]
+
+        try:
+            neighbor_accounts = zimbra.accounts_by_addresses(
+                candidate_addresses
+            )
+        except Exception as exc:
+            return {
+                **local_item,
+                "can_open": False,
+                "note": f"Ошибка проверки Zimbra: {exc}",
+            }
+
+        identities: dict[str, ZimbraAccountIdentity] = {}
+        source_for_identity: dict[str, dict[str, str]] = {}
+
+        for candidate in local_item["candidates"]:
+            identity = neighbor_accounts.get(candidate["email"])
+            if identity is None:
+                continue
+            identities[identity.zimbra_id] = identity
+            source_for_identity.setdefault(
+                identity.zimbra_id,
+                candidate,
+            )
+
+        if not identities:
+            return {
+                **local_item,
+                "can_open": False,
+                "note": (
+                    "Соседняя почта есть в кадрах, "
+                    "но ящик Zimbra не найден."
+                ),
+            }
+
+        if len(identities) > 1:
+            return {
+                **local_item,
+                "can_open": False,
+                "note": (
+                    "В соседних организациях найдены разные "
+                    "физические ящики Zimbra. Алиас автоматически "
+                    "не предлагается."
+                ),
+            }
+
+        identity = next(iter(identities.values()))
+        source = source_for_identity[identity.zimbra_id]
+        proposed_alias = f"{identity.login}@{source_domain}"
+
+        try:
+            existing = zimbra.account_by_address(proposed_alias)
+        except Exception as exc:
+            return {
+                **local_item,
+                "sibling_email": source["email"],
+                "sibling_source_id": source["source_id"],
+                "sibling_source_name": source["source_name"],
+                "mailbox_found": True,
+                "mailbox_primary": identity.primary_email,
+                "mailbox_zimbra_id": identity.zimbra_id,
+                "proposed_alias": proposed_alias,
+                "can_open": False,
+                "note": (
+                    "Не удалось проверить предлагаемый алиас: "
+                    f"{exc}"
+                ),
+            }
+
+        item = {
+            **local_item,
+            "sibling_email": source["email"],
+            "sibling_source_id": source["source_id"],
+            "sibling_source_name": source["source_name"],
+            "mailbox_found": True,
+            "mailbox_primary": identity.primary_email,
+            "mailbox_zimbra_id": identity.zimbra_id,
+            "proposed_alias": proposed_alias,
+            "alias_exists": False,
+            "alias_conflict": False,
+            "can_create": False,
+            "can_bind": False,
+            "can_open": True,
+            "note": "",
+        }
+
+        if existing is None:
+            item["can_create"] = True
+            item["note"] = (
+                f"Можно добавить алиас {proposed_alias} "
+                f"к ящику {identity.primary_email}."
+            )
+            return item
+
+        if existing.zimbra_id == identity.zimbra_id:
+            item["alias_exists"] = True
+            item["can_bind"] = True
+            item["note"] = (
+                f"Алиас {proposed_alias} уже принадлежит этому "
+                "ящику. Можно привязать его к кадровой записи."
+            )
+            return item
+
+        item["alias_conflict"] = True
+        item["can_open"] = False
+        item["note"] = (
+            f"Адрес {proposed_alias} уже занят другим ящиком Zimbra."
+        )
         return item
 
     def create_or_bind(

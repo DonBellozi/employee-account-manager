@@ -20,6 +20,13 @@ class FakeSettings:
     dry_run = False
 
 
+class BombZimbra:
+    def __init__(self, settings):
+        raise AssertionError(
+            "Кадровый реестр не должен обращаться к Zimbra"
+        )
+
+
 class FakeZimbra:
     neighbor = SimpleNamespace(
         zimbra_id="mailbox-1",
@@ -49,11 +56,17 @@ class FakeZimbra:
                         zimbra_id="mailbox-1",
                         primary_email="ivanov@one.ru",
                         login="ivanov",
-                        addresses=("ivanov@one.ru", "ivanov@two.ru"),
+                        addresses=(
+                            "ivanov@one.ru",
+                            "ivanov@two.ru",
+                        ),
                     )
                 elif self.alias_mode == "conflict":
                     result[email] = self.conflicting
         return result
+
+    def account_by_address(self, email):
+        return self.accounts_by_addresses([email]).get(email)
 
 
 class AliasSuggestionTests(unittest.TestCase):
@@ -97,15 +110,27 @@ class AliasSuggestionTests(unittest.TestCase):
         self.db.close()
         self.engine.dispose()
 
-    @patch("app.services.hr_registry_alias.ZimbraService", FakeZimbra)
-    def test_free_alias_is_proposed_from_neighbor_mailbox(self):
-        FakeZimbra.alias_mode = "free"
-        items = HRRegistryAliasService(
+    @patch("app.services.hr_registry_alias.ZimbraService", BombZimbra)
+    def test_registry_suggestion_is_local_only(self):
+        item = HRRegistryAliasService(
             self.settings,
             self.db,
-        ).suggestions()
-        item = items[self.second.id]
+        ).suggestions()[self.second.id]
+
         self.assertEqual(item["sibling_email"], "ivanov@one.ru")
+        self.assertEqual(item["proposed_alias"], "ivanov@two.ru")
+        self.assertTrue(item["can_open"])
+        self.assertFalse(item["can_create"])
+        self.assertFalse(item["can_bind"])
+
+    @patch("app.services.hr_registry_alias.ZimbraService", FakeZimbra)
+    def test_plan_checks_zimbra_only_for_selected_worker(self):
+        FakeZimbra.alias_mode = "free"
+        item = HRRegistryAliasService(
+            self.settings,
+            self.db,
+        ).plan(self.second.id)
+
         self.assertEqual(item["mailbox_zimbra_id"], "mailbox-1")
         self.assertEqual(item["proposed_alias"], "ivanov@two.ru")
         self.assertTrue(item["can_create"])
@@ -116,7 +141,8 @@ class AliasSuggestionTests(unittest.TestCase):
         item = HRRegistryAliasService(
             self.settings,
             self.db,
-        ).suggestions()[self.second.id]
+        ).plan(self.second.id)
+
         self.assertTrue(item["alias_exists"])
         self.assertTrue(item["can_bind"])
         self.assertFalse(item["can_create"])
@@ -127,16 +153,17 @@ class AliasSuggestionTests(unittest.TestCase):
         item = HRRegistryAliasService(
             self.settings,
             self.db,
-        ).suggestions()[self.second.id]
+        ).plan(self.second.id)
+
         self.assertTrue(item["alias_conflict"])
         self.assertFalse(item["can_create"])
         self.assertFalse(item["can_bind"])
 
-    @patch("app.services.hr_registry_alias.ZimbraService", FakeZimbra)
+    @patch("app.services.hr_registry_alias.ZimbraService", BombZimbra)
     def test_employee_with_own_hr_email_gets_no_alias_offer(self):
-        FakeZimbra.alias_mode = "free"
         self.second.corporate_email = "ivanov@two.ru"
         self.db.commit()
+
         items = HRRegistryAliasService(
             self.settings,
             self.db,
