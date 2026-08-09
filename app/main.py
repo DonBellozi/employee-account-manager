@@ -9,10 +9,11 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import get_settings
 from app.db import Base, SessionLocal, engine, ensure_compatibility_schema
-from app.routers import admin, auth, employees, settings_ui
+from app.routers import admin, auth, employees, settings_ui, telegram_settings
 from app.security import CSRFMismatchError, ensure_bootstrap_admin
 from app.services.blocking_worker import BlockingQueueWorker
 from app.services.onec_scheduler import OneCAutoImportScheduler
+from app.services.telegram_worker import TelegramNotificationWorker
 
 settings = get_settings()
 
@@ -28,11 +29,17 @@ async def lifespan(_: FastAPI):
 
     onec_scheduler = OneCAutoImportScheduler(settings, SessionLocal)
     blocking_worker = BlockingQueueWorker(settings, SessionLocal)
+    telegram_worker = TelegramNotificationWorker(
+        settings.app_secret_key,
+        SessionLocal,
+    )
     onec_scheduler.start()
     blocking_worker.start()
+    telegram_worker.start()
     try:
         yield
     finally:
+        telegram_worker.stop()
         blocking_worker.stop()
         onec_scheduler.stop()
 
@@ -50,6 +57,7 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(auth.router)
 app.include_router(employees.router)
 app.include_router(settings_ui.router)
+app.include_router(telegram_settings.router)
 app.include_router(admin.router)
 
 

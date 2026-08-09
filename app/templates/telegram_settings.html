@@ -1,0 +1,231 @@
+{% extends "base.html" %}
+{% block title %}Telegram{% endblock %}
+{% block content %}
+<div class="telegram-settings-page">
+<div class="heading-row">
+  <div>
+    <h1>Telegram</h1>
+    <p class="muted">
+      Единый канал служебных отчетов приложения. Будущие перенесенные задачи
+      будут использовать эти настройки вместо собственных Telegram-подключений.
+    </p>
+  </div>
+  <a class="button secondary" href="/settings">Назад к настройкам</a>
+</div>
+
+{% if saved %}
+<div class="alert success">Настройки Telegram сохранены.</div>
+{% endif %}
+{% if error %}
+<div class="alert error">{{ error }}</div>
+{% endif %}
+
+<section class="card integration-card integration-card-wide">
+  <div class="integration-card-heading">
+    <div>
+      <h2>Подключение</h2>
+      <span class="integration-badge{% if telegram.enabled and telegram.configured %} active{% endif %}"
+            id="telegram-badge">
+        {% if telegram.enabled and telegram.configured %}Используется{% elif telegram.configured %}Отключено{% else %}Не настроено{% endif %}
+      </span>
+    </div>
+    <button class="button secondary"
+            type="button"
+            id="telegram-test"
+            {% if not telegram.configured %}disabled{% endif %}>
+      Проверить и отправить тест
+    </button>
+  </div>
+
+  <form method="post" action="/settings/telegram">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+
+    <div class="telegram-config-grid">
+      <label>
+        <span>Включено</span>
+        <input type="checkbox" name="enabled" value="on"{% if telegram.enabled %} checked{% endif %}>
+      </label>
+
+      <label>
+        <span>Bot token</span>
+        <input type="password"
+               name="bot_token"
+               value=""
+               autocomplete="new-password"
+               placeholder="{% if telegram.token_configured %}Токен уже задан – оставьте пустым, чтобы не менять{% else %}123456789:AA...{% endif %}">
+        <small class="muted">
+          Токен не показывается после сохранения и хранится в SQLite в зашифрованном виде.
+        </small>
+      </label>
+
+      <label>
+        <span>Chat ID</span>
+        <input type="text"
+               name="chat_id"
+               value="{{ telegram.chat_id }}"
+               autocomplete="off"
+               placeholder="-1001234567890">
+        <small class="muted">Для группы обычно используется отрицательный ID вида -100...</small>
+      </label>
+
+      <label>
+        <span>ID темы</span>
+        <input type="text"
+               name="topic_id"
+               value="{{ telegram.topic_id }}"
+               inputmode="numeric"
+               autocomplete="off"
+               placeholder="Необязательно">
+        <small class="muted">Заполняется только если сообщения должны идти в конкретную тему форума Telegram.</small>
+      </label>
+    </div>
+
+    {% if telegram.token_configured %}
+    <label>
+      <input type="checkbox" name="clear_token" value="on">
+      <span>Удалить сохраненный токен</span>
+    </label>
+    {% endif %}
+
+    <div class="integration-card-actions">
+      <button class="button" type="submit">Сохранить</button>
+    </div>
+  </form>
+
+  <div class="integration-test-result" id="telegram-test-result"></div>
+
+  <dl class="integration-details">
+    <dt>Токен</dt><dd>{{ 'задан' if telegram.token_configured else 'не задан' }}</dd>
+    <dt>Chat ID</dt><dd><code>{{ telegram.chat_id or '–' }}</code></dd>
+    <dt>Тема</dt><dd><code>{{ telegram.topic_id or '–' }}</code></dd>
+    <dt>Последнее изменение</dt>
+    <dd>
+      {% if telegram.updated_at %}
+        {{ telegram.updated_at|app_datetime('%d.%m.%Y %H:%M:%S') }}{% if telegram.updated_by %}, {{ telegram.updated_by }}{% endif %}
+      {% else %}
+        –
+      {% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="card table-wrap">
+  <div class="blocking-results-heading">
+    <div>
+      <h2>Очередь уведомлений</h2>
+      <p class="muted">Последние 20 сообщений. Ошибка Telegram не прерывает основную операцию приложения.</p>
+    </div>
+    <button class="button secondary" type="button" id="telegram-retry-failed">Повторить ошибки</button>
+  </div>
+  <div class="integration-test-result" id="telegram-retry-result"></div>
+
+  <table class="journal-table">
+    <thead>
+      <tr>
+        <th>Дата</th>
+        <th>Событие</th>
+        <th>Статус</th>
+        <th>Попыток</th>
+        <th>Отправлено</th>
+        <th>Ошибка</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in notifications %}
+      <tr>
+        <td class="journal-date">
+          {{ item.created_at|app_datetime('%d.%m.%Y') }}
+          <span>{{ item.created_at|app_datetime('%H:%M:%S') }}</span>
+        </td>
+        <td><code>{{ item.event_type }}</code></td>
+        <td>
+          <span class="status {{ 'success' if item.status == 'sent' else 'failed' if item.status == 'failed' else 'running' }}">
+            {{ 'Отправлено' if item.status == 'sent' else 'Ошибка' if item.status == 'failed' else 'Ожидает отправки' }}
+          </span>
+        </td>
+        <td>{{ item.attempts }}</td>
+        <td>{{ item.sent_at|app_datetime('%d.%m.%Y %H:%M:%S') if item.sent_at else '–' }}</td>
+        <td>{% if item.last_error %}<span class="registry-error">{{ item.last_error }}</span>{% else %}–{% endif %}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">Уведомлений пока нет.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<script>
+(() => {
+  const button = document.getElementById('telegram-test');
+  const result = document.getElementById('telegram-test-result');
+  const badge = document.getElementById('telegram-badge');
+  const csrf = {{ csrf|tojson }};
+
+  button?.addEventListener('click', async () => {
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Проверяю...';
+    result.className = 'integration-test-result checking';
+    result.textContent = 'Проверяю Bot API и отправляю тестовое сообщение...';
+    try {
+      const response = await fetch('/settings/telegram/test', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: new URLSearchParams({csrf}),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || 'Ошибка проверки Telegram');
+      }
+      result.className = 'integration-test-result success';
+      result.textContent = payload.message || 'Telegram работает.';
+      if (badge) {
+        badge.className = 'integration-badge active';
+        badge.textContent = 'Работает';
+      }
+    } catch (error) {
+      result.className = 'integration-test-result error';
+      result.textContent = error.message || String(error);
+      if (badge) {
+        badge.className = 'integration-badge error';
+        badge.textContent = 'Ошибка';
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  });
+
+  const retryButton = document.getElementById('telegram-retry-failed');
+  const retryResult = document.getElementById('telegram-retry-result');
+  retryButton?.addEventListener('click', async () => {
+    const originalText = retryButton.textContent;
+    retryButton.disabled = true;
+    retryButton.textContent = 'Ставлю в очередь...';
+    retryResult.className = 'integration-test-result checking';
+    retryResult.textContent = 'Возвращаю сообщения с ошибкой в очередь.';
+    try {
+      const response = await fetch('/settings/telegram/retry-failed', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: new URLSearchParams({csrf}),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || 'Не удалось повторить сообщения');
+      }
+      retryResult.className = 'integration-test-result success';
+      retryResult.textContent = `Возвращено в очередь: ${payload.count || 0}.`;
+      window.setTimeout(() => window.location.reload(), 1000);
+    } catch (error) {
+      retryResult.className = 'integration-test-result error';
+      retryResult.textContent = error.message || String(error);
+    } finally {
+      retryButton.disabled = false;
+      retryButton.textContent = originalText;
+    }
+  });
+})();
+</script>
+</div>
+{% endblock %}
