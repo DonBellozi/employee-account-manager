@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import threading
 import time
 from calendar import monthrange
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time as dt_time, timezone
 from zoneinfo import ZoneInfo
 
@@ -32,13 +33,24 @@ NEVER_DISABLE_RE = re.compile(r"(?:^|[^a-z0-9_])never_disable(?:$|[^a-z0-9_])", 
 SCHEDULE_RE = re.compile(r"^(\d{2}):(\d{2})$")
 
 RECOMMENDATION_LABELS = {
-    "none": "Действий не требуется",
-    "close": "Рекомендуется закрыть Zimbra",
-    "archive_delete": "Рекомендуется архивировать и удалить",
-    "protected_hr": "Действие подавлено данными 1С",
-    "protected_note": "Защищена never_disable",
-    "manual_review": "Требует проверки",
-    "missing": "Учетная запись больше не найдена",
+    "none": "Без действий",
+    "close": "Закрыть",
+    "archive_delete": "Backup + удалить",
+    "protected_hr": "Защищена 1С",
+    "protected_note": "Защищена",
+    "manual_review": "Проверить",
+    "missing": "Не найдена",
+}
+
+ZIMBRA_STATUS_LABELS = {
+    "active": "Активна",
+    "closed": "Закрыта",
+    "locked": "Заблокирована",
+    "maintenance": "Обслуживание",
+    "pending": "Ожидает",
+    "lockout": "Временная блокировка",
+    "unknown": "Не определен",
+    "": "Не определен",
 }
 
 
@@ -424,11 +436,7 @@ class ZimbraObserverService:
                 if state.recommendation == "missing":
                     continue
                 previous = state.recommendation
-                reason = (
-                    "Учетная запись больше не найдена при полном чтении настроенных "
-                    "доменов Zimbra. Это наблюдение не считается увольнением и не "
-                    "запускает никаких действий."
-                )
+                reason = "Учетная запись не найдена в Zimbra."
                 state.recommendation = "missing"
                 state.reason = reason
                 state.last_observed_at = now
@@ -465,9 +473,8 @@ class ZimbraObserverService:
             if config.exclude_active_hr and not hr.fresh:
                 stale = ", ".join(hr.stale_sources) or "нет подтвержденных кадровых источников"
                 run.error_message = (
-                    "Актуальность всех кадровых выгрузок 1С не подтверждена. "
-                    f"Проблемные источники: {stale}. Рискованные рекомендации "
-                    "переведены в «Требует проверки»."
+                    f"Неактуальные выгрузки 1С: {stale}. "
+                    "Рискованные действия отключены."
                 )
             run.completed_at = utcnow()
             self.db.commit()
@@ -552,9 +559,120 @@ class ZimbraObserverService:
                     key = (account.zimbra_id or account.primary_email).strip().lower()
                     if key:
                         combined_accounts[key] = account
-                return list(combined_accounts.values())
+
+                accounts = list(combined_accounts.values())
+                unresolved = [
+                    account
+                    for account in accounts
+                    if (account.account_status or "unknown").strip().lower() == "unknown"
+                ]
+                if unresolved:
+                    statuses = self._fetch_missing_statuses(service, unresolved)
+                    accounts = [
+                        replace(
+                            account,
+                            account_status=statuses.get(
+                                account.primary_email.strip().lower(),
+                                account.account_status,
+                            ),
+                        )
+                        if account in unresolved
+                        else account
+                        for account in accounts
+                    ]
+                return accounts
             finally:
                 client.close()
+
+    @staticmethod
+    def _parse_status_batch(output: str) -> dict[str, str]:
+        """Разбирает пакетный `ga <email> zimbraAccountStatus`."""
+        result: dict[str, str] = {}
+        current = ""
+        for raw_line in str(output or "").splitlines():
+            line = raw_line.strip()
+            if line.lower().startswith("# name "):
+                current = line[7:].strip().lower()
+                continue
+            if line.lower().startswith("zimbraaccountstatus:") and current:
+                status = line.split(":", 1)[1].strip().lower()
+                if status:
+                    result[current] = status
+        return result
+
+    def _fetch_missing_statuses(
+        self,
+        service: ZimbraService,
+        accounts: list[ObservedZimbraAccount],
+    ) -> dict[str, str]:
+        """Дозапрашивает статус только для ящиков без zimbraAccountStatus.
+
+        Несколько `ga` отправляются в один процесс zmprov через stdin, чтобы не
+        запускать отдельную JVM для каждого ящика.
+        """
+        emails = list(
+            dict.fromkeys(
+                account.primary_email.strip().lower()
+                for account in accounts
+                if account.primary_email.strip()
+            )
+        )
+        if not emails:
+            return {}
+
+        result: dict[str, str] = {}
+        for offset in range(0, len(emails), 250):
+            chunk = emails[offset:offset + 250]
+            client = service._client()
+            try:
+                stdin, stdout, stderr = client.exec_command(
+                    f"{service._zmprov_command()} -l",
+                    timeout=180,
+                )
+                payload = "".join(
+                    shlex.join(["ga", email, "zimbraAccountStatus"]) + "\n"
+                    for email in chunk
+                ).encode("utf-8")
+                channel = stdin.channel
+                channel.sendall(payload)
+                channel.shutdown_write()
+
+                deadline = time.monotonic() + 180.0
+                out_chunks: list[bytes] = []
+                err_chunks: list[bytes] = []
+                read_channel = stdout.channel
+                while True:
+                    progressed = False
+                    while read_channel.recv_ready():
+                        out_chunks.append(read_channel.recv(65536))
+                        progressed = True
+                    while read_channel.recv_stderr_ready():
+                        err_chunks.append(read_channel.recv_stderr(65536))
+                        progressed = True
+                    if (
+                        read_channel.exit_status_ready()
+                        and not read_channel.recv_ready()
+                        and not read_channel.recv_stderr_ready()
+                    ):
+                        break
+                    if time.monotonic() >= deadline:
+                        read_channel.close()
+                        return result
+                    if not progressed:
+                        time.sleep(0.05)
+
+                code = read_channel.recv_exit_status()
+                output = b"".join(out_chunks).decode("utf-8", errors="replace")
+                result.update(self._parse_status_batch(output))
+                if code != 0:
+                    continue
+            except Exception:
+                # Дополнительный запрос не должен ломать полный read-only обход.
+                # Неопределенный статус останется manual_review.
+                continue
+            finally:
+                client.close()
+        return result
 
     @classmethod
     def _parse_gaa_verbose(cls, output: str) -> list[ObservedZimbraAccount]:
@@ -759,11 +877,7 @@ class ZimbraObserverService:
         if NEVER_DISABLE_RE.search(str(account.note or "")):
             return Evaluation(
                 recommendation="protected_note",
-                reason=(
-                    "В zimbraNotes установлен never_disable. Учетная запись "
-                    "исключена из закрытия, архивации и удаления независимо от "
-                    "неактивности и даты увольнения."
-                ),
+                reason="Защищена never_disable.",
                 hr_active=hr_active,
                 matched_hr_email=matched_hr,
                 first_observed_closed_at=(
@@ -786,15 +900,9 @@ class ZimbraObserverService:
         # доказательством и блокирует рискованную рекомендацию ниже.
         if config.exclude_active_hr and hr_active:
             if status == "closed":
-                reason = (
-                    f"Учетная запись уже закрыта, но адрес {matched_hr} найден "
-                    "среди действующих работников 1С. Архивация и удаление подавлены."
-                )
+                reason = f"1С: {matched_hr}. Ящик закрыт, удаление запрещено."
             else:
-                reason = (
-                    f"Адрес {matched_hr} найден среди действующих работников 1С. "
-                    "Закрытие, архивация и удаление подавлены."
-                )
+                reason = f"1С: {matched_hr}. Защищена."
             return Evaluation(
                 recommendation="protected_hr",
                 reason=reason,
@@ -816,9 +924,8 @@ class ZimbraObserverService:
                     return Evaluation(
                         recommendation="none",
                         reason=(
-                            f"Временная дата увольнения из источника – "
-                            f"{dismissal_date.strftime('%d.%m.%Y')}. До этой даты "
-                            "проверка неактивности не применяется."
+                            f"Увольнение {dismissal_date.strftime('%d.%m.%Y')}. "
+                            "До даты действий нет."
                         ),
                         hr_active=hr_active,
                         matched_hr_email=matched_hr,
@@ -828,19 +935,15 @@ class ZimbraObserverService:
                     return Evaluation(
                         recommendation="manual_review",
                         reason=(
-                            f"Увольнение {dismissal_date.strftime('%d.%m.%Y')}, но "
-                            f"не подтверждена актуальность исключений 1С: {stale}. "
-                            "Рекомендация закрытия намеренно не формируется."
+                            f"Увольнение {dismissal_date.strftime('%d.%m.%Y')}. "
+                            f"Неактуальные выгрузки 1С: {stale}."
                         ),
                         hr_active=hr_active,
                         matched_hr_email=matched_hr,
                     )
                 return Evaluation(
                     recommendation="close",
-                    reason=(
-                        f"Увольнение {dismissal_date.strftime('%d.%m.%Y')}. "
-                        "Учетная запись Zimbra остается активной."
-                    ),
+                    reason=f"Увольнение {dismissal_date.strftime('%d.%m.%Y')}. Ящик активен.",
                     hr_active=hr_active,
                     matched_hr_email=matched_hr,
                 )
@@ -848,10 +951,7 @@ class ZimbraObserverService:
             if activity is None:
                 return Evaluation(
                     recommendation="manual_review",
-                    reason=(
-                        "Zimbra не вернула ни zimbraLastLogonTimestamp, ни дату создания. "
-                        "Срок неактивности определить нельзя."
-                    ),
+                    reason="Нет даты входа или создания.",
                     hr_active=hr_active,
                     matched_hr_email=matched_hr,
                 )
@@ -860,8 +960,8 @@ class ZimbraObserverService:
                 return Evaluation(
                     recommendation="none",
                     reason=(
-                        f"Последняя активность {format_date(activity)} – порог "
-                        f"закрытия {config.inactive_months} мес. не достигнут."
+                        f"Активность {format_date(activity)}. "
+                        f"Порог {config.inactive_months} мес. не достигнут."
                     ),
                     hr_active=hr_active,
                     matched_hr_email=matched_hr,
@@ -872,25 +972,23 @@ class ZimbraObserverService:
                 return Evaluation(
                     recommendation="manual_review",
                     reason=(
-                        f"Неактивна с {format_date(activity)}, но не подтверждена "
-                        f"актуальность всех списков действующих работников 1С: {stale}. "
-                        "Рекомендация закрытия намеренно не формируется."
+                        f"Активность {format_date(activity)}. "
+                        f"Неактуальные выгрузки 1С: {stale}."
                     ),
                     hr_active=hr_active,
                     matched_hr_email=matched_hr,
                 )
 
             activity_kind = (
-                "Последняя активность"
+                "Активность"
                 if account.last_logon_at is not None
-                else "Входов не было, учетная запись создана"
+                else "Создана"
             )
             return Evaluation(
                 recommendation="close",
                 reason=(
-                    f"{activity_kind} {format_date(activity)}. Достигнут порог "
-                    f"неактивности {config.inactive_months} мес. "
-                    f"Порог архивации/удаления – {config.retention_months} мес."
+                    f"{activity_kind} {format_date(activity)}. "
+                    f"Неактивность ≥ {config.inactive_months} мес."
                 ),
                 hr_active=hr_active,
                 matched_hr_email=matched_hr,
@@ -906,11 +1004,7 @@ class ZimbraObserverService:
             if activity is None:
                 return Evaluation(
                     recommendation="manual_review",
-                    reason=(
-                        "Учетная запись закрыта, но Zimbra не вернула ни "
-                        "zimbraLastLogonTimestamp, ни дату создания. Порог "
-                        "архивации/удаления определить нельзя."
-                    ),
+                    reason="Закрыта. Нет даты входа или создания.",
                     hr_active=hr_active,
                     matched_hr_email=matched_hr,
                     first_observed_closed_at=first_closed,
@@ -920,9 +1014,8 @@ class ZimbraObserverService:
                 return Evaluation(
                     recommendation="none",
                     reason=(
-                        f"Учетная запись закрыта. Последняя активность "
-                        f"{format_date(activity)} – общий порог архивации/удаления "
-                        f"{config.retention_months} мес. еще не достигнут."
+                        f"Закрыта. Активность {format_date(activity)}. "
+                        f"Порог {config.retention_months} мес. не достигнут."
                     ),
                     hr_active=hr_active,
                     matched_hr_email=matched_hr,
@@ -934,10 +1027,8 @@ class ZimbraObserverService:
                 return Evaluation(
                     recommendation="manual_review",
                     reason=(
-                        f"Учетная запись закрыта и неактивна с {format_date(activity)}; "
-                        f"порог {config.retention_months} мес. достигнут, но не "
-                        f"подтверждена актуальность всех исключений 1С: {stale}. "
-                        "Архивация/удаление намеренно не рекомендуются."
+                        f"Закрыта. Активность {format_date(activity)}. "
+                        f"Неактуальные выгрузки 1С: {stale}."
                     ),
                     hr_active=hr_active,
                     matched_hr_email=matched_hr,
@@ -945,17 +1036,15 @@ class ZimbraObserverService:
                 )
 
             activity_kind = (
-                "последнего входа"
+                "входа"
                 if account.last_logon_at is not None
-                else "даты создания (входов не было)"
+                else "создания"
             )
             return Evaluation(
                 recommendation="archive_delete",
                 reason=(
-                    f"Учетная запись закрыта. От {activity_kind} "
-                    f"{format_date(activity)} прошло не менее "
-                    f"{config.retention_months} мес. Перед удалением требуется "
-                    "успешная резервная копия. Сейчас никаких действий не выполняется."
+                    f"Закрыта. От {activity_kind} {format_date(activity)} ≥ "
+                    f"{config.retention_months} мес. Требуется backup."
                 ),
                 hr_active=hr_active,
                 matched_hr_email=matched_hr,
@@ -965,8 +1054,9 @@ class ZimbraObserverService:
         return Evaluation(
             recommendation="manual_review",
             reason=(
-                f"Нештатный статус Zimbra «{status or 'не указан'}». Наблюдатель "
-                "не формирует автоматических рекомендаций для этого состояния."
+                "Статус Zimbra не определен."
+                if status == "unknown"
+                else f"Статус Zimbra: {status}. Требуется проверка."
             ),
             hr_active=hr_active,
             matched_hr_email=matched_hr,

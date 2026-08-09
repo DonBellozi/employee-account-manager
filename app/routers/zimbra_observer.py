@@ -12,6 +12,7 @@ from app.security import (
     require_admin,
     validate_csrf,
 )
+from app.services.zimbra_observer import ZIMBRA_STATUS_LABELS
 from app.services.zimbra_protection import (
     ManagedZimbraObserverService,
     recommendation_label,
@@ -46,6 +47,7 @@ def _context(
             state.recommendation: recommendation_label(state.recommendation)
             for state in states
         },
+        "zimbra_status_labels": ZIMBRA_STATUS_LABELS,
         "saved": saved,
         "run_message": run_message,
         "error": error,

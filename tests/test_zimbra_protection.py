@@ -205,7 +205,7 @@ zimbraNotes: never_disable
             local_today=FIXED_NOW.date(),
         )
         self.assertEqual(evaluation.recommendation, "protected_note")
-        self.assertIn("защищена в Web", evaluation.reason)
+        self.assertIn("Web-защита", evaluation.reason)
 
     def test_metadata_refresh_follows_same_zimbra_id_after_email_rename(self):
         row = ZimbraProtectedAccount(

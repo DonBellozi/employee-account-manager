@@ -217,10 +217,7 @@ class ManagedZimbraObserverService(ZimbraObserverService):
             reason_text = protected.reason.strip() or "Причина не указана"
             return Evaluation(
                 recommendation="protected_note",
-                reason=(
-                    f"Учетная запись защищена в Web. Причина: {reason_text}. "
-                    "Закрытие, архивация и удаление не рекомендуются."
-                ),
+                reason=f"Web-защита: {reason_text}.",
                 first_observed_closed_at=(
                     as_utc(previous_state.first_observed_closed_at)
                     if previous_state is not None

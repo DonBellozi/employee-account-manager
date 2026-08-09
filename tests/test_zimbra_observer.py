@@ -108,7 +108,7 @@ class ZimbraObserverTests(unittest.TestCase):
             local_today=FIXED_NOW.date(),
         )
         self.assertEqual(evaluation.recommendation, "close")
-        self.assertIn("порог неактивности 6 мес.", evaluation.reason)
+        self.assertIn("Неактивность ≥ 6 мес.", evaluation.reason)
 
     def test_active_thirteen_month_account_is_still_close_not_delete(self):
         config = self.service().get_settings_record()
@@ -139,7 +139,7 @@ class ZimbraObserverTests(unittest.TestCase):
             local_today=FIXED_NOW.date(),
         )
         self.assertEqual(evaluation.recommendation, "none")
-        self.assertIn("12 мес. еще не достигнут", evaluation.reason)
+        self.assertIn("Порог 12 мес. не достигнут", evaluation.reason)
 
     def test_closed_thirteen_month_account_is_archive_candidate(self):
         config = self.service().get_settings_record()
@@ -156,8 +156,8 @@ class ZimbraObserverTests(unittest.TestCase):
             local_today=FIXED_NOW.date(),
         )
         self.assertEqual(evaluation.recommendation, "archive_delete")
-        self.assertIn("резервная копия", evaluation.reason)
-        self.assertIn("последнего входа", evaluation.reason)
+        self.assertIn("Требуется backup", evaluation.reason)
+        self.assertIn("входа", evaluation.reason)
 
     def test_closed_never_logged_in_uses_creation_date_for_archive(self):
         config = self.service().get_settings_record()
@@ -175,7 +175,7 @@ class ZimbraObserverTests(unittest.TestCase):
             local_today=FIXED_NOW.date(),
         )
         self.assertEqual(evaluation.recommendation, "archive_delete")
-        self.assertIn("даты создания", evaluation.reason)
+        self.assertIn("создания", evaluation.reason)
 
     def test_active_hr_alias_suppresses_all_lifecycle_actions(self):
         config = self.service().get_settings_record()
@@ -210,7 +210,7 @@ class ZimbraObserverTests(unittest.TestCase):
             local_today=FIXED_NOW.date(),
         )
         self.assertEqual(evaluation.recommendation, "protected_hr")
-        self.assertIn("удаление подавлены", evaluation.reason)
+        self.assertIn("удаление запрещено", evaluation.reason)
 
     def test_never_disable_has_priority_over_inactivity_and_dismissal(self):
         config = self.service().get_settings_record()
@@ -342,7 +342,7 @@ class ZimbraObserverTests(unittest.TestCase):
         )
         self.assertEqual(evaluation.recommendation, "none")
         self.assertIn("30.09.2026", evaluation.reason)
-        self.assertIn("неактивности не применяется", evaluation.reason)
+        self.assertIn("До даты действий нет", evaluation.reason)
 
     def test_same_recommendation_does_not_create_duplicate_event(self):
         self.db.add(
@@ -437,6 +437,93 @@ zimbraNotes: test note
         self.assertEqual(rows[0].account_status, "active")
         self.assertIn("alias@domain.com", rows[0].addresses)
         self.assertEqual(rows[0].last_logon_at.year, 2025)
+
+    def test_status_batch_parser_reads_account_statuses(self):
+        output = """# name one@domain.com
+zimbraAccountStatus: active
+# name two@domain.com
+zimbraAccountStatus: closed
+"""
+        statuses = ZimbraObserverService._parse_status_batch(output)
+        self.assertEqual(
+            statuses,
+            {"one@domain.com": "active", "two@domain.com": "closed"},
+        )
+
+    def test_missing_status_batch_uses_ga_and_returns_real_status(self):
+        output = b"""# name user@domain.com
+zimbraAccountStatus: active
+"""
+
+        class FakeChannel:
+            def __init__(self):
+                self._out = output
+                self.sent = b""
+
+            def sendall(self, data):
+                self.sent += data
+
+            def shutdown_write(self):
+                pass
+
+            def recv_ready(self):
+                return bool(self._out)
+
+            def recv(self, _size):
+                data, self._out = self._out, b""
+                return data
+
+            def recv_stderr_ready(self):
+                return False
+
+            def recv_stderr(self, _size):
+                return b""
+
+            def exit_status_ready(self):
+                return not self._out
+
+            def recv_exit_status(self):
+                return 0
+
+            def close(self):
+                pass
+
+        channel = FakeChannel()
+
+        class Stream:
+            def __init__(self, channel):
+                self.channel = channel
+
+        class Client:
+            def __init__(self):
+                self.command = ""
+
+            def exec_command(self, command, timeout=None):
+                self.command = command
+                stream = Stream(channel)
+                return stream, stream, stream
+
+            def close(self):
+                pass
+
+        client = Client()
+
+        class Service:
+            @staticmethod
+            def _client():
+                return client
+
+            @staticmethod
+            def _zmprov_command():
+                return "zmprov"
+
+        statuses = self.service()._fetch_missing_statuses(
+            Service(),
+            [self.account(status="unknown")],
+        )
+        self.assertEqual(statuses, {"user@domain.com": "active"})
+        self.assertEqual(client.command, "zmprov -l")
+        self.assertIn(b"ga user@domain.com zimbraAccountStatus", channel.sent)
 
     def test_full_zimbra_read_is_not_scoped_to_configured_domains(self):
         output = b"""# name one@domain.com

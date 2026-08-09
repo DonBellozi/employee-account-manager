@@ -6,8 +6,7 @@
     <div>
       <h1>Наблюдение Zimbra</h1>
       <p class="muted">
-        Read-only контроль всех почтовых ящиков Zimbra независимо от домена и организации.
-        Система только рассчитывает рекомендации и фиксирует изменения вывода в журнале.
+        Все почтовые ящики Zimbra. Только анализ, без изменений.
       </p>
     </div>
     <div class="lifecycle-heading-actions">
@@ -18,8 +17,7 @@
 
   <div class="alert warning observer-safety-alert">
     <strong>Режим наблюдения.</strong>
-    Закрытие Zimbra, блокировка AD, резервное копирование, удаление учетных записей
-    и отправка отчетов в Telegram этим модулем не выполняются.
+    Модуль только анализирует данные и не изменяет учетные записи.
   </div>
 
   {% if saved %}
@@ -35,8 +33,8 @@
   <section class="card observer-settings-card">
     <div class="observer-card-heading">
       <div>
-        <h2>Правила наблюдения</h2>
-        <p class="muted">Параметры применяются к следующему ручному или плановому чтению Zimbra.</p>
+        <h2>Правила</h2>
+        <p class="muted">Применяются к следующей проверке.</p>
       </div>
       <span class="integration-badge{% if observer.enabled %} active{% endif %}">
         {{ 'Включено' if observer.enabled else 'Отключено' }}
@@ -49,44 +47,42 @@
         <label class="observer-check-row">
           <input type="checkbox" name="enabled" value="on"{% if observer.enabled %} checked{% endif %}>
           <span>
-            <strong>Ежедневное наблюдение включено</strong>
-            <small class="muted">Проверка выполняется только на чтение.</small>
+            <strong>Ежедневная проверка</strong>
+            <small class="muted">Только чтение.</small>
           </span>
         </label>
 
         <label>
-          <span>Закрытие после неактивности</span>
+          <span>Закрывать после</span>
           <div class="observer-number-field">
             <input type="number" name="inactive_months" min="1" max="60" value="{{ observer.inactive_months }}" required>
             <span>мес.</span>
           </div>
-          <small class="muted">По умолчанию 6 месяцев без активности.</small>
+          <small class="muted">Без активности.</small>
         </label>
 
         <label>
-          <span>Архивация и удаление после неактивности</span>
+          <span>Backup + удаление после</span>
           <div class="observer-number-field">
             <input type="number" name="retention_months" min="1" max="120" value="{{ observer.retention_months }}" required>
             <span>мес.</span>
           </div>
-          <small class="muted">Общий порог от последнего входа, а если входов не было – от даты создания. По умолчанию 12 месяцев.</small>
+          <small class="muted">От последнего входа или даты создания.</small>
         </label>
 
         <label>
-          <span>Время ежедневной проверки</span>
+          <span>Время проверки</span>
           <input type="time" name="schedule_time" value="{{ observer.schedule_time }}" required>
-          <small class="muted">Часовой пояс приложения. Текущее значение рассчитано на утреннюю проверку до начала рабочего дня.</small>
+          <small class="muted">Часовой пояс приложения.</small>
         </label>
 
         <label class="observer-check-row observer-check-wide">
           <input type="checkbox" name="exclude_active_hr" value="on"{% if observer.exclude_active_hr %} checked{% endif %}>
           <span>
-            <strong>Исключать действующих работников по 1С</strong>
+            <strong>Защищать работников из 1С</strong>
             <small class="muted">
-              Все актуальные кадровые выгрузки объединяются в один список исключений.
-              Если основной адрес или алиас найден хотя бы в одной организации, закрытие
-              и удаление подавляются. Если хотя бы одна известная выгрузка устарела,
-              рискованная рекомендация не формируется.
+              Совпадение в любой актуальной выгрузке защищает ящик.
+              При неактуальной выгрузке рискованные действия отключаются.
             </small>
           </span>
         </label>
@@ -94,14 +90,14 @@
 
       <div class="observer-form-actions">
         <button class="button" type="submit">Сохранить</button>
-        <span class="muted">Свежесть кадрового снимка: не старше {{ observer.hr_freshness_hours }} ч.</span>
+        <span class="muted">Актуальность 1С: {{ observer.hr_freshness_hours }} ч.</span>
       </div>
     </form>
 
     <form method="post" action="/settings/zimbra-observer/run" class="observer-run-form">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <button class="button secondary" type="submit">Запустить проверку сейчас</button>
-      <span class="muted">Команда выполняет только чтение Zimbra и локальную запись результатов.</span>
+      <span class="muted">Без изменений в Zimbra.</span>
     </form>
 
     {% if observer.updated_at %}
@@ -115,7 +111,7 @@
     <div class="observer-card-heading">
       <div>
         <h2>Последняя проверка</h2>
-        <p class="muted">Итоги полного чтения всех учетных записей Zimbra на сервере.</p>
+        <p class="muted">Последний полный обход Zimbra.</p>
       </div>
       {% if latest_run %}
       <span class="status {{ 'success' if latest_run.status == 'success' else 'failed' if latest_run.status == 'failed' else 'running' }}">
@@ -136,8 +132,8 @@
     <dl class="observer-details-grid">
       <dt>Начало</dt><dd>{{ latest_run.started_at|app_datetime('%d.%m.%Y %H:%M:%S') }}</dd>
       <dt>Завершение</dt><dd>{{ latest_run.completed_at|app_datetime('%d.%m.%Y %H:%M:%S') if latest_run.completed_at else '–' }}</dd>
-      <dt>Самая старая выгрузка 1С</dt><dd>{{ latest_run.hr_snapshot_at|app_datetime('%d.%m.%Y %H:%M:%S') if latest_run.hr_snapshot_at else 'нет данных' }}</dd>
-      <dt>Максимальный возраст выгрузки 1С</dt><dd>{% if latest_run.hr_snapshot_age_minutes is not none %}{{ latest_run.hr_snapshot_age_minutes // 60 }} ч. {{ latest_run.hr_snapshot_age_minutes % 60 }} мин.{% else %}–{% endif %}</dd>
+      <dt>Старейшая выгрузка 1С</dt><dd>{{ latest_run.hr_snapshot_at|app_datetime('%d.%m.%Y %H:%M:%S') if latest_run.hr_snapshot_at else 'нет данных' }}</dd>
+      <dt>Возраст выгрузки 1С</dt><dd>{% if latest_run.hr_snapshot_age_minutes is not none %}{{ latest_run.hr_snapshot_age_minutes // 60 }} ч. {{ latest_run.hr_snapshot_age_minutes % 60 }} мин.{% else %}–{% endif %}</dd>
     </dl>
     {% if latest_run.error_message %}
     <div class="journal-error"><strong>Предупреждение / ошибка</strong><pre>{{ latest_run.error_message }}</pre></div>
@@ -152,10 +148,7 @@
       <div>
         <h2>Текущие выводы</h2>
         <p class="muted">
-          Показываются все реальные учетные записи, найденные при последнем полном
-          чтении Zimbra, независимо от почтового домена. Проблемные и защищенные
-          записи выводятся выше, но учетные записи без требуемых действий также
-          остаются в списке.
+          Все ящики последней проверки. Требующие внимания показаны первыми.
         </p>
       </div>
       <span class="integration-badge active">Всего: {{ states|length }}</span>
@@ -177,7 +170,7 @@
             <strong>{{ item.primary_email }}</strong>
             {% if item.matched_hr_email %}<div class="muted">1С: {{ item.matched_hr_email }}</div>{% endif %}
           </td>
-          <td><code>{{ item.account_status or '–' }}</code></td>
+          <td>{{ zimbra_status_labels.get(item.account_status, 'Не определен') }}</td>
           <td>{{ item.last_logon_at|app_datetime('%d.%m.%Y %H:%M') if item.last_logon_at else '–' }}</td>
           <td>
             <span class="observer-rec observer-rec-{{ item.recommendation }}">
@@ -197,7 +190,7 @@
     <div class="observer-card-heading">
       <div>
         <h2>История запусков</h2>
-        <p class="muted">Последние 20 проверок. Повторяющийся неизменный вывод не создает новое событие журнала.</p>
+        <p class="muted">Последние 20 проверок.</p>
       </div>
     </div>
     <table class="journal-table">
