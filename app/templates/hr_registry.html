@@ -103,7 +103,7 @@
             {% if item.can_mark_checked %}
             <form method="post" action="/employees/registry/{{ item.id }}/checked">
               <input type="hidden" name="csrf" value="{{ csrf }}">
-              <input type="hidden" name="return_to" value="/employees/registry">
+              <input type="hidden" name="return_to" value="{{ return_to }}">
               <button class="button secondary small" type="submit" title="Подтвердить, что учетные записи этому работнику не требуются">Проверен</button>
             </form>
             {% endif %}

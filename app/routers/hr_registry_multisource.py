@@ -39,6 +39,11 @@ def employee_registry_multisource(
         status = "all"
 
     service = MultiSourceHRRegistryViewService(settings, db)
+    current_query = request.url.query
+    return_to = request.url.path
+    if current_query:
+        return_to += f"?{current_query}"
+
     source_options = service.source_options()
     valid_sources = {item["id"] for item in source_options}
     selected_source = (
@@ -66,5 +71,6 @@ def employee_registry_multisource(
             "selected_status": status,
             "source_options": source_options,
             "selected_source": selected_source,
+            "return_to": return_to,
         },
     )
