@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Сопоставление работника{% endblock %}
+{% block content %}
+<div class="heading-row">
+  <div>
+    <h1>Сопоставление работника</h1>
+    <p class="muted">Ручная связь кадровой записи с существующей учетной записью.</p>
+  </div>
+  <a class="button secondary" href="/employees/registry">Кадровый реестр</a>
+</div>
+
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+<section class="card">
+  <h2>{{ item.fio }}</h2>
+  <dl class="integration-details">
+    <dt>Организация</dt>
+    <dd>{{ item.source_name }} <code>{{ item.source_id }}</code></dd>
+    <dt>E-mail из 1С</dt>
+    <dd>{{ item.source_email or 'Нет' }}</dd>
+    <dt>Логин из 1С</dt>
+    <dd>{{ item.source_login or 'Нет' }}</dd>
+    {% if item.has_mapping %}
+    <dt>Связанный AD</dt>
+    <dd>{{ item.mapped_ad_login or 'Нет' }}</dd>
+    <dt>Связанная почта</dt>
+    <dd>{{ item.mapped_email or item.mapped_zimbra_email or 'Нет' }}</dd>
+    {% endif %}
+  </dl>
+</section>
+
+<section class="card">
+  <h2>{{ 'Изменить сопоставление' if item.has_mapping else 'Сопоставить' }}</h2>
+  <form method="post" action="/employees/registry/{{ item.record_id }}/map">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>
+      <span>Логин AD или адрес почты</span>
+      <input
+        type="text"
+        name="identifier"
+        autocomplete="off"
+        placeholder="ivanov или ivanov@company.ru"
+        required
+      >
+    </label>
+    <p class="muted">
+      Достаточно одного значения. Система сама проверит AD и Zimbra и сохранит найденные стабильные идентификаторы.
+    </p>
+    <div class="observer-form-actions">
+      <button class="button" type="submit">Сопоставить</button>
+    </div>
+  </form>
+</section>
+
+{% if item.has_mapping %}
+<section class="card">
+  <h2>Текущее сопоставление</h2>
+  <p class="muted">Удаление не изменяет данные 1С, AD или Zimbra.</p>
+  <form method="post" action="/employees/registry/{{ item.record_id }}/map/delete">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="button secondary" type="submit">Удалить сопоставление</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

@@ -425,6 +425,20 @@ class MultiSourceHRRegistryViewService:
                 for record in active_records
             }
         )
+        manual_mappings = list(
+            self.db.scalars(
+                select(EmailLoginMapping).where(
+                    EmailLoginMapping.worker_key.in_(worker_keys)
+                )
+            ).all()
+        ) if worker_keys else []
+        mapping_by_pair = {
+            (
+                mapping.worker_key,
+                str(mapping.source_domain or "").strip().lower(),
+            ): mapping
+            for mapping in manual_mappings
+        }
 
         for domain in sources:
             shared_hints = self._shared_ad_hints(domain, worker_keys)
@@ -441,6 +455,12 @@ class MultiSourceHRRegistryViewService:
                     str(row.get("source_name") or domain),
                 )
                 record = record_by_id.get(int(row.get("id") or 0))
+                mapping = None
+                if record is not None:
+                    mapping = mapping_by_pair.get(
+                        (record.worker_key, domain)
+                    )
+
                 if (
                     record is not None
                     and not str(row.get("login") or "").strip()
@@ -450,6 +470,33 @@ class MultiSourceHRRegistryViewService:
                     if shared_login:
                         row["login"] = shared_login
                         row["login_from_other_source"] = True
+
+                row["linked_email"] = ""
+                row["mapping_action_label"] = "Сопоставить"
+                if mapping is not None:
+                    mapped_email = str(
+                        mapping.source_email
+                        or mapping.zimbra_email
+                        or ""
+                    ).strip().lower()
+                    source_email = str(
+                        row.get("email") or ""
+                    ).strip().lower()
+                    if mapped_email and mapped_email != source_email:
+                        row["linked_email"] = mapped_email
+                    row["mapping_action_label"] = "Изменить"
+
+                effective_status = str(
+                    row.get("reconciliation_status") or ""
+                )
+                if (
+                    mapping is not None
+                    or effective_status
+                    in {"issue", "error", "not_checked"}
+                ):
+                    row["mapping_url"] = (
+                        f"/employees/registry/{row['id']}/map"
+                    )
                 rows.append(row)
 
         rows.sort(

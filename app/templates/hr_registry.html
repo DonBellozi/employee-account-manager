@@ -68,6 +68,7 @@
           <div class="journal-object-meta">
             {% if item.login %}<code>{{ item.login }}</code>{% endif %}
             {% if item.email %}<span>{{ item.email }}</span>{% endif %}
+            {% if item.linked_email %}<span>Связано: {{ item.linked_email }}</span>{% endif %}
             {% if item.personal_email %}<span>Личный: {{ item.personal_email }}</span>{% endif %}
           </div>
         </td>
@@ -107,10 +108,12 @@
             </form>
             {% endif %}
 
-            {% if item.has_mapping %}
+            {% if item.mapping_url %}
+            <a class="button secondary small" href="{{ item.mapping_url }}">{{ item.mapping_action_label or 'Сопоставить' }}</a>
+            {% elif item.has_mapping %}
             <span class="registry-mapped">Сопоставлено</span>
-            {% else %}
-              {% if item.mapping_url %}<a class="button secondary small" href="{{ item.mapping_url }}">Сопоставить</a>{% endif %}
+            {% endif %}
+            {% if not item.has_mapping %}
               {% if item.create_ad_url %}
               <a class="button small" href="{{ item.create_ad_url }}">Создать AD</a>
               {% elif item.create_url %}
