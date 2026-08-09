@@ -28,6 +28,7 @@ HR_SNAPSHOT_MAX_AGE_HOURS = 36
 SUCCESSFUL_HR_STATUSES = {"success", "partial", "duplicate"}
 DATE_RE = re.compile(r"(?<!\d)(\d{1,2}\.\d{1,2}\.\d{4})(?!\d)")
 DISMISSAL_WORD_RE = re.compile(r"увол(?:ен|ьнение|ьняется|ить)", re.IGNORECASE)
+NEVER_DISABLE_RE = re.compile(r"(?:^|[^a-z0-9_])never_disable(?:$|[^a-z0-9_])", re.IGNORECASE)
 SCHEDULE_RE = re.compile(r"^(\d{2}):(\d{2})$")
 
 RECOMMENDATION_LABELS = {
@@ -35,6 +36,7 @@ RECOMMENDATION_LABELS = {
     "close": "Рекомендуется закрыть Zimbra",
     "archive_delete": "Рекомендуется архивировать и удалить",
     "protected_hr": "Действие подавлено данными 1С",
+    "protected_note": "Защищена never_disable",
     "manual_review": "Требует проверки",
     "missing": "Учетная запись больше не найдена",
 }
@@ -254,8 +256,9 @@ class ZimbraObserverService:
                 (ZimbraLifecycleState.recommendation == "close", 1),
                 (ZimbraLifecycleState.recommendation == "archive_delete", 2),
                 (ZimbraLifecycleState.recommendation == "manual_review", 3),
-                (ZimbraLifecycleState.recommendation == "protected_hr", 4),
-                (ZimbraLifecycleState.recommendation == "missing", 5),
+                (ZimbraLifecycleState.recommendation == "protected_note", 4),
+                (ZimbraLifecycleState.recommendation == "protected_hr", 5),
+                (ZimbraLifecycleState.recommendation == "missing", 6),
                 else_=9,
             ),
             ZimbraLifecycleState.primary_email,
@@ -710,6 +713,29 @@ class ZimbraObserverService:
         dismissal_date = scheduled_dismissal or note_dismissal
 
         status = (account.account_status or "unknown").strip().lower()
+
+        # never_disable – безусловный административный запрет на жизненный цикл.
+        # Он имеет приоритет над увольнением, неактивностью, статусом closed и
+        # сроком хранения: наблюдатель не должен даже рекомендовать закрытие
+        # или удаление такой учетной записи. Сравнение намеренно
+        # регистронезависимое, но ищет отдельный маркер, а не часть другого слова.
+        if NEVER_DISABLE_RE.search(str(account.note or "")):
+            return Evaluation(
+                recommendation="protected_note",
+                reason=(
+                    "В zimbraNotes установлен never_disable. Учетная запись "
+                    "исключена из закрытия, архивации и удаления независимо от "
+                    "неактивности, даты увольнения и срока хранения."
+                ),
+                hr_active=hr_active,
+                matched_hr_email=matched_hr,
+                first_observed_closed_at=(
+                    as_utc(previous_state.first_observed_closed_at)
+                    if previous_state is not None
+                    else None
+                ),
+            )
+
         activity = account.last_logon_at or account.created_at
         inactivity_cutoff = subtract_months(now, config.inactive_months)
         inactive = bool(activity is not None and activity <= inactivity_cutoff)

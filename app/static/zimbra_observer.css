@@ -147,7 +147,8 @@
   color: #775000;
 }
 
-.observer-rec-protected_hr {
+.observer-rec-protected_hr,
+.observer-rec-protected_note {
   background: #e4f5e9;
   color: #216c36;
 }

@@ -114,6 +114,41 @@ class ZimbraObserverTests(unittest.TestCase):
         self.assertEqual(evaluation.recommendation, "protected_hr")
         self.assertEqual(evaluation.matched_hr_email, "worker@domain.com")
 
+    def test_never_disable_has_priority_over_inactivity_and_dismissal(self):
+        config = self.service().get_settings_record()
+        evaluation = self.service()._evaluate(
+            self.account(
+                last_logon_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                note="служебная учетная запись; NEVER_DISABLE; Увольнение 01.01.2025",
+            ),
+            previous_state=None,
+            config=config,
+            hr=self.fresh_hr("someone.else@domain.com"),
+            dismissal_map={"user@domain.com": FIXED_NOW.date() - timedelta(days=30)},
+            now=FIXED_NOW,
+            local_today=FIXED_NOW.date(),
+        )
+        self.assertEqual(evaluation.recommendation, "protected_note")
+        self.assertIn("never_disable", evaluation.reason)
+
+    def test_never_disable_prevents_archive_delete_for_closed_account(self):
+        config = self.service().get_settings_record()
+        evaluation = self.service()._evaluate(
+            self.account(
+                status="closed",
+                last_logon_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                note="never_disable\nнеактивна с 01.01.2020",
+            ),
+            previous_state=None,
+            config=config,
+            hr=self.fresh_hr("someone.else@domain.com"),
+            dismissal_map={},
+            now=FIXED_NOW,
+            local_today=FIXED_NOW.date(),
+        )
+        self.assertEqual(evaluation.recommendation, "protected_note")
+        self.assertNotEqual(evaluation.recommendation, "archive_delete")
+
     def test_stale_hr_snapshot_prevents_close_recommendation(self):
         config = self.service().get_settings_record()
         hr = HRProtectionSnapshot(
