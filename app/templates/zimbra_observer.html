@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+{% block title %}Наблюдение Zimbra{% endblock %}
+{% block content %}
+<div class="zimbra-observer-page">
+  <div class="heading-row">
+    <div>
+      <h1>Наблюдение Zimbra</h1>
+      <p class="muted">
+        Read-only контроль неактивных и закрытых учетных записей. Система только
+        рассчитывает рекомендации и фиксирует изменения вывода в журнале.
+      </p>
+    </div>
+    <a class="button secondary" href="/settings">Назад к настройкам</a>
+  </div>
+
+  <div class="alert warning observer-safety-alert">
+    <strong>Режим наблюдения.</strong>
+    Закрытие Zimbra, блокировка AD, резервное копирование, удаление учетных записей
+    и отправка отчетов в Telegram этим модулем не выполняются.
+  </div>
+
+  {% if saved %}
+  <div class="alert success">Настройки наблюдения Zimbra сохранены.</div>
+  {% endif %}
+  {% if run_message %}
+  <div class="alert success">{{ run_message }}</div>
+  {% endif %}
+  {% if error %}
+  <div class="alert error">{{ error }}</div>
+  {% endif %}
+
+  <section class="card observer-settings-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>Правила наблюдения</h2>
+        <p class="muted">Параметры применяются к следующему ручному или плановому чтению Zimbra.</p>
+      </div>
+      <span class="integration-badge{% if observer.enabled %} active{% endif %}">
+        {{ 'Включено' if observer.enabled else 'Отключено' }}
+      </span>
+    </div>
+
+    <form method="post" action="/settings/zimbra-observer">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div class="observer-settings-grid">
+        <label class="observer-check-row">
+          <input type="checkbox" name="enabled" value="on"{% if observer.enabled %} checked{% endif %}>
+          <span>
+            <strong>Ежедневное наблюдение включено</strong>
+            <small class="muted">Проверка выполняется только на чтение.</small>
+          </span>
+        </label>
+
+        <label>
+          <span>Закрытие после неактивности</span>
+          <div class="observer-number-field">
+            <input type="number" name="inactive_months" min="1" max="60" value="{{ observer.inactive_months }}" required>
+            <span>мес.</span>
+          </div>
+          <small class="muted">По умолчанию 6 месяцев без активности.</small>
+        </label>
+
+        <label>
+          <span>Хранение закрытой учетной записи</span>
+          <div class="observer-number-field">
+            <input type="number" name="retention_months" min="1" max="120" value="{{ observer.retention_months }}" required>
+            <span>мес.</span>
+          </div>
+          <small class="muted">После срока система только рекомендует backup + удаление.</small>
+        </label>
+
+        <label>
+          <span>Время ежедневной проверки</span>
+          <input type="time" name="schedule_time" value="{{ observer.schedule_time }}" required>
+          <small class="muted">Часовой пояс приложения. Текущее значение рассчитано на утреннюю проверку до начала рабочего дня.</small>
+        </label>
+
+        <label class="observer-check-row observer-check-wide">
+          <input type="checkbox" name="exclude_active_hr" value="on"{% if observer.exclude_active_hr %} checked{% endif %}>
+          <span>
+            <strong>Исключать действующих работников по 1С</strong>
+            <small class="muted">
+              Если корпоративный адрес или алиас найден у действующего работника,
+              рекомендация закрытия по неактивности подавляется. При отсутствии
+              свежего реестра 1С рискованная рекомендация не формируется.
+            </small>
+          </span>
+        </label>
+      </div>
+
+      <div class="observer-form-actions">
+        <button class="button" type="submit">Сохранить</button>
+        <span class="muted">Свежесть кадрового снимка: не старше {{ observer.hr_freshness_hours }} ч.</span>
+      </div>
+    </form>
+
+    <form method="post" action="/settings/zimbra-observer/run" class="observer-run-form">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="button secondary" type="submit">Запустить проверку сейчас</button>
+      <span class="muted">Команда выполняет только чтение Zimbra и локальную запись результатов.</span>
+    </form>
+
+    {% if observer.updated_at %}
+    <div class="observer-updated muted">
+      Последнее изменение: {{ observer.updated_at|app_datetime('%d.%m.%Y %H:%M:%S') }}{% if observer.updated_by %}, {{ observer.updated_by }}{% endif %}
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="card observer-summary-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>Последняя проверка</h2>
+        <p class="muted">Итоги полного чтения настроенных доменов Zimbra.</p>
+      </div>
+      {% if latest_run %}
+      <span class="status {{ 'success' if latest_run.status == 'success' else 'failed' if latest_run.status == 'failed' else 'running' }}">
+        {{ 'Успешно' if latest_run.status == 'success' else 'Ошибка' if latest_run.status == 'failed' else 'Предупреждение' if latest_run.status == 'warning' else latest_run.status }}
+      </span>
+      {% endif %}
+    </div>
+
+    {% if latest_run %}
+    <div class="observer-summary-grid">
+      <div><span>Учетных записей</span><strong>{{ latest_run.relevant_accounts }}</strong></div>
+      <div class="warn"><span>Закрыть</span><strong>{{ latest_run.close_candidates }}</strong></div>
+      <div class="warn"><span>Backup + удалить</span><strong>{{ latest_run.archive_candidates }}</strong></div>
+      <div class="good"><span>Защищены 1С</span><strong>{{ latest_run.protected_by_hr }}</strong></div>
+      <div class="bad"><span>Проверить вручную</span><strong>{{ latest_run.manual_review }}</strong></div>
+      <div><span>Новых событий</span><strong>{{ latest_run.event_count }}</strong></div>
+    </div>
+    <dl class="observer-details-grid">
+      <dt>Начало</dt><dd>{{ latest_run.started_at|app_datetime('%d.%m.%Y %H:%M:%S') }}</dd>
+      <dt>Завершение</dt><dd>{{ latest_run.completed_at|app_datetime('%d.%m.%Y %H:%M:%S') if latest_run.completed_at else '–' }}</dd>
+      <dt>Кадровый снимок 1С</dt><dd>{{ latest_run.hr_snapshot_at|app_datetime('%d.%m.%Y %H:%M:%S') if latest_run.hr_snapshot_at else 'нет данных' }}</dd>
+      <dt>Возраст снимка 1С</dt><dd>{% if latest_run.hr_snapshot_age_minutes is not none %}{{ latest_run.hr_snapshot_age_minutes // 60 }} ч. {{ latest_run.hr_snapshot_age_minutes % 60 }} мин.{% else %}–{% endif %}</dd>
+    </dl>
+    {% if latest_run.error_message %}
+    <div class="journal-error"><strong>Предупреждение / ошибка</strong><pre>{{ latest_run.error_message }}</pre></div>
+    {% endif %}
+    {% else %}
+    <div class="upcoming-empty">Проверок пока не было.</div>
+    {% endif %}
+  </section>
+
+  <section class="card table-wrap observer-current-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>Текущие выводы</h2>
+        <p class="muted">
+          Показываются только учетные записи, по которым есть рекомендация,
+          защита 1С, ручная проверка или факт исчезновения из Zimbra.
+        </p>
+      </div>
+    </div>
+    <table class="journal-table observer-table">
+      <thead>
+        <tr>
+          <th>Учетная запись</th>
+          <th>Статус Zimbra</th>
+          <th>Последний вход</th>
+          <th>Вывод</th>
+          <th>Причина</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in states %}
+        <tr>
+          <td>
+            <strong>{{ item.primary_email }}</strong>
+            {% if item.matched_hr_email %}<div class="muted">1С: {{ item.matched_hr_email }}</div>{% endif %}
+          </td>
+          <td><code>{{ item.account_status or '–' }}</code></td>
+          <td>{{ item.last_logon_at|app_datetime('%d.%m.%Y %H:%M') if item.last_logon_at else '–' }}</td>
+          <td>
+            <span class="observer-rec observer-rec-{{ item.recommendation }}">
+              {{ state_labels.get(item.recommendation, item.recommendation) }}
+            </span>
+          </td>
+          <td>{{ item.reason }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">Текущих рекомендаций и предупреждений пока нет.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card table-wrap observer-history-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>История запусков</h2>
+        <p class="muted">Последние 20 проверок. Повторяющийся неизменный вывод не создает новое событие журнала.</p>
+      </div>
+    </div>
+    <table class="journal-table">
+      <thead>
+        <tr>
+          <th>Дата</th>
+          <th>Запуск</th>
+          <th>Статус</th>
+          <th>Закрыть</th>
+          <th>Backup + удалить</th>
+          <th>Защищены 1С</th>
+          <th>Проверить</th>
+          <th>Событий</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in runs %}
+        <tr>
+          <td class="journal-date">{{ item.started_at|app_datetime('%d.%m.%Y') }}<span>{{ item.started_at|app_datetime('%H:%M:%S') }}</span></td>
+          <td>{{ 'Вручную' if item.trigger == 'manual' else 'По расписанию' }}</td>
+          <td>{{ item.status }}</td>
+          <td>{{ item.close_candidates }}</td>
+          <td>{{ item.archive_candidates }}</td>
+          <td>{{ item.protected_by_hr }}</td>
+          <td>{{ item.manual_review }}</td>
+          <td>{{ item.event_count }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="muted">Истории пока нет.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+{% endblock %}

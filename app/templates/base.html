@@ -6,6 +6,10 @@
   <title>{% block title %}Управление учетными записями{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/navigation.css">
+  {% if user %}
+  <link rel="stylesheet" href="/static/zimbra_observer.css">
+  <script src="/static/zimbra_observer.js" defer></script>
+  {% endif %}
   {% if user and user.role == 'admin' %}
   <link rel="stylesheet" href="/static/telegram_settings.css">
   <script src="/static/settings_extensions.js" defer></script>

@@ -9,11 +9,19 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import get_settings
 from app.db import Base, SessionLocal, engine, ensure_compatibility_schema
-from app.routers import admin, auth, employees, settings_ui, telegram_settings
+from app.routers import (
+    admin,
+    auth,
+    employees,
+    settings_ui,
+    telegram_settings,
+    zimbra_observer,
+)
 from app.security import CSRFMismatchError, ensure_bootstrap_admin
 from app.services.blocking_worker import BlockingQueueWorker
 from app.services.onec_scheduler import OneCAutoImportScheduler
 from app.services.telegram_worker import TelegramNotificationWorker
+from app.services.zimbra_observer_scheduler import ZimbraObserverScheduler
 
 settings = get_settings()
 
@@ -33,12 +41,15 @@ async def lifespan(_: FastAPI):
         settings.app_secret_key,
         SessionLocal,
     )
+    zimbra_observer_scheduler = ZimbraObserverScheduler(settings, SessionLocal)
     onec_scheduler.start()
     blocking_worker.start()
     telegram_worker.start()
+    zimbra_observer_scheduler.start()
     try:
         yield
     finally:
+        zimbra_observer_scheduler.stop()
         telegram_worker.stop()
         blocking_worker.stop()
         onec_scheduler.stop()
@@ -58,6 +69,7 @@ app.include_router(auth.router)
 app.include_router(employees.router)
 app.include_router(settings_ui.router)
 app.include_router(telegram_settings.router)
+app.include_router(zimbra_observer.router)
 app.include_router(admin.router)
 
 
