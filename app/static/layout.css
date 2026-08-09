@@ -1,0 +1,73 @@
+/*
+ * Единая геометрия интерфейса.
+ *
+ * Все основные страницы и верхняя навигация используют одну рабочую ширину.
+ * Узкие компоненты (.narrow и собственные max-width внутренних форм) сохраняют
+ * свои ограничения и не растягиваются принудительно.
+ */
+:root {
+  --app-content-max-width: 1480px;
+  --app-page-gutter: 18px;
+}
+
+/* Фон шапки остается на всю ширину экрана, содержимое совпадает с сеткой сайта. */
+.topbar {
+  display: block;
+  padding: 0;
+}
+
+.topbar-inner {
+  width: 100%;
+  max-width: var(--app-content-max-width);
+  margin: 0 auto;
+  padding: 14px var(--app-page-gutter);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+}
+
+/* Общая рабочая область всех страниц. */
+.container {
+  width: 100%;
+  max-width: var(--app-content-max-width);
+  margin: 28px auto;
+  padding: 0 var(--app-page-gutter) 48px;
+}
+
+/* Частное расширение наблюдения Zimbra больше не требуется. */
+.zimbra-observer-page {
+  width: 100%;
+  position: static;
+  left: auto;
+  transform: none;
+}
+
+/* Таблицы не ломают общую сетку: при нехватке места прокручиваются внутри карточки. */
+.table-wrap {
+  max-width: 100%;
+}
+
+@media (max-width: 850px) {
+  .topbar-inner {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+@media (max-width: 700px) {
+  :root {
+    --app-page-gutter: 14px;
+  }
+
+  .container {
+    margin-top: 20px;
+    padding-bottom: 36px;
+  }
+
+  .topbar-inner {
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+}

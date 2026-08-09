@@ -15,32 +15,35 @@
   <link rel="stylesheet" href="/static/telegram_settings.css">
   <script src="/static/settings_extensions.js" defer></script>
   {% endif %}
+  <link rel="stylesheet" href="/static/layout.css">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">Управление учетными записями</div>
-    {% if user %}
-    <nav class="topnav">
-      <div class="nav-main">
-        <a href="/">Журнал</a>
-        <a href="/employees/new">Создание</a>
-        <a href="/blocking">Блокировка</a>
-      </div>
+    <div class="topbar-inner">
+      <div class="brand">Управление учетными записями</div>
+      {% if user %}
+      <nav class="topnav">
+        <div class="nav-main">
+          <a href="/">Журнал</a>
+          <a href="/employees/new">Создание</a>
+          <a href="/blocking">Блокировка</a>
+        </div>
 
-      <div class="nav-tools">
-        {% if user.role == 'admin' %}
-        <a class="settings-link" href="/settings">Настройки</a>
-        {% endif %}
-        <form method="post" action="/logout" class="inline">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <button class="link-button" type="submit">
-            Выйти: {{ user.username }}
-            {% if user.role == 'admin' %}<span class="nav-role">администратор</span>{% endif %}
-          </button>
-        </form>
-      </div>
-    </nav>
-    {% endif %}
+        <div class="nav-tools">
+          {% if user.role == 'admin' %}
+          <a class="settings-link" href="/settings">Настройки</a>
+          {% endif %}
+          <form method="post" action="/logout" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="link-button" type="submit">
+              Выйти: {{ user.username }}
+              {% if user.role == 'admin' %}<span class="nav-role">администратор</span>{% endif %}
+            </button>
+          </form>
+        </div>
+      </nav>
+      {% endif %}
+    </div>
   </header>
 
   <main class="container">
