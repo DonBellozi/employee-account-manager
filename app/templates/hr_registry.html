@@ -4,9 +4,9 @@
 <div class="heading-row">
   <div>
     <h1>Кадровый реестр</h1>
-    <p class="muted">Источник: {{ summary.source_name }}. СНИЛС не хранится: используется HMAC worker_key. AD и Zimbra только проверяются.</p>
+    <p class="muted">{{ summary.source_name }}. СНИЛС не хранится: используется HMAC worker_key. AD и Zimbra только проверяются.</p>
   </div>
-  <a class="button secondary" href="/settings">Настройки 1С</a>
+  <a class="button secondary" href="/settings/onec-sources">Источники 1С</a>
 </div>
 
 <div class="hr-summary-grid hr-registry-page-summary">
@@ -22,6 +22,17 @@
   <label>
     <span>Поиск</span>
     <input type="search" name="q" value="{{ query }}" placeholder="ФИО, логин, корпоративный или личный email">
+  </label>
+  <label>
+    <span>Организация</span>
+    <select name="source">
+      <option value="">Все организации</option>
+      {% for source in source_options %}
+      <option value="{{ source.id }}"{% if selected_source == source.id %} selected{% endif %}>
+        {{ source.name }} – {{ source.id }}
+      </option>
+      {% endfor %}
+    </select>
   </label>
   <label>
     <span>Статус</span>
@@ -41,6 +52,7 @@
     <thead>
       <tr>
         <th>Работник</th>
+        <th>Организация</th>
         <th>Кадровые назначения</th>
         <th>AD</th>
         <th>Zimbra</th>
@@ -58,6 +70,10 @@
             {% if item.email %}<span>{{ item.email }}</span>{% endif %}
             {% if item.personal_email %}<span>Личный: {{ item.personal_email }}</span>{% endif %}
           </div>
+        </td>
+        <td>
+          <strong>{{ item.source_name }}</strong>
+          <div class="journal-object-meta"><code>{{ item.source_id }}</code></div>
         </td>
         <td>
           {% for placement in item.placements %}
@@ -105,7 +121,7 @@
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="muted">По выбранному фильтру записей нет.</td></tr>
+      <tr><td colspan="7" class="muted">По выбранному фильтру записей нет.</td></tr>
       {% endfor %}
     </tbody>
   </table>
