@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     app_name: str = "Управление учетными записями"
     app_secret_key: str = "change-me-to-a-long-secret"
     app_base_url: str = "http://localhost:8000"
-    app_timezone: str = "Asia/Almaty"
+    app_timezone: str = "Europe/Moscow"
     database_url: str = "sqlite:///./data/app.db"
     dry_run: bool = True
 

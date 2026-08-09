@@ -340,8 +340,8 @@
               {% for item in onec_import_history %}
               <tr>
                 <td class="journal-date">
-                  {{ item.started_at.strftime('%d.%m.%Y') }}
-                  <span>{{ item.started_at.strftime('%H:%M:%S') }}</span>
+                  {{ item.started_at|app_datetime('%d.%m.%Y') }}
+                  <span>{{ item.started_at|app_datetime('%H:%M:%S') }}</span>
                 </td>
                 <td>{{ item.trigger_label }}</td>
                 <td>

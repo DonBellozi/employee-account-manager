@@ -28,6 +28,7 @@ class ConfigTests(unittest.TestCase):
             onec_auto_import_time="07:30",
         )
         self.assertEqual(settings.onec_auto_import_time, "07:30")
+        self.assertEqual(settings.app_timezone, "Europe/Moscow")
         self.assertTrue(settings.onec_auto_import_enabled)
         self.assertTrue(settings.onec_auto_import_startup_catchup)
 

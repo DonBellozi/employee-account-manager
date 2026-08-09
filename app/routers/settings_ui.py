@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.config import Settings, get_settings
 from app.db import get_db
+from app.time_utils import register_datetime_filters
 from app.security import get_or_create_csrf, require_admin, validate_csrf
 from app.services.ad import ActiveDirectoryService
 from app.services.email_login_mapping import EmailLoginMappingService
@@ -23,7 +24,7 @@ from app.services.zimbra import ZimbraService
 from sqlalchemy.orm import Session
 
 router = APIRouter()
-templates = Jinja2Templates(directory="app/templates")
+templates = register_datetime_filters(Jinja2Templates(directory="app/templates"))
 
 
 def _yes_no(value: bool) -> str:

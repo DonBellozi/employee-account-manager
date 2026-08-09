@@ -21,6 +21,7 @@ from app.models import (
     DismissalSchedule,
     ProvisioningOperation,
 )
+from app.time_utils import register_datetime_filters
 from app.security import get_current_user, get_or_create_csrf, validate_csrf
 from app.services.ad import ActiveDirectoryService
 from app.services.blocking import BlockingService
@@ -30,7 +31,7 @@ from app.services.provisioning import ProvisioningInput, ProvisioningService
 from app.services.zimbra import BackgroundLoginCheckCancelled, ZimbraService
 
 router = APIRouter()
-templates = Jinja2Templates(directory="app/templates")
+templates = register_datetime_filters(Jinja2Templates(directory="app/templates"))
 LOGIN_RE = re.compile(r"^[a-z][a-z0-9.-]{0,19}$")
 MAX_BACKGROUND_CANDIDATES = 12
 

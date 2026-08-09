@@ -9,7 +9,8 @@ services:
       APP_NAME: "${APP_NAME:-Управление учетными записями}"
       APP_SECRET_KEY: "${APP_SECRET_KEY:-change-me-to-a-long-random-secret}"
       APP_BASE_URL: "${APP_BASE_URL:-http://localhost:8081}"
-      APP_TIMEZONE: "${APP_TIMEZONE:-Europe/Moscow}"
+      APP_TIMEZONE: "Europe/Moscow"
+      TZ: "Europe/Moscow"
       DATABASE_URL: "sqlite:///./data/app.db"
       DRY_RUN: "${DRY_RUN:-true}"
 

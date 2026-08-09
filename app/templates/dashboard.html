@@ -105,8 +105,8 @@
       {% for item in journal_items %}
       <tr class="journal-main-row">
         <td class="journal-date">
-          {{ item.created_at.strftime('%d.%m.%Y') }}
-          <span>{{ item.created_at.strftime('%H:%M') }}</span>
+          {{ item.created_at|app_datetime('%d.%m.%Y') }}
+          <span>{{ item.created_at|app_datetime('%H:%M') }}</span>
         </td>
         <td>
           <span class="action-badge {{ item.kind }}">{{ item.action }}</span>
@@ -139,10 +139,10 @@
                 <dt>Оператор</dt>
                 <dd>{{ item.operator }}</dd>
                 <dt>Начало операции</dt>
-                <dd>{{ item.created_at.strftime('%d.%m.%Y %H:%M:%S') }}</dd>
+                <dd>{{ item.created_at|app_datetime('%d.%m.%Y %H:%M:%S') }}</dd>
                 {% if item.completed_at %}
                 <dt>Завершение операции</dt>
-                <dd>{{ item.completed_at.strftime('%d.%m.%Y %H:%M:%S') }}</dd>
+                <dd>{{ item.completed_at|app_datetime('%d.%m.%Y %H:%M:%S') }}</dd>
                 {% endif %}
               </dl>
 
