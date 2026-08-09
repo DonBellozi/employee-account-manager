@@ -39,6 +39,13 @@
     key: 'zimbra-protection',
     href: '/settings/zimbra-protection',
     titleText: 'Защищенные учетные записи Zimbra',
-    descriptionText: 'Исключения из закрытия, архивации и удаления с импортом never_disable.',
+    descriptionText: 'Исключения из закрытия, архивации и удаления.',
+  });
+
+  addCard({
+    key: 'onec-sources',
+    href: '/settings/onec-sources',
+    titleText: 'Источники 1С',
+    descriptionText: 'Дополнительные организации, отправители, файлы и домены.',
   });
 })();

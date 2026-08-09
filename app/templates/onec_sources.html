@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}Источники 1С{% endblock %}
+{% block content %}
+<div class="heading-row">
+  <div>
+    <h1>Источники 1С</h1>
+    <p class="muted">Один IMAP-ящик, несколько организаций.</p>
+  </div>
+  <a class="button secondary" href="/settings">Настройки</a>
+</div>
+
+{% if saved %}<div class="alert success">Источник сохранен.</div>{% endif %}
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if result %}
+<div class="alert success">
+  {{ result.source }}: {{ result.status }}.
+  Работников: {{ result.workers_count or 0 }}.
+  {% if result.dismissal_dates_count is defined %}
+  Дат увольнения: {{ result.dismissal_dates_count }}.
+  {% endif %}
+</div>
+{% endif %}
+
+<section class="card">
+  <div class="observer-card-heading">
+    <div>
+      <h2>Основной источник</h2>
+      <p class="muted">Работает по существующим ENV-настройкам.</p>
+    </div>
+    <span class="integration-badge active">ENV</span>
+  </div>
+  <dl class="integration-details">
+    <dt>Домен</dt><dd><code>{{ primary.mail_domain or 'автоопределение' }}</code></dd>
+    <dt>Отправитель</dt><dd>{{ primary.sender_filter or 'без фильтра' }}</dd>
+    <dt>Файл</dt><dd>{{ primary.attachment_filename or '–' }}</dd>
+  </dl>
+</section>
+
+<section class="card">
+  <div class="observer-card-heading">
+    <div>
+      <h2>Дополнительные организации</h2>
+      <p class="muted">
+        Отправитель и имя файла определяют источник. Домен определяет организацию почтового ящика.
+      </p>
+    </div>
+  </div>
+
+  {% for source in sources %}
+  <form method="post" action="/settings/onec-sources/save" class="settings-source-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="source_id" value="{{ source.id }}">
+    <div class="settings-source-grid">
+      <label>
+        <span>Организация</span>
+        <input type="text" name="name" value="{{ source.name }}" required>
+      </label>
+      <label>
+        <span>Почтовый домен</span>
+        <input type="text" name="mail_domain" value="{{ source.mail_domain }}" required>
+      </label>
+      <label>
+        <span>Отправитель</span>
+        <input type="text" name="sender_filter" value="{{ source.sender_filter }}" required>
+      </label>
+      <label>
+        <span>Имя файла</span>
+        <input type="text" name="attachment_filename" value="{{ source.attachment_filename }}" required>
+      </label>
+    </div>
+
+    <div class="settings-source-flags">
+      <label class="observer-check-row">
+        <input type="checkbox" name="has_corporate_email" value="on"{% if source.has_corporate_email %} checked{% endif %}>
+        <span><strong>В выгрузке есть корпоративный e-mail</strong></span>
+      </label>
+      <label class="observer-check-row">
+        <input type="checkbox" name="enabled" value="on"{% if source.enabled %} checked{% endif %}>
+        <span><strong>Источник включен</strong></span>
+      </label>
+    </div>
+
+    {% if not source.has_corporate_email %}
+    <p class="muted">Без e-mail: источник используется для занятости и дат увольнения. Реальные действия Zimbra временно блокируются.</p>
+    {% endif %}
+
+    <div class="settings-source-meta">
+      <span class="integration-badge{% if source.enabled %} active{% endif %}">
+        {{ 'Включен' if source.enabled else 'Отключен' }}
+      </span>
+      {% if source.last_started_at %}
+      <span class="muted">
+        Последний импорт: {{ source.last_started_at|app_datetime('%d.%m.%Y %H:%M') }},
+        {{ source.last_status }}, {{ source.last_workers_count }} чел.
+      </span>
+      {% else %}
+      <span class="muted">Импортов пока нет.</span>
+      {% endif %}
+      {% if source.last_error %}<span class="registry-error">{{ source.last_error }}</span>{% endif %}
+    </div>
+
+    <div class="observer-form-actions">
+      <button class="button" type="submit">Сохранить</button>
+    </div>
+  </form>
+
+  <div class="settings-source-actions">
+    <form method="post" action="/settings/onec-sources/{{ source.id }}/import">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="button secondary" type="submit">Импортировать сейчас</button>
+    </form>
+    <form method="post" action="/settings/onec-sources/{{ source.id }}/toggle">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="enabled" value="{{ 'false' if source.enabled else 'true' }}">
+      <button class="button secondary" type="submit">
+        {{ 'Отключить' if source.enabled else 'Включить' }}
+      </button>
+    </form>
+  </div>
+  {% if not loop.last %}<hr>{% endif %}
+  {% else %}
+  <p class="muted">Дополнительных источников пока нет.</p>
+  {% endfor %}
+</section>
+
+<section class="card">
+  <h2>Добавить источник</h2>
+  <form method="post" action="/settings/onec-sources/save">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="settings-source-grid">
+      <label>
+        <span>Организация</span>
+        <input type="text" name="name" placeholder="Организация 2" required>
+      </label>
+      <label>
+        <span>Почтовый домен</span>
+        <input type="text" name="mail_domain" placeholder="company2.ru" required>
+      </label>
+      <label>
+        <span>Отправитель</span>
+        <input type="text" name="sender_filter" placeholder="1c-robot2@" required>
+      </label>
+      <label>
+        <span>Имя файла</span>
+        <input type="text" name="attachment_filename" placeholder="Сотрудники.xlsx" required>
+      </label>
+    </div>
+    <div class="settings-source-flags">
+      <label class="observer-check-row">
+        <input type="checkbox" name="has_corporate_email" value="on">
+        <span><strong>В выгрузке есть корпоративный e-mail</strong></span>
+      </label>
+      <label class="observer-check-row">
+        <input type="checkbox" name="enabled" value="on" checked>
+        <span><strong>Источник включен</strong></span>
+      </label>
+    </div>
+    <div class="observer-form-actions">
+      <button class="button" type="submit">Добавить</button>
+    </div>
+  </form>
+</section>
+
+{% endblock %}

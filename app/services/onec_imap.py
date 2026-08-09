@@ -34,12 +34,12 @@ def decode_mime(value: str | None) -> str:
 
 
 class OneCImapService:
-    """Read-only доступ к почтовой выгрузке 1С."""
+    """Read-only доступ к кадровым выгрузкам 1С."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    def _validate(self) -> None:
+    def _validate_connection(self) -> None:
         missing = []
         if not self.settings.onec_imap_host:
             missing.append("ONEC_IMAP_HOST")
@@ -47,16 +47,13 @@ class OneCImapService:
             missing.append("ONEC_IMAP_USERNAME")
         if not self.settings.onec_imap_password:
             missing.append("ONEC_IMAP_PASSWORD")
-        if not self.settings.onec_attachment_filename:
-            missing.append("ONEC_ATTACHMENT_FILENAME")
         if missing:
             raise RuntimeError(
-                "Не заполнены настройки получения выгрузки 1С: "
-                + ", ".join(missing)
+                "Не заполнены настройки IMAP для 1С: " + ", ".join(missing)
             )
 
     def _connect(self):
-        self._validate()
+        self._validate_connection()
         client_cls = (
             imaplib.IMAP4_SSL
             if self.settings.onec_imap_ssl
@@ -83,12 +80,27 @@ class OneCImapService:
                     f"Не удалось открыть папку "
                     f"{self.settings.onec_imap_folder} в режиме readonly"
                 )
+        return "IMAP-подключение работает."
 
-        return (
-            "IMAP-подключение работает. Папка открыта в режиме только для чтения."
-        )
+    def find_latest_attachment(
+        self,
+        *,
+        sender_filter: str | None = None,
+        attachment_filename: str | None = None,
+    ) -> OneCAttachment:
+        sender = (
+            self.settings.onec_imap_from_contains
+            if sender_filter is None
+            else sender_filter
+        ).strip()
+        expected = (
+            self.settings.onec_attachment_filename
+            if attachment_filename is None
+            else attachment_filename
+        ).strip()
+        if not expected:
+            raise RuntimeError("Не задано имя вложения кадровой выгрузки")
 
-    def find_latest_attachment(self) -> OneCAttachment:
         with self._connect() as imap:
             status, _ = imap.select(
                 self.settings.onec_imap_folder,
@@ -102,13 +114,14 @@ class OneCImapService:
 
             since = (
                 datetime.now()
-                - timedelta(days=max(1, self.settings.onec_imap_lookback_days))
+                - timedelta(
+                    days=max(1, self.settings.onec_imap_lookback_days)
+                )
             ).strftime("%d-%b-%Y")
 
             criteria: list[str] = ["SINCE", since]
-            sender_filter = self.settings.onec_imap_from_contains.strip()
-            if sender_filter:
-                criteria.extend(["FROM", f'"{sender_filter}"'])
+            if sender:
+                criteria.extend(["FROM", f'"{sender}"'])
 
             status, data = imap.uid("search", None, *criteria)
             if status != "OK":
@@ -116,15 +129,10 @@ class OneCImapService:
 
             uids = data[0].split() if data and data[0] else []
             if not uids:
-                raise FileNotFoundError(
-                    "Подходящие письма за заданный период не найдены"
-                )
-
-            expected = self.settings.onec_attachment_filename
+                raise FileNotFoundError("Подходящие письма не найдены")
 
             for uid_bytes in reversed(uids):
                 uid = uid_bytes.decode()
-                # BODY.PEEK[] не помечает письмо прочитанным.
                 status, message_data = imap.uid(
                     "fetch",
                     uid,
@@ -142,7 +150,7 @@ class OneCImapService:
                     continue
 
                 message = email.message_from_bytes(raw)
-                sender = decode_mime(message.get("From"))
+                message_sender = decode_mime(message.get("From"))
                 subject = decode_mime(message.get("Subject"))
                 message_date = decode_mime(message.get("Date"))
 
@@ -150,15 +158,13 @@ class OneCImapService:
                     filename = decode_mime(part.get_filename())
                     if filename != expected:
                         continue
-
                     payload = part.get_payload(decode=True)
                     if not payload:
                         continue
-
                     return OneCAttachment(
                         uid=uid,
                         message_date=message_date,
-                        sender=sender,
+                        sender=message_sender,
                         subject=subject,
                         filename=filename,
                         file_hash=hashlib.sha256(payload).hexdigest(),

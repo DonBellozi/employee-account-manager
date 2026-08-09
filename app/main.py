@@ -13,6 +13,7 @@ from app.routers import (
     admin,
     auth,
     employees,
+    onec_sources,
     settings_ui,
     telegram_settings,
     zimbra_lifecycle,
@@ -70,6 +71,7 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(auth.router)
 app.include_router(employees.router)
 app.include_router(settings_ui.router)
+app.include_router(onec_sources.router)
 app.include_router(telegram_settings.router)
 app.include_router(zimbra_observer.router)
 app.include_router(zimbra_protection.router)

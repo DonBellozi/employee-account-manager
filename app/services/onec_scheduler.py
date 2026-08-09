@@ -6,7 +6,10 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.config import Settings
+from app.services.onec_additional_import import OneCAdditionalImportService
 from app.services.onec_import import OneCImportService
+from app.services.onec_sources import OneCSourceRegistryService
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +58,7 @@ def schedule_info(settings: Settings) -> dict[str, str | bool]:
 
 
 class OneCAutoImportScheduler:
-    """Один ежедневный запуск + catch-up при старте контейнера."""
+    """Ежедневный импорт основного и дополнительных кадровых источников."""
 
     def __init__(self, settings: Settings, session_factory):
         self.settings = settings
@@ -82,7 +85,7 @@ class OneCAutoImportScheduler:
         if self._thread is not None:
             self._thread.join(timeout=5)
 
-    def _configured(self) -> bool:
+    def _primary_configured(self) -> bool:
         return bool(
             self.settings.onec_imap_host
             and self.settings.onec_imap_username
@@ -91,25 +94,61 @@ class OneCAutoImportScheduler:
         )
 
     def _run_import(self, trigger: str) -> None:
-        if not self._configured():
-            logger.warning(
-                "Автоимпорт 1С пропущен: IMAP-настройки не заполнены"
-            )
-            return
-
         with self.session_factory() as db:
+            ran_any = False
+
+            if self._primary_configured():
+                ran_any = True
+                try:
+                    report = OneCImportService(
+                        self.settings,
+                        db,
+                    ).analyze_latest(trigger=trigger)
+                    logger.info(
+                        "Импорт 1С основной (%s): %s",
+                        trigger,
+                        report.get("import_status", "success"),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Основной импорт 1С завершился ошибкой"
+                    )
+
             try:
-                report = OneCImportService(
+                sources = OneCSourceRegistryService(
                     self.settings,
                     db,
-                ).analyze_latest(trigger=trigger)
-                logger.info(
-                    "Импорт 1С (%s): %s",
-                    trigger,
-                    report.get("import_status", "success"),
-                )
+                ).enabled_sources()
             except Exception:
-                logger.exception("Автоматический импорт 1С завершился ошибкой")
+                logger.exception(
+                    "Не удалось получить дополнительные источники 1С"
+                )
+                sources = []
+
+            for source in sources:
+                ran_any = True
+                try:
+                    report = OneCAdditionalImportService(
+                        self.settings,
+                        db,
+                        source,
+                    ).analyze_latest(trigger=trigger)
+                    logger.info(
+                        "Импорт 1С %s (%s): %s",
+                        source.source_id,
+                        trigger,
+                        report.get("status", "success"),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Импорт 1С %s завершился ошибкой",
+                        source.source_id,
+                    )
+
+            if not ran_any:
+                logger.warning(
+                    "Автоимпорт 1С пропущен: источники не настроены"
+                )
 
     def _run_loop(self) -> None:
         if self.settings.onec_auto_import_startup_catchup:

@@ -3,10 +3,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.db import get_db
+from app.models_onec_sources import OneCAdditionalSource
 from app.security import get_or_create_csrf, require_admin, validate_csrf
 from app.services.zimbra_lifecycle import ZimbraLifecycleService
 from app.time_utils import register_datetime_filters
@@ -30,6 +32,27 @@ STATUS_LABELS = {
 }
 
 
+def _zimbra_hr_interlock(db: Session) -> list[OneCAdditionalSource]:
+    return list(
+        db.scalars(
+            select(OneCAdditionalSource)
+            .where(
+                OneCAdditionalSource.enabled.is_(True),
+                OneCAdditionalSource.has_corporate_email.is_(False),
+            )
+            .order_by(OneCAdditionalSource.name)
+        ).all()
+    )
+
+
+def _interlock_message(rows: list[OneCAdditionalSource]) -> str:
+    names = ", ".join(row.name for row in rows)
+    return (
+        "Реальные действия Zimbra отключены: нет надежного e-mail "
+        f"сопоставления для источника 1С: {names}."
+    )
+
+
 def _context(
     request: Request,
     *,
@@ -42,16 +65,21 @@ def _context(
     current = require_admin(request)
     service = ZimbraLifecycleService(settings, db)
     run = service.get_run(run_id) if run_id else None
+    recent = service.recent_runs(limit=20)
     if run is None:
-        recent = service.recent_runs(limit=20)
         run = recent[0] if recent else None
-    else:
-        recent = service.recent_runs(limit=20)
+
+    interlock = _zimbra_hr_interlock(db)
+    lifecycle = service.settings_view()
+    lifecycle["hr_interlock"] = bool(interlock)
+    lifecycle["hr_interlock_message"] = (
+        _interlock_message(interlock) if interlock else ""
+    )
 
     return {
         "user": current,
         "csrf": get_or_create_csrf(request),
-        "lifecycle": service.settings_view(),
+        "lifecycle": lifecycle,
         "run": run,
         "actions": service.run_actions(run.id) if run is not None else [],
         "runs": recent,
@@ -97,11 +125,20 @@ def lifecycle_save(
     validate_csrf(request, csrf)
     current = require_admin(request)
     truthy = {"1", "true", "yes", "on"}
+    requested_close = allow_close.strip().lower() in truthy
+    requested_backup = allow_backup.strip().lower() in truthy
+    requested_delete = allow_delete.strip().lower() in truthy
     try:
+        interlock = _zimbra_hr_interlock(db)
+        if interlock and (
+            requested_close or requested_backup or requested_delete
+        ):
+            raise ValueError(_interlock_message(interlock))
+
         ZimbraLifecycleService(settings, db).save_settings(
-            allow_close=allow_close.strip().lower() in truthy,
-            allow_backup=allow_backup.strip().lower() in truthy,
-            allow_delete=allow_delete.strip().lower() in truthy,
+            allow_close=requested_close,
+            allow_backup=requested_backup,
+            allow_delete=requested_delete,
             backup_dir=backup_dir,
             operator=current.username,
         )
@@ -149,8 +186,25 @@ def lifecycle_execute(
 ):
     validate_csrf(request, csrf)
     current = require_admin(request)
-    run = ZimbraLifecycleService(settings, db).execute(current.username)
-    return RedirectResponse(
-        f"/settings/zimbra-lifecycle?run_id={run.id}",
-        status_code=303,
-    )
+    try:
+        interlock = _zimbra_hr_interlock(db)
+        if interlock:
+            raise ValueError(_interlock_message(interlock))
+        run = ZimbraLifecycleService(settings, db).execute(current.username)
+        return RedirectResponse(
+            f"/settings/zimbra-lifecycle?run_id={run.id}",
+            status_code=303,
+        )
+    except Exception as exc:
+        db.rollback()
+        return templates.TemplateResponse(
+            request,
+            "zimbra_lifecycle.html",
+            _context(
+                request,
+                settings=settings,
+                db=db,
+                error=str(exc),
+            ),
+            status_code=400,
+        )
