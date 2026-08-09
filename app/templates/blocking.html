@@ -4,7 +4,7 @@
 <div class="heading-row">
   <div>
     <h1>Блокировка</h1>
-    <p class="muted">Найдите работника по ФИО, логину или корпоративной почте.</p>
+    <p class="muted">Найдите работника по ФИО, логину, корпоративной или личной почте.</p>
   </div>
   {% if card %}<a class="button secondary" href="/blocking">Новый поиск</a>{% endif %}
 </div>
@@ -168,18 +168,20 @@
   </section>
 </div>
 
-<section class="card blocking-equipment-card{% if card.itinvent_state == 'found' and card.itinvent and card.itinvent.equipment %} has-equipment{% elif card.itinvent_state == 'found' and card.itinvent %} equipment-clear{% endif %}" id="blocking-itinvent-card">
+<section class="card blocking-equipment-card{% if card.itinvent_state in ['found', 'stale'] and card.itinvent and card.itinvent.equipment %} has-equipment{% elif card.itinvent_state in ['found', 'stale'] and card.itinvent %} equipment-clear{% endif %}" id="blocking-itinvent-card">
   <div class="blocking-results-heading blocking-itinvent-heading">
     <div>
       <h3>IT Invent</h3>
       {% if card.effective_login %}<span class="muted">Поиск по доменной учетной записи <code>{{ card.effective_login }}</code></span>{% endif %}
     </div>
     <div class="blocking-itinvent-actions">
-      <span class="status {% if card.itinvent_state == 'found' and card.itinvent and card.itinvent.equipment %}partial{% elif card.itinvent_state == 'found' and card.itinvent %}success{% elif card.itinvent_state == 'error' %}failed{% else %}running{% endif %}" id="blocking-itinvent-status">
+      <span class="status {% if card.itinvent_state == 'found' and card.itinvent and card.itinvent.equipment %}partial{% elif card.itinvent_state == 'found' and card.itinvent %}success{% elif card.itinvent_state == 'stale' %}failed{% elif card.itinvent_state == 'error' %}failed{% else %}running{% endif %}" id="blocking-itinvent-status">
         {% if card.itinvent_state == 'found' and card.itinvent and card.itinvent.equipment %}
           Оборудование: {{ card.itinvent.equipment|length }}
         {% elif card.itinvent_state == 'found' and card.itinvent %}
           Имущество не найдено
+        {% elif card.itinvent_state == 'stale' %}
+          Последние успешные данные
         {% elif card.itinvent_state == 'owner_not_found' %}
           Сотрудник не найден
         {% elif card.itinvent_state == 'error' %}
@@ -210,7 +212,10 @@
     <div class="alert error">Ошибка проверки IT Invent: {{ card.itinvent_error }}</div>
   {% elif card.itinvent_state == 'owner_not_found' %}
     <div class="alert warning">Сотрудник с логином <code>{{ card.effective_login }}</code> в IT Invent не найден.</div>
-  {% elif card.itinvent %}
+  {% elif card.itinvent_state in ['found', 'stale'] and card.itinvent %}
+    {% if card.itinvent_state == 'stale' %}
+    <div class="alert warning">Текущая проверка IT Invent не удалась: {{ card.itinvent_error }} Показаны данные последней успешной проверки.</div>
+    {% endif %}
     <dl class="blocking-details blocking-itinvent-owner">
       <dt>Получатель в IT Invent</dt><dd>{{ card.itinvent.owner_display_name or '–' }}</dd>
       <dt>Учетная запись</dt><dd><code>{{ card.itinvent.owner_login }}</code></dd>
@@ -249,7 +254,11 @@
   </div>
 
   <div class="blocking-itinvent-footer">
-    <span class="muted" id="blocking-itinvent-checked-at">{% if card.itinvent_checked_at %}Проверено: {{ card.itinvent_checked_at }}{% endif %}</span>
+    <span class="muted" id="blocking-itinvent-checked-at">
+      {% if card.itinvent_checked_at %}
+        {% if card.itinvent_state == 'stale' %}Последняя успешная проверка: {{ card.itinvent_checked_at }}{% else %}Проверено: {{ card.itinvent_checked_at }}{% endif %}
+      {% endif %}
+    </span>
   </div>
 
   <p class="muted blocking-itinvent-note">
@@ -297,7 +306,8 @@
     </div>
   </div>
   <div class="blocking-confirm-equipment" id="blocking-confirm-equipment">
-    {% if card.itinvent_state == 'found' and card.itinvent %}
+    {% if card.itinvent_state in ['found', 'stale'] and card.itinvent %}
+      {% if card.itinvent_state == 'stale' %}<strong>IT Invent: используются последние успешные данные</strong>{% endif %}
       {% if card.itinvent.equipment %}
       <strong>IT Invent: найдено оборудования – {{ card.itinvent.equipment|length }}</strong>
       {% else %}
@@ -463,7 +473,7 @@ function submitBlockingOnce(form) {
         refreshError.className = 'blocking-itinvent-refresh-error alert warning';
         const previous = checkedAt?.textContent?.trim();
         refreshError.textContent = previous
-          ? `Не удалось обновить сведения IT Invent. Показаны данные предыдущей проверки (${previous.replace('Проверено: ', '')}). ${error.message || error}`
+          ? `Не удалось обновить сведения IT Invent. Показаны данные предыдущей проверки (${previous.replace('Проверено: ', '').replace('Последняя успешная проверка: ', '')}). ${error.message || error}`
           : `Не удалось обновить сведения IT Invent. Текущие данные на экране сохранены. ${error.message || error}`;
       }
       if (confirmEquipment) {

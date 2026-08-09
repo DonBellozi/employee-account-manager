@@ -129,7 +129,6 @@ class BlockingTests(unittest.TestCase):
         self.assertEqual(card.itinvent.owner_display_name, "Ахметова Анна Сергеевна")
         self.assertEqual(card.itinvent.equipment[0].equipment_type, "Ноутбук")
 
-
     @patch("app.services.blocking.ITInventService")
     @patch("app.services.blocking.ZimbraService")
     @patch("app.services.blocking.ActiveDirectoryService")
@@ -162,6 +161,64 @@ class BlockingTests(unittest.TestCase):
         ad_cls.assert_not_called()
         zimbra_cls.assert_not_called()
 
+    @patch("app.services.blocking.ITInventService")
+    @patch("app.services.blocking.ZimbraService")
+    @patch("app.services.blocking.ActiveDirectoryService")
+    def test_card_uses_last_successful_itinvent_snapshot_on_error(
+        self,
+        ad_cls,
+        zimbra_cls,
+        itinvent_cls,
+    ):
+        assets = ITInventEmployeeAssets(
+            owner_found=True,
+            owner_display_name="Ахметова Анна Сергеевна",
+            owner_login="ahmetova.as",
+            equipment=(
+                ITInventEquipment(
+                    equipment_type="Ноутбук",
+                    equipment_name="Lenovo ThinkPad T14",
+                    serial_number="SN-CACHE",
+                    inventory_number="9001",
+                    accounting_inventory_number="BUH-CACHE",
+                ),
+            ),
+        )
+        itinvent_cls.return_value.configured = True
+        itinvent_cls.return_value.equipment_for_login.return_value = assets
+        service = BlockingService(self.settings, self.db)
+        initial = service.refresh_itinvent(self.record.id)
+        self.assertEqual(initial.state, "found")
+
+        ad_user = ADDirectoryUser(
+            username="ahmetova.as",
+            display_name="Ахметова Анна Сергеевна",
+            email="ahmetova.as@org.ru",
+            distinguished_name="CN=Ахметова,DC=local,DC=dmn",
+            is_enabled=True,
+            object_guid="11111111-1111-1111-1111-111111111111",
+        )
+        ad_cls.return_value.get_user_by_object_guid.return_value = ad_user
+        zimbra_cls.return_value.accounts_by_ids.return_value = {
+            "zimbra-1": ZimbraAccountIdentity(
+                zimbra_id="zimbra-1",
+                primary_email="ahmetova.as@org.ru",
+                login="ahmetova.as",
+                addresses=("ahmetova.as@org.ru",),
+                account_status="active",
+            )
+        }
+        itinvent_cls.return_value.equipment_for_login.side_effect = RuntimeError(
+            "IT Invent temporarily unavailable"
+        )
+
+        card = service.card(self.record.id)
+
+        self.assertEqual(card.itinvent_state, "stale")
+        self.assertIn("temporarily unavailable", card.itinvent_error)
+        self.assertIsNotNone(card.itinvent)
+        self.assertEqual(card.itinvent.equipment[0].serial_number, "SN-CACHE")
+        self.assertTrue(card.itinvent_checked_at)
 
     @patch.object(BlockingService, "card")
     @patch("app.services.blocking_queue.ZimbraService")

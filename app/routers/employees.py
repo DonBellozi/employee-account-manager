@@ -165,7 +165,6 @@ def _ad_provisioning_journal_item(
     }
 
 
-
 def _blocking_journal_item(
     operation: BlockingOperation,
     queue_items: list[BlockingQueueItem] | tuple[BlockingQueueItem, ...] = (),
@@ -206,6 +205,13 @@ def _blocking_journal_item(
         }
         return labels.get(system, {}).get(item.status, item.status)
 
+    try:
+        equipment_snapshot = json.loads(operation.equipment_snapshot_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        equipment_snapshot = []
+    if not isinstance(equipment_snapshot, list):
+        equipment_snapshot = []
+
     return {
         "kind": "blocking",
         "record_id": operation.id,
@@ -223,12 +229,31 @@ def _blocking_journal_item(
             ("ФИО", operation.full_name),
             ("Логин AD", operation.login),
             ("Корпоративная почта", operation.corporate_email),
-            ("Active Directory", queue_result(ad_item, "ad")),
-            ("Zimbra", queue_result(zimbra_item, "zimbra")),
             ("IT Invent проверен", _yes_no(operation.itinvent_checked)),
             ("Имущества в IT Invent", str(operation.equipment_count)),
             ("Режим DRY RUN", _yes_no(operation.dry_run)),
         ],
+        "blocking_systems": [
+            {
+                "label": "Active Directory",
+                "result": queue_result(ad_item, "ad"),
+                "timestamp": (
+                    ad_item.completed_at or ad_item.last_attempt_at
+                    if ad_item is not None
+                    else None
+                ),
+            },
+            {
+                "label": "Zimbra",
+                "result": queue_result(zimbra_item, "zimbra"),
+                "timestamp": (
+                    zimbra_item.completed_at or zimbra_item.last_attempt_at
+                    if zimbra_item is not None
+                    else None
+                ),
+            },
+        ],
+        "equipment_snapshot": equipment_snapshot,
         "error_message": operation.error_message,
         "completed_at": operation.completed_at,
     }
@@ -339,54 +364,6 @@ def dashboard(
     journal_items.sort(key=lambda item: item["created_at"], reverse=True)
     journal_items = journal_items[:50]
 
-    # Пока кадровая выгрузка 1С еще не подключена, блок ближайших увольнений
-    # строится по действующим ручным пометкам раздела «Увольнение».
-    # Если один логин отмечался несколько раз, актуальной считаем последнюю
-    # созданную запись. После подключения 1С источник этого блока будет заменен
-    # на рассчитанные окончательные увольнения по всем кадровым назначениям.
-    recent_dismissals = db.scalars(
-        select(DismissalSchedule)
-        .order_by(desc(DismissalSchedule.created_at))
-        .limit(500)
-    ).all()
-
-    latest_by_login: dict[str, DismissalSchedule] = {}
-    for schedule in recent_dismissals:
-        key = schedule.login.strip().lower()
-        if key and key not in latest_by_login:
-            latest_by_login[key] = schedule
-
-    today = date.today()
-    upcoming_dismissals = [
-        {
-            "record_id": schedule.id,
-            "dismissal_date": schedule.dismissal_date,
-            "login": schedule.login,
-            "corporate_email": schedule.corporate_email,
-            "subject": schedule.corporate_email or schedule.login,
-            "itinvent_label": "Не настроено",
-            "itinvent_state": "neutral",
-            "notification_label": (
-                "DRY RUN"
-                if settings.dry_run
-                else "Не настроено"
-            ),
-            "notification_state": (
-                "dry-run"
-                if settings.dry_run
-                else "neutral"
-            ),
-        }
-        for schedule in latest_by_login.values()
-        if schedule.dismissal_date >= today
-    ]
-    upcoming_dismissals.sort(
-        key=lambda item: (
-            item["dismissal_date"],
-            str(item["subject"]).casefold(),
-        )
-    )
-
     registry_service = HRRegistryService(settings, db)
     registry_summary = registry_service.summary()
     registry_issues = registry_service.list_rows(status="issues", limit=10)
@@ -397,7 +374,6 @@ def dashboard(
         _context(
             request,
             journal_items=journal_items,
-            upcoming_dismissals=upcoming_dismissals,
             registry_summary=registry_summary,
             registry_issues=registry_issues,
             dry_run=settings.dry_run,
@@ -406,11 +382,50 @@ def dashboard(
 
 
 @router.get("/employees/registry")
-def employee_registry(request: Request, q: str = "", status: str = "all", db: Session = Depends(get_db), settings: Settings = Depends(get_settings)):
+def employee_registry(
+    request: Request,
+    q: str = "",
+    status: str = "all",
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
     get_current_user(request)
-    if status not in {"all", "issues", "ok", "not_checked"}: status = "all"
+    if status not in {"all", "issues", "ok", "checked", "not_checked"}:
+        status = "all"
     service = HRRegistryService(settings, db)
-    return templates.TemplateResponse(request, "hr_registry.html", _context(request, rows=service.list_rows(query=q, status=status, limit=1000), summary=service.summary(), query=q, selected_status=status))
+    return templates.TemplateResponse(
+        request,
+        "hr_registry.html",
+        _context(
+            request,
+            rows=service.list_rows(query=q, status=status, limit=1000),
+            summary=service.summary(),
+            query=q,
+            selected_status=status,
+        ),
+    )
+
+
+@router.post("/employees/registry/{record_id}/checked")
+def mark_registry_worker_checked(
+    record_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    return_to: str = Form("/employees/registry"),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    user = get_current_user(request)
+    HRRegistryService(settings, db).mark_accounts_not_required(
+        record_id,
+        user.username,
+        user.source,
+    )
+    target = return_to.strip()
+    if not target.startswith("/") or target.startswith("//"):
+        target = "/employees/registry"
+    return RedirectResponse(target, status_code=303)
 
 
 @router.get("/employees/registry/{record_id}/create-ad")

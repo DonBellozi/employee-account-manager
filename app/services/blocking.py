@@ -25,13 +25,20 @@ from app.services.blocking_queue import (
     BlockingTargetView,
 )
 from app.services.hr_registry import HRRegistryService
-from app.services.itinvent import ITInventEmployeeAssets, ITInventService
+from app.services.itinvent import (
+    ITInventEmployeeAssets,
+    ITInventEquipment,
+    ITInventService,
+)
 from app.services.itinvent_control import ITInventControlService
 from app.services.zimbra import ZimbraAccountIdentity, ZimbraService
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+ITINVENT_SNAPSHOT_ACTION = "itinvent_last_success_snapshot"
 
 
 @dataclass(frozen=True)
@@ -245,6 +252,117 @@ class BlockingService:
                 checked_at="",
             )
 
+    @staticmethod
+    def _itinvent_snapshot_target(record: HRSourceRecord) -> str:
+        return f"{record.source_id}:{record.worker_key}"
+
+    def _remember_itinvent(
+        self,
+        record: HRSourceRecord,
+        result: BlockingITInventResult,
+    ) -> None:
+        if result.state not in {"found", "owner_not_found"}:
+            return
+        assets = result.itinvent
+        payload = {
+            "version": 1,
+            "login": result.effective_login,
+            "checked_at": result.checked_at,
+            "owner_found": bool(assets is not None and assets.owner_found),
+            "owner_display_name": (
+                assets.owner_display_name if assets is not None else ""
+            ),
+            "owner_login": (
+                assets.owner_login if assets is not None else result.effective_login
+            ),
+            "equipment": [
+                {
+                    "type": item.equipment_type,
+                    "name": item.equipment_name,
+                    "serial_number": item.serial_number,
+                    "inventory_number": item.inventory_number,
+                    "accounting_inventory_number": item.accounting_inventory_number,
+                }
+                for item in (assets.equipment if assets is not None else ())
+            ],
+        }
+        self.db.add(
+            AuditLog(
+                actor="system",
+                action=ITINVENT_SNAPSHOT_ACTION,
+                target=self._itinvent_snapshot_target(record),
+                result="success",
+                details=json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+        )
+        self.db.commit()
+
+    def _cached_itinvent(
+        self,
+        record: HRSourceRecord,
+        login: str,
+        error: str,
+    ) -> BlockingITInventResult | None:
+        normalized = str(login or "").strip().lower()
+        event = self.db.scalar(
+            select(AuditLog)
+            .where(
+                AuditLog.action == ITINVENT_SNAPSHOT_ACTION,
+                AuditLog.target == self._itinvent_snapshot_target(record),
+                AuditLog.result == "success",
+            )
+            .order_by(desc(AuditLog.id))
+            .limit(1)
+        )
+        if event is None:
+            return None
+        try:
+            payload = json.loads(event.details or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        snapshot_login = str(payload.get("login") or "").strip().lower()
+        if not snapshot_login or snapshot_login != normalized:
+            return None
+
+        equipment_values = payload.get("equipment") or []
+        if not isinstance(equipment_values, list):
+            equipment_values = []
+        equipment: list[ITInventEquipment] = []
+        for value in equipment_values:
+            if not isinstance(value, dict):
+                continue
+            equipment.append(
+                ITInventEquipment(
+                    equipment_type=str(value.get("type") or ""),
+                    equipment_name=str(value.get("name") or ""),
+                    serial_number=str(value.get("serial_number") or ""),
+                    inventory_number=str(value.get("inventory_number") or ""),
+                    accounting_inventory_number=str(
+                        value.get("accounting_inventory_number") or ""
+                    ),
+                )
+            )
+
+        assets = ITInventEmployeeAssets(
+            owner_found=bool(payload.get("owner_found")),
+            owner_display_name=str(payload.get("owner_display_name") or ""),
+            owner_login=str(payload.get("owner_login") or snapshot_login),
+            equipment=tuple(equipment),
+        )
+        return BlockingITInventResult(
+            effective_login=normalized,
+            itinvent=assets,
+            state="stale",
+            error=error,
+            checked_at=str(payload.get("checked_at") or ""),
+        )
+
     def _itinvent_login_for_record(self, record: HRSourceRecord) -> str:
         mapping = self._mapping(record)
         if mapping is not None and mapping.ad_login.strip():
@@ -266,7 +384,10 @@ class BlockingService:
         record = self.db.get(HRSourceRecord, record_id)
         if record is None or not record.is_present:
             raise LookupError("Работник не найден в текущем кадровом реестре")
-        return self._itinvent_lookup(self._itinvent_login_for_record(record))
+        result = self._itinvent_lookup(self._itinvent_login_for_record(record))
+        if result.state in {"found", "owner_not_found"}:
+            self._remember_itinvent(record, result)
+        return result
 
     def card(self, record_id: int) -> BlockingCard:
         record = self.db.get(HRSourceRecord, record_id)
@@ -331,6 +452,16 @@ class BlockingService:
 
         effective_login = ad_user.username if ad_user is not None else candidate_login
         itinvent_result = self._itinvent_lookup(effective_login)
+        if itinvent_result.state in {"found", "owner_not_found"}:
+            self._remember_itinvent(record, itinvent_result)
+        elif itinvent_result.state == "error":
+            cached = self._cached_itinvent(
+                record,
+                effective_login,
+                itinvent_result.error,
+            )
+            if cached is not None:
+                itinvent_result = cached
 
         return BlockingCard(
             record_id=record.id,
@@ -452,6 +583,8 @@ class BlockingService:
             # Повторно читаем внешние системы и IT Invent непосредственно перед
             # созданием задания. Если сервер недоступен, известные стабильные
             # идентификаторы все равно попадут в очередь и будут обработаны позже.
+            # Для IT Invent при ошибке используется только последний успешно
+            # сохраненный снимок с тем же доменным логином.
             card = self.card(record_id)
             equipment, equipment_snapshot = self._equipment_snapshot(card)
             operation = BlockingOperation(
@@ -514,7 +647,9 @@ class BlockingService:
                         f"worker_key={card.worker_key}; "
                         f"AD={card.effective_login or card.ad_target_guid}; "
                         f"Zimbra={card.zimbra_target_email or card.zimbra_target_id}; "
-                        f"ITInvent={len(equipment)}; dry_run={operation.dry_run}"
+                        f"ITInvent={len(equipment)}; "
+                        f"ITInventState={card.itinvent_state}; "
+                        f"dry_run={operation.dry_run}"
                     )[:1000],
                 )
             )

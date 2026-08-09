@@ -8,12 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import EmailLoginMapping, HRPerson, HRSourceRecord
-from app.services.ad import ActiveDirectoryService
-from app.services.email_login_mapping import (
-    EmailLoginMappingService,
-    email_domain,
+from app.models import (
+    AuditLog,
+    DomainAccessUser,
+    EmailLoginMapping,
+    HRPerson,
+    HRSourceRecord,
 )
+from app.services.ad import ActiveDirectoryService
+from app.services.email_login_mapping import EmailLoginMappingService
 from app.services.onec_xlsx import OneCWorkbook
 from app.services.zimbra import ZimbraService
 
@@ -36,10 +39,20 @@ ZIMBRA_LABELS = {
 }
 RECON_LABELS = {
     "ok": "Соответствует",
+    "checked": "Проверен",
     "issue": "Требует проверки",
     "error": "Ошибка сверки",
     "not_checked": "Не проверено полностью",
 }
+
+MANUAL_CHECK_ACTION = "hr_accounts_not_required_confirmed"
+MANUAL_CHECK_INVALIDATED_ACTION = "hr_accounts_not_required_invalidated"
+MANUAL_CHECK_ACTIONS = {
+    MANUAL_CHECK_ACTION,
+    MANUAL_CHECK_INVALIDATED_ACTION,
+}
+ABSENT_AD_STATUSES = {"missing", "no_login"}
+ABSENT_ZIMBRA_STATUSES = {"missing", "no_email"}
 
 
 def utcnow() -> datetime:
@@ -65,6 +78,292 @@ class HRRegistryService:
             else "Домен еще не определен"
         )
 
+    @staticmethod
+    def _check_target(record: HRSourceRecord) -> str:
+        return f"{record.source_id}:{record.worker_key}"
+
+    @staticmethod
+    def _json_details(event: AuditLog | None) -> dict:
+        if event is None or not event.details:
+            return {}
+        try:
+            value = json.loads(event.details)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _short_operator_name(display_name: str, username: str) -> str:
+        value = " ".join(str(display_name or "").split())
+        parts = value.split(" ") if value else []
+        if len(parts) >= 2:
+            initials = "".join(
+                f"{part[0].upper()}."
+                for part in parts[1:3]
+                if part
+            )
+            if initials:
+                return f"{parts[0]} {initials}"
+        return value or username
+
+    def _operator_names(
+        self,
+        username: str,
+        source: str,
+    ) -> tuple[str, str]:
+        normalized = str(username or "").strip().lower()
+        display_name = normalized
+        if source == "ad" and normalized:
+            account = self.db.scalar(
+                select(DomainAccessUser).where(
+                    DomainAccessUser.username == normalized
+                )
+            )
+            if account is not None and account.display_name.strip():
+                display_name = account.display_name.strip()
+        return (
+            self._short_operator_name(display_name, normalized),
+            display_name,
+        )
+
+    def _latest_manual_check_events(
+        self,
+        records: list[HRSourceRecord],
+    ) -> tuple[dict[str, AuditLog], dict[str, AuditLog]]:
+        if not records:
+            return {}, {}
+        targets = {self._check_target(record) for record in records}
+        events = self.db.scalars(
+            select(AuditLog)
+            .where(AuditLog.action.in_(MANUAL_CHECK_ACTIONS))
+            .order_by(AuditLog.id.desc())
+        ).all()
+        latest: dict[str, AuditLog] = {}
+        latest_confirmation: dict[str, AuditLog] = {}
+        for event in events:
+            if event.target not in targets:
+                continue
+            latest.setdefault(event.target, event)
+            if event.action == MANUAL_CHECK_ACTION:
+                latest_confirmation.setdefault(event.target, event)
+            if (
+                len(latest) == len(targets)
+                and len(latest_confirmation) == len(targets)
+            ):
+                break
+        return latest, latest_confirmation
+
+    @staticmethod
+    def _snapshot_matches(record: HRSourceRecord, payload: dict) -> bool:
+        return bool(
+            str(payload.get("placements_json") or "")
+            == str(record.placements_json or "")
+            and str(payload.get("corporate_email") or "").strip().lower()
+            == record.corporate_email.strip().lower()
+            and str(payload.get("login") or "").strip().lower()
+            == record.login.strip().lower()
+        )
+
+    @staticmethod
+    def _accounts_are_absent(record: HRSourceRecord) -> bool:
+        return bool(
+            record.ad_status in ABSENT_AD_STATUSES
+            and record.zimbra_status in ABSENT_ZIMBRA_STATUSES
+        )
+
+    def _manual_check_state(
+        self,
+        record: HRSourceRecord,
+        latest_event: AuditLog | None,
+        latest_confirmation: AuditLog | None,
+    ) -> dict:
+        if latest_confirmation is None:
+            return {
+                "active": False,
+                "operator": "",
+                "operator_name": "",
+                "confirmed_at": None,
+                "note": "",
+                "meta": "",
+                "previous_note": "",
+            }
+
+        confirmation = self._json_details(latest_confirmation)
+        operator = str(
+            confirmation.get("operator_username")
+            or latest_confirmation.actor
+            or ""
+        ).strip()
+        operator_name = str(
+            confirmation.get("operator_short_name")
+            or confirmation.get("operator_display_name")
+            or operator
+        ).strip()
+        note = (
+            f"{operator_name} подтвердил, что учетные записи не требуются"
+            if operator_name
+            else "Оператор подтвердил, что учетные записи не требуются"
+        )
+
+        invalidation_reason = ""
+        invalidated = bool(
+            latest_event is not None
+            and latest_event.action == MANUAL_CHECK_INVALIDATED_ACTION
+            and latest_event.id > latest_confirmation.id
+        )
+        if invalidated:
+            invalidation_reason = str(
+                self._json_details(latest_event).get("reason") or ""
+            ).strip()
+
+        active = bool(
+            not invalidated
+            and self._snapshot_matches(record, confirmation)
+            and self._accounts_are_absent(record)
+        )
+
+        if not active and not invalidation_reason:
+            if not self._snapshot_matches(record, confirmation):
+                invalidation_reason = "Изменились кадровые или учетные данные"
+            elif not self._accounts_are_absent(record):
+                invalidation_reason = "Обнаружены учетные записи"
+
+        previous_note = ""
+        if not active and note:
+            previous_note = f"Ранее {note}."
+            if invalidation_reason:
+                previous_note += f" {invalidation_reason}."
+
+        return {
+            "active": active,
+            "operator": operator,
+            "operator_name": operator_name,
+            "confirmed_at": latest_confirmation.created_at,
+            "note": note if active else "",
+            "meta": operator if active else "",
+            "previous_note": previous_note,
+        }
+
+    def _manual_check_states(
+        self,
+        records: list[HRSourceRecord],
+    ) -> dict[int, dict]:
+        latest, confirmations = self._latest_manual_check_events(records)
+        return {
+            record.id: self._manual_check_state(
+                record,
+                latest.get(self._check_target(record)),
+                confirmations.get(self._check_target(record)),
+            )
+            for record in records
+        }
+
+    def _invalidate_manual_check(
+        self,
+        record: HRSourceRecord,
+        confirmation: AuditLog,
+        reason: str,
+    ) -> AuditLog:
+        payload = self._json_details(confirmation)
+        event = AuditLog(
+            actor="system",
+            action=MANUAL_CHECK_INVALIDATED_ACTION,
+            target=self._check_target(record),
+            result="invalidated",
+            details=json.dumps(
+                {
+                    "version": 1,
+                    "reason": reason,
+                    "previous_operator_username": (
+                        payload.get("operator_username")
+                        or confirmation.actor
+                    ),
+                    "previous_operator_short_name": (
+                        payload.get("operator_short_name") or ""
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        self.db.add(event)
+        return event
+
+    def mark_accounts_not_required(
+        self,
+        record_id: int,
+        operator_username: str,
+        operator_source: str,
+    ) -> dict:
+        record = self.db.get(HRSourceRecord, record_id)
+        if record is None or not record.is_present:
+            raise LookupError("Работник не найден в текущем кадровом реестре")
+        if record.reconciled_at is None:
+            raise ValueError("Сначала выполните сверку 1С / AD / Zimbra")
+        if record.reconciliation_status != "issue":
+            raise ValueError("Для этой записи подтверждение не требуется")
+        if not self._accounts_are_absent(record):
+            raise ValueError(
+                "Статус «Проверен» доступен только когда учетные записи AD и Zimbra не обнаружены"
+            )
+
+        latest, confirmations = self._latest_manual_check_events([record])
+        state = self._manual_check_state(
+            record,
+            latest.get(self._check_target(record)),
+            confirmations.get(self._check_target(record)),
+        )
+        if state.get("active"):
+            return {
+                "operator": state.get("operator", ""),
+                "operator_name": state.get("operator_name", ""),
+                "confirmed_at": state.get("confirmed_at"),
+            }
+
+        operator_short_name, operator_display_name = self._operator_names(
+            operator_username,
+            operator_source,
+        )
+        payload = {
+            "version": 1,
+            "worker_key": record.worker_key,
+            "source_id": record.source_id,
+            "operator_username": operator_username,
+            "operator_source": operator_source,
+            "operator_short_name": operator_short_name,
+            "operator_display_name": operator_display_name,
+            "fio": record.fio,
+            "placements_json": record.placements_json or "[]",
+            "corporate_email": record.corporate_email,
+            "login": record.login,
+            "ad_status": record.ad_status,
+            "zimbra_status": record.zimbra_status,
+            "reconciled_at": (
+                record.reconciled_at.isoformat()
+                if record.reconciled_at is not None
+                else ""
+            ),
+        }
+        event = AuditLog(
+            actor=operator_username,
+            action=MANUAL_CHECK_ACTION,
+            target=self._check_target(record),
+            result="confirmed",
+            details=json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        self.db.add(event)
+        self.db.commit()
+        self.db.refresh(event)
+        return {
+            "operator": operator_username,
+            "operator_name": operator_short_name,
+            "confirmed_at": event.created_at,
+        }
+
     def _set_source_from_workbook(self, workbook: OneCWorkbook) -> str:
         domain = self.mapping_service.infer_source_domain_from_workbook(
             workbook
@@ -87,6 +386,7 @@ class HRRegistryService:
             record.worker_key: record
             for record in source_records
         }
+        latest_checks, _ = self._latest_manual_check_events(source_records)
 
         people = (
             self.db.scalars(
@@ -152,6 +452,34 @@ class HRRegistryService:
                 existing_records[worker.worker_key] = record
                 created_source_records += 1
             else:
+                latest_event = latest_checks.get(self._check_target(record))
+                if (
+                    latest_event is not None
+                    and latest_event.action == MANUAL_CHECK_ACTION
+                ):
+                    payload = self._json_details(latest_event)
+                    reason = ""
+                    if not record.is_present:
+                        reason = "Работник повторно появился в кадровой выгрузке"
+                    elif str(payload.get("placements_json") or "") != placements_json:
+                        reason = "Изменилось кадровое назначение"
+                    elif (
+                        str(payload.get("corporate_email") or "").strip().lower()
+                        != str(worker.email or "").strip().lower()
+                    ):
+                        reason = "Изменился корпоративный e-mail"
+                    elif (
+                        str(payload.get("login") or "").strip().lower()
+                        != str(worker.login or "").strip().lower()
+                    ):
+                        reason = "Изменился логин из кадровой выгрузки"
+                    if reason:
+                        self._invalidate_manual_check(
+                            record,
+                            latest_event,
+                            reason,
+                        )
+
                 record.source_name = source_id
                 record.fio = worker.fio
                 record.corporate_email = worker.email or ""
@@ -190,6 +518,7 @@ class HRRegistryService:
                 HRSourceRecord.is_present.is_(True),
             )
         ).all()
+        latest_checks, _ = self._latest_manual_check_events(records)
 
         worker_keys = [record.worker_key for record in records]
         mappings = self.mapping_service.mapping_by_worker(
@@ -370,6 +699,26 @@ class HRRegistryService:
                             else "disabled"
                         )
 
+            latest_event = latest_checks.get(self._check_target(record))
+            if (
+                latest_event is not None
+                and latest_event.action == MANUAL_CHECK_ACTION
+                and not self._accounts_are_absent(record)
+                and record.ad_status != "error"
+                and record.zimbra_status != "error"
+            ):
+                if record.ad_status not in ABSENT_AD_STATUSES:
+                    reason = "Обнаружена учетная запись Active Directory"
+                elif record.zimbra_status not in ABSENT_ZIMBRA_STATUSES:
+                    reason = "Обнаружена учетная запись Zimbra"
+                else:
+                    reason = "Изменилось состояние учетных записей"
+                self._invalidate_manual_check(
+                    record,
+                    latest_event,
+                    reason,
+                )
+
             if (
                 record.ad_status == "error"
                 or record.zimbra_status == "error"
@@ -431,6 +780,7 @@ class HRRegistryService:
                 HRSourceRecord.is_present.is_(True),
             )
         ).all()
+        manual_states = self._manual_check_states(records)
 
         # Count in Python because the mapping table is intentionally small.
         mapping_count = len(
@@ -446,6 +796,7 @@ class HRRegistryService:
             "source_name": self.source_name,
             "total": len(records),
             "ok": 0,
+            "checked": 0,
             "issues": 0,
             "errors": 0,
             "not_checked": 0,
@@ -456,7 +807,10 @@ class HRRegistryService:
             "mapping_count": mapping_count,
         }
         for record in records:
-            if record.reconciliation_status == "ok":
+            manual_state = manual_states.get(record.id, {})
+            if manual_state.get("active"):
+                summary["checked"] += 1
+            elif record.reconciliation_status == "ok":
                 summary["ok"] += 1
             elif record.reconciliation_status == "issue":
                 summary["issues"] += 1
@@ -495,6 +849,7 @@ class HRRegistryService:
                 HRSourceRecord.is_present.is_(True),
             ).order_by(HRSourceRecord.fio)
         ).all()
+        manual_states = self._manual_check_states(records)
 
         mappings = self.mapping_service.mapping_by_worker(
             [record.worker_key for record in records],
@@ -522,21 +877,24 @@ class HRRegistryService:
             ).casefold():
                 continue
 
+            manual_state = manual_states.get(record.id, {})
+            is_checked = bool(manual_state.get("active"))
+            effective_status = (
+                "checked" if is_checked else record.reconciliation_status
+            )
+
             if (
                 status == "issues"
-                and record.reconciliation_status
-                not in {"issue", "error"}
+                and effective_status not in {"issue", "error"}
             ):
                 continue
-            if (
-                status == "ok"
-                and record.reconciliation_status != "ok"
-            ):
+            if status == "ok" and effective_status != "ok":
+                continue
+            if status == "checked" and effective_status != "checked":
                 continue
             if (
                 status == "not_checked"
-                and record.reconciliation_status
-                != "not_checked"
+                and effective_status != "not_checked"
             ):
                 continue
 
@@ -565,11 +923,14 @@ class HRRegistryService:
 
             create_url = ""
             if (
-                record.ad_status == "missing"
-                and record.zimbra_status == "missing"
+                record.ad_status in ABSENT_AD_STATUSES
+                and record.zimbra_status in ABSENT_ZIMBRA_STATUSES
             ):
+                raw_input = record.fio.strip()
+                if record.personal_email.strip():
+                    raw_input += "\n" + record.personal_email.strip()
                 create_url = "/employees/new?" + urlencode(
-                    {"fio": record.fio}
+                    {"fio": raw_input}
                 )
 
             create_ad_url = ""
@@ -585,7 +946,7 @@ class HRRegistryService:
 
             mapping_url = ""
             if (
-                record.reconciliation_status in {"issue", "error"}
+                effective_status in {"issue", "error"}
                 and record.corporate_email
             ):
                 mapping_url = (
@@ -596,6 +957,11 @@ class HRRegistryService:
                         }
                     )
                 )
+
+            can_mark_checked = bool(
+                effective_status == "issue"
+                and self._accounts_are_absent(record)
+            )
 
             rows.append(
                 {
@@ -621,12 +987,13 @@ class HRRegistryService:
                         record.zimbra_status,
                         record.zimbra_status,
                     ),
-                    "reconciliation_status": (
-                        record.reconciliation_status
+                    "reconciliation_status": effective_status,
+                    "reconciliation_class": (
+                        "ok" if effective_status == "checked" else effective_status
                     ),
                     "reconciliation_label": RECON_LABELS.get(
-                        record.reconciliation_status,
-                        record.reconciliation_status,
+                        effective_status,
+                        effective_status,
                     ),
                     "error": record.reconciliation_error,
                     "reconciled_at": record.reconciled_at,
@@ -634,6 +1001,15 @@ class HRRegistryService:
                     "create_ad_url": create_ad_url,
                     "mapping_url": mapping_url,
                     "has_mapping": mapping is not None,
+                    "can_mark_checked": can_mark_checked,
+                    "manual_check_note": manual_state.get("note", ""),
+                    "manual_check_operator": manual_state.get("operator", ""),
+                    "manual_check_confirmed_at": manual_state.get(
+                        "confirmed_at"
+                    ),
+                    "manual_check_previous_note": manual_state.get(
+                        "previous_note", ""
+                    ),
                 }
             )
             if len(rows) >= limit:

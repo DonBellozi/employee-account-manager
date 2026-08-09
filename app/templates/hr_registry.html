@@ -1,8 +1,113 @@
 {% extends "base.html" %}
 {% block title %}Кадровый реестр{% endblock %}
 {% block content %}
-<div class="heading-row"><div><h1>Кадровый реестр</h1><p class="muted">Источник: {{ summary.source_name }}. СНИЛС не хранится: используется HMAC worker_key. AD и Zimbra только проверяются.</p></div><a class="button secondary" href="/settings">Настройки 1С</a></div>
-<div class="hr-summary-grid hr-registry-page-summary"><div><span>В реестре</span><strong>{{ summary.total }}</strong></div><div class="good"><span>Соответствует</span><strong>{{ summary.ok }}</strong></div><div class="warn"><span>Требует проверки</span><strong>{{ summary.issues }}</strong></div><div class="bad"><span>Ошибки</span><strong>{{ summary.errors }}</strong></div><div><span>Не проверено</span><strong>{{ summary.not_checked }}</strong></div></div>
-<form method="get" action="/employees/registry" class="registry-filter card"><label><span>Поиск</span><input type="search" name="q" value="{{ query }}" placeholder="ФИО, логин или email"></label><label><span>Статус</span><select name="status"><option value="all"{% if selected_status == 'all' %} selected{% endif %}>Все</option><option value="issues"{% if selected_status == 'issues' %} selected{% endif %}>Требуют проверки</option><option value="ok"{% if selected_status == 'ok' %} selected{% endif %}>Соответствуют</option><option value="not_checked"{% if selected_status == 'not_checked' %} selected{% endif %}>Не проверено полностью</option></select></label><button class="button" type="submit">Применить</button></form>
-<section class="card table-wrap registry-table-card"><table class="journal-table registry-table"><thead><tr><th>Работник</th><th>Кадровые назначения</th><th>AD</th><th>Zimbra</th><th>Сверка</th><th></th></tr></thead><tbody>{% for item in rows %}<tr><td><strong>{{ item.fio }}</strong><div class="journal-object-meta">{% if item.login %}<code>{{ item.login }}</code>{% endif %}{% if item.email %}<span>{{ item.email }}</span>{% endif %}</div></td><td>{% for placement in item.placements %}<div class="registry-placement">{{ placement }}</div>{% else %}<span class="muted">Не определены</span>{% endfor %}</td><td><span class="registry-state {{ item.ad_status }}">{{ item.ad_label }}</span></td><td><span class="registry-state {{ item.zimbra_status }}">{{ item.zimbra_label }}</span></td><td><span class="registry-state {{ item.reconciliation_status }}">{{ item.reconciliation_label }}</span>{% if item.error %}<div class="registry-error">{{ item.error }}</div>{% endif %}</td><td><div class="registry-actions">{% if item.has_mapping %}<span class="registry-mapped">Сопоставлено</span>{% else %}{% if item.mapping_url %}<a class="button secondary small" href="{{ item.mapping_url }}">Сопоставить</a>{% endif %}{% if item.create_ad_url %}<a class="button small" href="{{ item.create_ad_url }}">Создать AD</a>{% elif item.create_url %}<a class="button secondary small" href="{{ item.create_url }}">Создать</a>{% endif %}{% endif %}</div></td></tr>{% else %}<tr><td colspan="6" class="muted">По выбранному фильтру записей нет.</td></tr>{% endfor %}</tbody></table></section>
+<div class="heading-row">
+  <div>
+    <h1>Кадровый реестр</h1>
+    <p class="muted">Источник: {{ summary.source_name }}. СНИЛС не хранится: используется HMAC worker_key. AD и Zimbra только проверяются.</p>
+  </div>
+  <a class="button secondary" href="/settings">Настройки 1С</a>
+</div>
+
+<div class="hr-summary-grid hr-registry-page-summary">
+  <div><span>В реестре</span><strong>{{ summary.total }}</strong></div>
+  <div class="good"><span>Соответствует</span><strong>{{ summary.ok }}</strong></div>
+  <div class="good"><span>Проверены</span><strong>{{ summary.checked }}</strong></div>
+  <div class="warn"><span>Требует проверки</span><strong>{{ summary.issues }}</strong></div>
+  <div class="bad"><span>Ошибки</span><strong>{{ summary.errors }}</strong></div>
+  <div><span>Не проверено</span><strong>{{ summary.not_checked }}</strong></div>
+</div>
+
+<form method="get" action="/employees/registry" class="registry-filter card">
+  <label>
+    <span>Поиск</span>
+    <input type="search" name="q" value="{{ query }}" placeholder="ФИО, логин, корпоративный или личный email">
+  </label>
+  <label>
+    <span>Статус</span>
+    <select name="status">
+      <option value="all"{% if selected_status == 'all' %} selected{% endif %}>Все</option>
+      <option value="issues"{% if selected_status == 'issues' %} selected{% endif %}>Требуют проверки</option>
+      <option value="ok"{% if selected_status == 'ok' %} selected{% endif %}>Соответствуют</option>
+      <option value="checked"{% if selected_status == 'checked' %} selected{% endif %}>Проверены</option>
+      <option value="not_checked"{% if selected_status == 'not_checked' %} selected{% endif %}>Не проверено полностью</option>
+    </select>
+  </label>
+  <button class="button" type="submit">Применить</button>
+</form>
+
+<section class="card table-wrap registry-table-card">
+  <table class="journal-table registry-table">
+    <thead>
+      <tr>
+        <th>Работник</th>
+        <th>Кадровые назначения</th>
+        <th>AD</th>
+        <th>Zimbra</th>
+        <th>Сверка</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in rows %}
+      <tr>
+        <td>
+          <strong>{{ item.fio }}</strong>
+          <div class="journal-object-meta">
+            {% if item.login %}<code>{{ item.login }}</code>{% endif %}
+            {% if item.email %}<span>{{ item.email }}</span>{% endif %}
+            {% if item.personal_email %}<span>Личный: {{ item.personal_email }}</span>{% endif %}
+          </div>
+        </td>
+        <td>
+          {% for placement in item.placements %}
+          <div class="registry-placement">{{ placement }}</div>
+          {% else %}
+          <span class="muted">Не определены</span>
+          {% endfor %}
+        </td>
+        <td><span class="registry-state {{ item.ad_status }}">{{ item.ad_label }}</span></td>
+        <td><span class="registry-state {{ item.zimbra_status }}">{{ item.zimbra_label }}</span></td>
+        <td>
+          <span class="registry-state {{ item.reconciliation_class }}"{% if item.manual_check_note %} title="{{ item.manual_check_note }}"{% endif %}>{{ item.reconciliation_label }}</span>
+          {% if item.manual_check_note %}
+          <div class="muted">{{ item.manual_check_note }}</div>
+          <div class="journal-object-meta">
+            {% if item.manual_check_operator %}<code>{{ item.manual_check_operator }}</code>{% endif %}
+            {% if item.manual_check_confirmed_at %}<span>{{ item.manual_check_confirmed_at|app_datetime('%d.%m.%Y %H:%M') }}</span>{% endif %}
+          </div>
+          {% elif item.manual_check_previous_note %}
+          <div class="muted">{{ item.manual_check_previous_note }}</div>
+          {% endif %}
+          {% if item.error %}<div class="registry-error">{{ item.error }}</div>{% endif %}
+        </td>
+        <td>
+          <div class="registry-actions">
+            {% if item.can_mark_checked %}
+            <form method="post" action="/employees/registry/{{ item.id }}/checked">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="return_to" value="/employees/registry">
+              <button class="button secondary small" type="submit" title="Подтвердить, что учетные записи этому работнику не требуются">Проверен</button>
+            </form>
+            {% endif %}
+
+            {% if item.has_mapping %}
+            <span class="registry-mapped">Сопоставлено</span>
+            {% else %}
+              {% if item.mapping_url %}<a class="button secondary small" href="{{ item.mapping_url }}">Сопоставить</a>{% endif %}
+              {% if item.create_ad_url %}
+              <a class="button small" href="{{ item.create_ad_url }}">Создать AD</a>
+              {% elif item.create_url %}
+              <a class="button secondary small" href="{{ item.create_url }}">Создать</a>
+              {% endif %}
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">По выбранному фильтру записей нет.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
 {% endblock %}

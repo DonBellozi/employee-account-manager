@@ -18,75 +18,71 @@
 </div>
 {% endif %}
 
-<section class="card upcoming-dismissals-card">
+<section class="card hr-reconciliation-card">
   <div class="upcoming-dismissals-heading">
     <div>
-      <h2>Ближайшие увольнения</h2>
-      <p class="muted">
-        До подключения кадровой выгрузки здесь отображаются актуальные записи,
-        созданные через раздел «Увольнение».
-      </p>
+      <h2>Сверка 1С / AD / Zimbra</h2>
+      <p class="muted">Текущий кадровый источник: {{ registry_summary.source_name }}. Сверка выполняется только на чтение.</p>
     </div>
-    <span class="upcoming-count">
-      {{ upcoming_dismissals|length }}
-      {% if upcoming_dismissals|length == 1 %}работник{% else %}работников{% endif %}
-    </span>
+    <a class="button secondary" href="/employees/registry">Открыть реестр</a>
   </div>
-
-  {% if upcoming_dismissals %}
-  <div class="upcoming-scroll{% if upcoming_dismissals|length > 10 %} scrollable{% endif %}">
-    <table class="upcoming-table">
-      <thead>
-        <tr>
-          <th>Дата увольнения</th>
-          <th>Работник / учетная запись</th>
-          <th>IT Invent</th>
-          <th>Уведомление</th>
-        </tr>
-      </thead>
+  {% if registry_summary.total %}
+  <div class="hr-summary-grid">
+    <div><span>В реестре</span><strong>{{ registry_summary.total }}</strong></div>
+    <div class="good"><span>Соответствует</span><strong>{{ registry_summary.ok }}</strong></div>
+    <div class="good"><span>Проверены</span><strong>{{ registry_summary.checked }}</strong></div>
+    <div class="warn"><span>Требует проверки</span><strong>{{ registry_summary.issues }}</strong></div>
+    <div class="bad"><span>Ошибки сверки</span><strong>{{ registry_summary.errors }}</strong></div>
+    <div><span>Не проверено</span><strong>{{ registry_summary.not_checked }}</strong></div>
+  </div>
+  {% if registry_issues %}
+  <div class="hr-issues-table-wrap">
+    <table class="upcoming-table hr-issues-table">
+      <thead><tr><th>Работник</th><th>AD</th><th>Zimbra</th><th>Результат</th><th></th></tr></thead>
       <tbody>
-        {% for item in upcoming_dismissals %}
+        {% for item in registry_issues %}
         <tr>
-          <td class="upcoming-date">
-            {{ item.dismissal_date.strftime('%d.%m.%Y') }}
-          </td>
           <td>
-            <strong>{{ item.subject }}</strong>
+            <strong>{{ item.fio }}</strong>
             <div class="upcoming-meta">
               {% if item.login %}<code>{{ item.login }}</code>{% endif %}
-              {% if item.corporate_email and item.corporate_email != item.subject %}
-              <span>{{ item.corporate_email }}</span>
+              {% if item.email %}<span>{{ item.email }}</span>{% endif %}
+            </div>
+            {% if item.manual_check_previous_note %}
+            <div class="muted">{{ item.manual_check_previous_note }}</div>
+            {% endif %}
+          </td>
+          <td><span class="registry-state {{ item.ad_status }}">{{ item.ad_label }}</span></td>
+          <td><span class="registry-state {{ item.zimbra_status }}">{{ item.zimbra_label }}</span></td>
+          <td><span class="registry-state {{ item.reconciliation_class }}">{{ item.reconciliation_label }}</span></td>
+          <td>
+            <div class="registry-actions">
+              {% if item.can_mark_checked %}
+              <form method="post" action="/employees/registry/{{ item.id }}/checked">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <input type="hidden" name="return_to" value="/">
+                <button class="button secondary small" type="submit" title="Подтвердить, что учетные записи этому работнику не требуются">Проверен</button>
+              </form>
+              {% endif %}
+              {% if item.has_mapping %}
+                <span class="registry-mapped">Сопоставлено</span>
+              {% else %}
+                {% if item.mapping_url %}<a class="button secondary small" href="{{ item.mapping_url }}">Сопоставить</a>{% endif %}
+                {% if item.create_ad_url %}<a class="button small" href="{{ item.create_ad_url }}">Создать AD</a>{% elif item.create_url %}<a class="button secondary small" href="{{ item.create_url }}">Создать</a>{% endif %}
               {% endif %}
             </div>
-          </td>
-          <td>
-            <span class="integration-state {{ item.itinvent_state }}">
-              {{ item.itinvent_label }}
-            </span>
-          </td>
-          <td>
-            <span class="integration-state {{ item.notification_state }}">
-              {{ item.notification_label }}
-            </span>
           </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
-  {% else %}
-  <div class="upcoming-empty">
-    Ближайших увольнений по текущим данным нет.
-  </div>
+  {% elif registry_summary.issues == 0 and registry_summary.errors == 0 %}
+  <div class="upcoming-empty">Проблем по текущей сверке не обнаружено.</div>
   {% endif %}
-</section>
-
-<section class="card hr-reconciliation-card">
-  <div class="upcoming-dismissals-heading"><div><h2>Сверка 1С / AD / Zimbra</h2><p class="muted">Текущий кадровый источник: {{ registry_summary.source_name }}. Сверка выполняется только на чтение.</p></div><a class="button secondary" href="/employees/registry">Открыть реестр</a></div>
-  {% if registry_summary.total %}
-  <div class="hr-summary-grid"><div><span>В реестре</span><strong>{{ registry_summary.total }}</strong></div><div class="good"><span>Соответствует</span><strong>{{ registry_summary.ok }}</strong></div><div class="warn"><span>Требует проверки</span><strong>{{ registry_summary.issues }}</strong></div><div class="bad"><span>Ошибки сверки</span><strong>{{ registry_summary.errors }}</strong></div><div><span>Не проверено</span><strong>{{ registry_summary.not_checked }}</strong></div></div>
-  {% if registry_issues %}<div class="hr-issues-table-wrap"><table class="upcoming-table hr-issues-table"><thead><tr><th>Работник</th><th>AD</th><th>Zimbra</th><th>Результат</th><th></th></tr></thead><tbody>{% for item in registry_issues %}<tr><td><strong>{{ item.fio }}</strong><div class="upcoming-meta">{% if item.login %}<code>{{ item.login }}</code>{% endif %}{% if item.email %}<span>{{ item.email }}</span>{% endif %}</div></td><td><span class="registry-state {{ item.ad_status }}">{{ item.ad_label }}</span></td><td><span class="registry-state {{ item.zimbra_status }}">{{ item.zimbra_label }}</span></td><td><span class="registry-state {{ item.reconciliation_status }}">{{ item.reconciliation_label }}</span></td><td><div class="registry-actions">{% if item.has_mapping %}<span class="registry-mapped">Сопоставлено</span>{% else %}{% if item.mapping_url %}<a class="button secondary small" href="{{ item.mapping_url }}">Сопоставить</a>{% endif %}{% if item.create_ad_url %}<a class="button small" href="{{ item.create_ad_url }}">Создать AD</a>{% elif item.create_url %}<a class="button secondary small" href="{{ item.create_url }}">Создать</a>{% endif %}{% endif %}</div></td></tr>{% endfor %}</tbody></table></div>{% elif registry_summary.issues == 0 and registry_summary.errors == 0 %}<div class="upcoming-empty">Проблем по текущей сверке не обнаружено.</div>{% endif %}
-  {% else %}<div class="upcoming-empty">Кадровый реестр пока пуст. Повторно выполните «Получить и проанализировать» в настройках 1С.</div>{% endif %}
+  {% else %}
+  <div class="upcoming-empty">Кадровый реестр пока пуст. Повторно выполните «Получить и проанализировать» в настройках 1С.</div>
+  {% endif %}
 </section>
 
 <section class="card table-wrap journal-card">
@@ -108,9 +104,7 @@
           {{ item.created_at|app_datetime('%d.%m.%Y') }}
           <span>{{ item.created_at|app_datetime('%H:%M') }}</span>
         </td>
-        <td>
-          <span class="action-badge {{ item.kind }}">{{ item.action }}</span>
-        </td>
+        <td><span class="action-badge {{ item.kind }}">{{ item.action }}</span></td>
         <td>
           <strong>{{ item.subject }}</strong>
           <div class="journal-object-meta">
@@ -118,9 +112,7 @@
             {% if item.corporate_email %}<span>{{ item.corporate_email }}</span>{% endif %}
           </div>
         </td>
-        <td>
-          <span class="status {{ item.status_key }}">{{ item.status_label }}</span>
-        </td>
+        <td><span class="status {{ item.status_key }}">{{ item.status_label }}</span></td>
         <td>{{ item.operator }}</td>
         <td class="journal-details-cell">
           <details class="journal-details">
@@ -136,6 +128,19 @@
                 <dt>{{ label }}</dt>
                 <dd>{{ value or '–' }}</dd>
                 {% endfor %}
+
+                {% if item.kind == 'blocking' %}
+                  {% for system in item.blocking_systems %}
+                  <dt>{{ system.label }}</dt>
+                  <dd>
+                    {{ system.result }}
+                    {% if system.timestamp %}
+                    <div class="muted">{{ system.timestamp|app_datetime('%d.%m.%Y %H:%M:%S') }}</div>
+                    {% endif %}
+                  </dd>
+                  {% endfor %}
+                {% endif %}
+
                 <dt>Оператор</dt>
                 <dd>{{ item.operator }}</dd>
                 <dt>Начало операции</dt>
@@ -145,6 +150,33 @@
                 <dd>{{ item.completed_at|app_datetime('%d.%m.%Y %H:%M:%S') }}</dd>
                 {% endif %}
               </dl>
+
+              {% if item.kind == 'blocking' and item.equipment_snapshot %}
+              <div class="table-wrap">
+                <table class="blocking-equipment-table">
+                  <thead>
+                    <tr>
+                      <th>Тип</th>
+                      <th>Инвентарный номер</th>
+                      <th>Название</th>
+                      <th>Серийный номер</th>
+                      <th>Бухгалтерский инв. номер</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for equipment in item.equipment_snapshot %}
+                    <tr>
+                      <td>{{ equipment.type or '–' }}</td>
+                      <td>{{ equipment.inventory_number or '–' }}</td>
+                      <td>{{ equipment.name or '–' }}</td>
+                      <td>{{ equipment.serial_number or '–' }}</td>
+                      <td>{{ equipment.accounting_inventory_number or '–' }}</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+              {% endif %}
 
               {% if item.error_message %}
               <div class="journal-error">
@@ -163,9 +195,7 @@
         </td>
       </tr>
       {% else %}
-      <tr>
-        <td colspan="6" class="muted">Операций пока нет.</td>
-      </tr>
+      <tr><td colspan="6" class="muted">Операций пока нет.</td></tr>
       {% endfor %}
     </tbody>
   </table>

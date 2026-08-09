@@ -164,14 +164,14 @@ class BlockingQueueService:
             "ad": {
                 "pending": "Ожидает блокировки",
                 "completed": "Заблокирована системой",
-                "already_completed": "На момент проверки уже была заблокирована",
+                "already_completed": "На момент выполнения уже была заблокирована",
                 "intervention": "Требует вмешательства",
                 "dry_run": "DRY RUN – блокировка не выполнялась",
             },
             "zimbra": {
                 "pending": "Ожидает закрытия",
                 "completed": "Закрыта системой",
-                "already_completed": "На момент проверки уже была закрыта",
+                "already_completed": "На момент выполнения уже была закрыта",
                 "intervention": "Требует вмешательства",
                 "dry_run": "DRY RUN – закрытие не выполнялось",
             },
