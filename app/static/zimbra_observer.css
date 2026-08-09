@@ -1,4 +1,5 @@
-.zimbra-observer-page {
+.zimbra-observer-page,
+.zimbra-lifecycle-page {
   display: grid;
   gap: 18px;
 }
@@ -105,15 +106,18 @@
   font-size: 22px;
 }
 
-.observer-summary-grid .good strong {
+.observer-summary-grid .good strong,
+.lifecycle-summary-grid .good strong {
   color: #237a3b;
 }
 
-.observer-summary-grid .warn strong {
+.observer-summary-grid .warn strong,
+.lifecycle-summary-grid .warn strong {
   color: #946200;
 }
 
-.observer-summary-grid .bad strong {
+.observer-summary-grid .bad strong,
+.lifecycle-summary-grid .bad strong {
   color: #9b2c2c;
 }
 
@@ -197,6 +201,152 @@
   vertical-align: top;
 }
 
+/* Жизненный цикл Zimbra */
+.lifecycle-heading-actions,
+.lifecycle-run-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.lifecycle-permission-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.lifecycle-permission {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  padding: 15px;
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.lifecycle-permission input {
+  width: auto;
+  margin-top: 4px;
+  flex: 0 0 auto;
+}
+
+.lifecycle-permission span {
+  display: grid;
+  gap: 6px;
+}
+
+.lifecycle-permission.danger-zone {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.lifecycle-permission.danger-zone small {
+  color: #991b1b;
+}
+
+.lifecycle-backup-dir {
+  margin-top: 16px;
+}
+
+.lifecycle-run-actions {
+  align-items: stretch;
+}
+
+.lifecycle-run-actions form {
+  margin: 0;
+}
+
+.lifecycle-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(105px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.lifecycle-summary-grid > div {
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  border: 1px solid #dfe3e8;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.lifecycle-summary-grid span {
+  font-size: 12px;
+  color: #687078;
+}
+
+.lifecycle-summary-grid strong {
+  font-size: 21px;
+}
+
+.lifecycle-actions-table {
+  min-width: 1320px;
+}
+
+.lifecycle-actions-table th:nth-child(1),
+.lifecycle-actions-table td:nth-child(1) {
+  min-width: 245px;
+}
+
+.lifecycle-actions-table th:nth-child(5),
+.lifecycle-actions-table td:nth-child(5) {
+  min-width: 380px;
+  white-space: normal;
+}
+
+.lifecycle-actions-table th:nth-child(6),
+.lifecycle-actions-table td:nth-child(6) {
+  min-width: 310px;
+}
+
+.lifecycle-message {
+  line-height: 1.45;
+}
+
+.lifecycle-backup-cell code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.lifecycle-action-state {
+  display: inline-flex;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: .82rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.lifecycle-action-state.planned,
+.lifecycle-action-state.blocked {
+  background: #fef3c7;
+  color: #854d0e;
+}
+
+.lifecycle-action-state.success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.lifecycle-action-state.failed {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+@media (max-width: 1100px) {
+  .lifecycle-permission-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .lifecycle-summary-grid {
+    grid-template-columns: repeat(4, minmax(105px, 1fr));
+  }
+}
+
 @media (max-width: 1000px) {
   .observer-settings-grid {
     grid-template-columns: 1fr 1fr;
@@ -209,7 +359,8 @@
 
 @media (max-width: 700px) {
   .observer-settings-grid,
-  .observer-summary-grid {
+  .observer-summary-grid,
+  .lifecycle-summary-grid {
     grid-template-columns: 1fr;
   }
 
@@ -217,7 +368,8 @@
     grid-column: auto;
   }
 
-  .observer-card-heading {
+  .observer-card-heading,
+  .lifecycle-heading {
     flex-direction: column;
   }
 }

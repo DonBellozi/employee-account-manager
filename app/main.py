@@ -15,6 +15,7 @@ from app.routers import (
     employees,
     settings_ui,
     telegram_settings,
+    zimbra_lifecycle,
     zimbra_observer,
     zimbra_protection,
 )
@@ -60,7 +61,7 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.app_secret_key,
-    session_cookie=settings.session_cookie_name,
+    session_cookie_name=settings.session_cookie_name,
     same_site=settings.session_cookie_samesite,
     https_only=settings.session_cookie_secure,
     max_age=8 * 60 * 60,
@@ -72,6 +73,7 @@ app.include_router(settings_ui.router)
 app.include_router(telegram_settings.router)
 app.include_router(zimbra_observer.router)
 app.include_router(zimbra_protection.router)
+app.include_router(zimbra_lifecycle.router)
 app.include_router(admin.router)
 
 

@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% block title %}Жизненный цикл Zimbra{% endblock %}
+{% block content %}
+<div class="zimbra-lifecycle-page">
+  <div class="heading-row lifecycle-heading">
+    <div>
+      <h1>Жизненный цикл Zimbra</h1>
+      <p class="muted">
+        DRY RUN-план и поэтапное ручное исполнение рекомендаций наблюдателя.
+        Политика едина для всех почтовых доменов на сервере Zimbra.
+      </p>
+    </div>
+    <div class="lifecycle-heading-actions">
+      <a class="button secondary" href="/settings/zimbra-observer">Наблюдение Zimbra</a>
+      <a class="button secondary" href="/settings">Настройки</a>
+    </div>
+  </div>
+
+  {% if saved %}
+  <div class="alert success">Настройки исполнителя сохранены.</div>
+  {% endif %}
+  {% if error %}
+  <div class="alert error">{{ error }}</div>
+  {% endif %}
+
+  {% if lifecycle.global_dry_run %}
+  <div class="alert warning">
+    <strong>APP DRY_RUN включен.</strong>
+    Даже если разрешения ниже установлены, исполнитель не изменит Zimbra.
+    Для моделирования используйте кнопку «Сформировать актуальный DRY RUN-план».
+  </div>
+  {% elif not lifecycle.any_action_enabled %}
+  <div class="alert success">
+    <strong>Исполнение полностью выключено.</strong>
+    Все три разрешения действий отключены. Формирование плана остается доступным.
+  </div>
+  {% else %}
+  <div class="alert warning">
+    <strong>Внимание: разрешены реальные действия.</strong>
+    Кнопка «Выполнить разрешенные действия» сначала повторно проверит Zimbra и
+    исключения, затем исполнит только включенные ниже этапы.
+  </div>
+  {% endif %}
+
+  <section class="card lifecycle-settings-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>Разрешения исполнителя</h2>
+        <p class="muted">
+          Планировщик автоматического исполнения пока не подключен – действия
+          запускаются только вручную этой страницей.
+        </p>
+      </div>
+      <span class="integration-badge{% if lifecycle.any_action_enabled %} active{% endif %}">
+        {{ 'Есть разрешенные действия' if lifecycle.any_action_enabled else 'Все действия выключены' }}
+      </span>
+    </div>
+
+    <form method="post" action="/settings/zimbra-lifecycle">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div class="lifecycle-permission-grid">
+        <label class="lifecycle-permission">
+          <input type="checkbox" name="allow_close" value="on"{% if lifecycle.allow_close %} checked{% endif %}>
+          <span>
+            <strong>Разрешить закрытие</strong>
+            <small class="muted">Только для свежих рекомендаций «Рекомендуется закрыть Zimbra».</small>
+          </span>
+        </label>
+
+        <label class="lifecycle-permission">
+          <input type="checkbox" name="allow_backup" value="on"{% if lifecycle.allow_backup %} checked{% endif %}>
+          <span>
+            <strong>Разрешить резервное копирование</strong>
+            <small class="muted">Только для closed-учетных записей, достигших общего порога удаления.</small>
+          </span>
+        </label>
+
+        <label class="lifecycle-permission danger-zone">
+          <input type="checkbox" name="allow_delete" value="on"{% if lifecycle.allow_delete %} checked{% endif %}>
+          <span>
+            <strong>Разрешить удаление</strong>
+            <small>
+              Работает только вместе с backup. Перед каждым удалением создается новый
+              непустой TGZ и повторно подтверждается статус closed.
+            </small>
+          </span>
+        </label>
+      </div>
+
+      <label class="lifecycle-backup-dir">
+        <span>Каталог резервных копий приложения</span>
+        <input type="text" name="backup_dir" value="{{ lifecycle.backup_dir }}" required>
+        <small class="muted">
+          Путь хранится внутри постоянного Docker volume /app/data. По умолчанию используется /app/data/zimbra-backups. TGZ передается потоково по SSH и не создается во временном каталоге Zimbra.
+        </small>
+      </label>
+
+      <div class="observer-form-actions">
+        <button class="button" type="submit">Сохранить разрешения</button>
+        {% if lifecycle.updated_at %}
+        <span class="muted">
+          Изменено {{ lifecycle.updated_at|app_datetime('%d.%m.%Y %H:%M:%S') }}
+          {% if lifecycle.updated_by %} – {{ lifecycle.updated_by }}{% endif %}
+        </span>
+        {% endif %}
+      </div>
+    </form>
+  </section>
+
+  <section class="card lifecycle-run-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>Проверка и исполнение</h2>
+        <p class="muted">
+          Обе кнопки сначала выполняют свежую полную read-only проверку Zimbra.
+          План никогда не использует старый снимок «Текущих выводов».
+        </p>
+      </div>
+    </div>
+
+    <div class="lifecycle-run-actions">
+      <form method="post" action="/settings/zimbra-lifecycle/plan">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="button secondary" type="submit">Сформировать актуальный DRY RUN-план</button>
+      </form>
+      <form method="post" action="/settings/zimbra-lifecycle/execute">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="button danger" type="submit"
+          {% if lifecycle.global_dry_run or not lifecycle.any_action_enabled %}disabled{% endif %}>
+          Выполнить разрешенные действия
+        </button>
+      </form>
+    </div>
+  </section>
+
+  <section class="card table-wrap lifecycle-result-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>{% if run and run.mode == 'execute' %}Результат исполнения{% else %}Последний DRY RUN / результат{% endif %}</h2>
+        {% if run %}
+        <p class="muted">
+          Запуск #{{ run.id }} – {{ 'исполнение' if run.mode == 'execute' else 'план' }},
+          оператор {{ run.operator or '–' }}.
+        </p>
+        {% endif %}
+      </div>
+      {% if run %}
+      <span class="status {{ 'success' if run.status == 'success' else 'failed' if run.status == 'failed' else 'partial' }}">
+        {{ run.status }}
+      </span>
+      {% endif %}
+    </div>
+
+    {% if run %}
+    <div class="lifecycle-summary-grid">
+      <div><span>План: закрыть</span><strong>{{ run.planned_close }}</strong></div>
+      <div><span>План: backup/delete</span><strong>{{ run.planned_archive }}</strong></div>
+      <div class="good"><span>Закрыто</span><strong>{{ run.closed_success }}</strong></div>
+      <div class="good"><span>Backup</span><strong>{{ run.backup_success }}</strong></div>
+      <div class="good"><span>Удалено</span><strong>{{ run.delete_success }}</strong></div>
+      <div class="warn"><span>Пропущено</span><strong>{{ run.skipped_count }}</strong></div>
+      <div class="bad"><span>Ошибок</span><strong>{{ run.failed_count }}</strong></div>
+    </div>
+
+    {% if run.error_message %}
+    <div class="alert error">{{ run.error_message }}</div>
+    {% endif %}
+
+    <table class="journal-table lifecycle-actions-table">
+      <thead>
+        <tr>
+          <th>Почтовый ящик</th>
+          <th>Рекомендация</th>
+          <th>Шаг</th>
+          <th>Статус</th>
+          <th>Результат</th>
+          <th>Backup</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in actions %}
+        <tr>
+          <td><strong>{{ item.primary_email }}</strong></td>
+          <td>{{ item.recommendation }}</td>
+          <td>{{ action_labels.get(item.action, item.action) }}</td>
+          <td>
+            <span class="lifecycle-action-state {{ item.status }}">
+              {{ status_labels.get(item.status, item.status) }}
+            </span>
+          </td>
+          <td class="lifecycle-message">{{ item.message }}</td>
+          <td class="lifecycle-backup-cell">
+            {% if item.backup_path %}
+              <code>{{ item.backup_path }}</code>
+              {% if item.backup_size_bytes is not none %}
+              <div class="muted">{{ item.backup_size_bytes }} байт</div>
+              {% endif %}
+            {% else %}–{% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">В этом запуске нет кандидатов на действия.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="upcoming-empty">Планов и запусков исполнителя пока не было.</div>
+    {% endif %}
+  </section>
+
+  <section class="card table-wrap lifecycle-history-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>История запусков исполнителя</h2>
+        <p class="muted">Последние 20 ручных планов и исполнений.</p>
+      </div>
+    </div>
+    <table class="journal-table">
+      <thead>
+        <tr>
+          <th>Дата</th>
+          <th>Режим</th>
+          <th>Статус</th>
+          <th>Закрыть</th>
+          <th>Backup/delete</th>
+          <th>Закрыто</th>
+          <th>Backup</th>
+          <th>Удалено</th>
+          <th>Ошибки</th>
+          <th>Оператор</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in runs %}
+        <tr>
+          <td class="journal-date">
+            {{ item.started_at|app_datetime('%d.%m.%Y') }}
+            <span>{{ item.started_at|app_datetime('%H:%M:%S') }}</span>
+          </td>
+          <td><a href="/settings/zimbra-lifecycle?run_id={{ item.id }}">{{ 'Исполнение' if item.mode == 'execute' else 'DRY RUN' }}</a></td>
+          <td>{{ item.status }}</td>
+          <td>{{ item.planned_close }}</td>
+          <td>{{ item.planned_archive }}</td>
+          <td>{{ item.closed_success }}</td>
+          <td>{{ item.backup_success }}</td>
+          <td>{{ item.delete_success }}</td>
+          <td>{{ item.failed_count }}</td>
+          <td>{{ item.operator or '–' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="10" class="muted">Истории пока нет.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+{% endblock %}
