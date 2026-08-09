@@ -21,6 +21,10 @@ DEFAULT_COLUMNS = {
     "position": "Должность",
 }
 
+DEFAULT_COLUMN_ALIASES = {
+    "fio": ("Сотрудник",),
+}
+
 
 @dataclass(frozen=True)
 class OneCPlacement:
@@ -107,10 +111,30 @@ def find_header_row(
 
         mapping: dict[str, int] = {}
         for key, target in normalized_expected.items():
-            for col_idx, value in enumerate(normalized, start=1):
-                if value == target or (target and target in value):
-                    mapping[key] = col_idx
+            aliases = [
+                normalize_header(value)
+                for value in DEFAULT_COLUMN_ALIASES.get(key, ())
+                if expected.get(key) == DEFAULT_COLUMNS.get(key)
+            ]
+
+            # First prefer exact canonical/alias matches. This allows the
+            # second export's "Сотрудник" without confusing it with other
+            # columns that merely start with that word.
+            for candidate in (target, *aliases):
+                for col_idx, value in enumerate(normalized, start=1):
+                    if value == candidate:
+                        mapping[key] = col_idx
+                        break
+                if key in mapping:
                     break
+
+            # Preserve the old tolerant behavior only for the canonical
+            # column name. Short aliases such as "Сотрудник" are exact-only.
+            if key not in mapping:
+                for col_idx, value in enumerate(normalized, start=1):
+                    if target and target in value:
+                        mapping[key] = col_idx
+                        break
 
         if len(mapping) > len(best_mapping):
             best_row = row_idx
