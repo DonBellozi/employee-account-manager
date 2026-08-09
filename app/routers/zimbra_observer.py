@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.db import get_db
 from app.security import (
-    get_current_user,
     get_or_create_csrf,
     require_admin,
     validate_csrf,
@@ -17,17 +16,11 @@ from app.services.zimbra_protection import (
     ManagedZimbraObserverService,
     recommendation_label,
 )
-from app.time_utils import format_app_datetime, register_datetime_filters
+from app.time_utils import register_datetime_filters
 
 
 router = APIRouter()
 templates = register_datetime_filters(Jinja2Templates(directory="app/templates"))
-
-
-def _event_label(recommendation: str, previous: str) -> str:
-    if recommendation == "none" and previous:
-        return "Рекомендация снята"
-    return recommendation_label(recommendation)
 
 
 def _context(
@@ -168,55 +161,3 @@ def observer_run_now(
             ),
             status_code=503,
         )
-
-
-@router.get("/zimbra-observer/journal")
-def observer_journal_api(
-    request: Request,
-    limit: int = 30,
-    settings: Settings = Depends(get_settings),
-    db: Session = Depends(get_db),
-):
-    get_current_user(request)
-    service = ManagedZimbraObserverService(settings, db)
-    latest = service.latest_run()
-    events = service.recent_events(limit=max(1, min(limit, 100)))
-    return {
-        "ok": True,
-        "mode": "observe_only",
-        "latest_run": (
-            {
-                "id": latest.id,
-                "status": latest.status,
-                "started_at": format_app_datetime(latest.started_at),
-                "completed_at": format_app_datetime(latest.completed_at),
-                "close_candidates": latest.close_candidates,
-                "archive_candidates": latest.archive_candidates,
-                "protected_by_hr": latest.protected_by_hr,
-                "manual_review": latest.manual_review,
-                "event_count": latest.event_count,
-                "error": latest.error_message,
-            }
-            if latest is not None
-            else None
-        ),
-        "events": [
-            {
-                "id": item.id,
-                "created_at": format_app_datetime(item.created_at),
-                "email": item.primary_email,
-                "recommendation": item.recommendation,
-                "recommendation_label": _event_label(
-                    item.recommendation, item.previous_recommendation
-                ),
-                "previous_recommendation": item.previous_recommendation,
-                "reason": item.reason,
-                "account_status": item.account_status,
-                "last_logon_at": format_app_datetime(
-                    item.last_logon_at, "%d.%m.%Y %H:%M"
-                ),
-                "hr_active": bool(item.hr_active),
-            }
-            for item in events
-        ],
-    }
