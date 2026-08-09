@@ -9,7 +9,8 @@ from sqlalchemy import desc, select
 
 from app.config import Settings
 from app.models_zimbra_observer import ZimbraObservationRun
-from app.services.zimbra_observer import ZimbraObserverService, as_utc
+from app.services.zimbra_observer import as_utc
+from app.services.zimbra_protection import ManagedZimbraObserverService
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,7 @@ class ZimbraObserverScheduler:
         while not self._stop_event.is_set():
             try:
                 with self.session_factory() as db:
-                    service = ZimbraObserverService(self.settings, db)
+                    service = ManagedZimbraObserverService(self.settings, db)
                     config = service.get_settings_record()
                     if config.enabled:
                         tz = ZoneInfo(self.settings.app_timezone)

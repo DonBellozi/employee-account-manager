@@ -13,8 +13,8 @@ from app.security import (
     require_admin,
     validate_csrf,
 )
-from app.services.zimbra_observer import (
-    ZimbraObserverService,
+from app.services.zimbra_protection import (
+    ManagedZimbraObserverService,
     recommendation_label,
 )
 from app.time_utils import format_app_datetime, register_datetime_filters
@@ -40,7 +40,7 @@ def _context(
     error: str = "",
 ):
     current = require_admin(request)
-    service = ZimbraObserverService(settings, db)
+    service = ManagedZimbraObserverService(settings, db)
     states = service.current_states(limit=300)
     return {
         "user": current,
@@ -93,7 +93,7 @@ def observer_save(
     validate_csrf(request, csrf)
     current = require_admin(request)
     try:
-        ZimbraObserverService(settings, db).save_settings(
+        ManagedZimbraObserverService(settings, db).save_settings(
             enabled=enabled.strip().lower() in {"1", "true", "yes", "on"},
             inactive_months=inactive_months,
             retention_months=retention_months,
@@ -129,7 +129,7 @@ def observer_run_now(
     validate_csrf(request, csrf)
     require_admin(request)
     try:
-        run = ZimbraObserverService(settings, db).run(trigger="manual")
+        run = ManagedZimbraObserverService(settings, db).run(trigger="manual")
         if run.status == "failed":
             message = ""
         elif run.status == "warning":
@@ -178,7 +178,7 @@ def observer_journal_api(
     db: Session = Depends(get_db),
 ):
     get_current_user(request)
-    service = ZimbraObserverService(settings, db)
+    service = ManagedZimbraObserverService(settings, db)
     latest = service.latest_run()
     events = service.recent_events(limit=max(1, min(limit, 100)))
     return {

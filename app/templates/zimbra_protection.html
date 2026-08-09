@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}Защищенные учетные записи Zimbra{% endblock %}
+{% block content %}
+<div class="heading-row">
+  <div>
+    <h1>Защищенные учетные записи Zimbra</h1>
+    <p class="muted">
+      Web-список учетных записей, которые нельзя закрывать, архивировать или удалять.
+      Техническая привязка выполняется по zimbraId, поэтому смена основного e-mail
+      не снимает защиту.
+    </p>
+  </div>
+  <a class="button secondary" href="/settings">Назад к настройкам</a>
+</div>
+
+{% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+<section class="card">
+  <div class="heading-row">
+    <div>
+      <h2>Первоначальный импорт</h2>
+      {% if migration.completed %}
+      <p class="muted">
+        Источник истины уже перенесен в Web. Старые надписи never_disable в
+        zimbraNotes сами по себе больше не включают защиту. Повторный импорт
+        добавляет только новые legacy-записи и не восстанавливает защиту,
+        которая была снята в Web.
+      </p>
+      {% else %}
+      <p class="muted">
+        До первого успешного импорта legacy-маркер never_disable в zimbraNotes
+        продолжает учитываться наблюдателем. После импорта источником истины станет
+        этот Web-список.
+      </p>
+      {% endif %}
+    </div>
+    <form method="post" action="/settings/zimbra-protection/import">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="button secondary" type="submit">Импортировать never_disable из Zimbra</button>
+    </form>
+  </div>
+  {% if migration.completed %}
+  <dl class="integration-details">
+    <dt>Первичный импорт</dt>
+    <dd>{{ migration.completed_at|app_datetime('%d.%m.%Y %H:%M:%S') }}, {{ migration.completed_by or '–' }}</dd>
+    <dt>Последний повторный импорт</dt>
+    <dd>{{ migration.last_import_at|app_datetime('%d.%m.%Y %H:%M:%S') }}, {{ migration.last_import_by or '–' }}</dd>
+  </dl>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Добавить защиту</h2>
+  <p class="muted">
+    Можно указать основной адрес или алиас. Приложение найдет учетную запись в
+    Zimbra и сохранит стабильный zimbraId, текущее отображаемое имя и основной e-mail.
+  </p>
+  <form method="post" action="/settings/zimbra-protection/add">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="form-grid">
+      <label>
+        <span>Почтовый ящик или алиас</span>
+        <input type="email" name="email" placeholder="service@domain.ru" required>
+      </label>
+      <label>
+        <span>Причина</span>
+        <input type="text" name="reason" maxlength="1000" placeholder="Например: служебный ящик, не закрывать">
+      </label>
+    </div>
+    <div class="form-actions"><button class="button" type="submit">Добавить защиту</button></div>
+  </form>
+</section>
+
+<section class="card table-wrap">
+  <div class="heading-row">
+    <div>
+      <h2>Список исключений</h2>
+      <p class="muted">Активных: {{ active_count }}. Снятых с сохранением истории: {{ inactive_count }}.</p>
+    </div>
+  </div>
+  <table class="journal-table">
+    <thead>
+      <tr>
+        <th>Отображаемое имя</th>
+        <th>Почтовый ящик</th>
+        <th>Причина</th>
+        <th>Источник</th>
+        <th>Добавил</th>
+        <th>Дата</th>
+        <th>Статус</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in protections %}
+      <tr>
+        <td><strong>{{ item.display_name or '–' }}</strong></td>
+        <td><code>{{ item.primary_email or '–' }}</code></td>
+        <td>{{ item.reason or '–' }}</td>
+        <td>{{ source_labels.get(item.source, item.source) }}</td>
+        <td>{{ item.activated_by or '–' }}</td>
+        <td>{{ item.activated_at|app_datetime('%d.%m.%Y %H:%M:%S') }}</td>
+        <td>
+          <span class="status {{ 'success' if item.is_active else 'failed' }}">
+            {{ 'Защищена' if item.is_active else 'Защита снята' }}
+          </span>
+          {% if not item.is_active and item.deactivated_at %}
+          <div class="muted">
+            {{ item.deactivated_at|app_datetime('%d.%m.%Y %H:%M:%S') }}{% if item.deactivated_by %}, {{ item.deactivated_by }}{% endif %}
+          </div>
+          {% endif %}
+        </td>
+        <td>
+          {% if item.is_active %}
+          <form method="post" action="/settings/zimbra-protection/{{ item.id }}/deactivate">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="button secondary small" type="submit">Снять защиту</button>
+          </form>
+          {% else %}
+          <form method="post" action="/settings/zimbra-protection/{{ item.id }}/reactivate">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="button secondary small" type="submit">Восстановить</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="muted">Защищенных учетных записей пока нет.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

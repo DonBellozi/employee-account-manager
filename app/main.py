@@ -16,6 +16,7 @@ from app.routers import (
     settings_ui,
     telegram_settings,
     zimbra_observer,
+    zimbra_protection,
 )
 from app.security import CSRFMismatchError, ensure_bootstrap_admin
 from app.services.blocking_worker import BlockingQueueWorker
@@ -70,6 +71,7 @@ app.include_router(employees.router)
 app.include_router(settings_ui.router)
 app.include_router(telegram_settings.router)
 app.include_router(zimbra_observer.router)
+app.include_router(zimbra_protection.router)
 app.include_router(admin.router)
 
 
