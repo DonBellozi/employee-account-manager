@@ -71,3 +71,52 @@
     padding-bottom: 12px;
   }
 }
+
+
+/*
+ * Кадровый реестр: цвета фактических состояний AD/Zimbra.
+ * layout.css загружается после style.css, поэтому эти правила являются
+ * окончательными и одновременно сохраняют совместимость со старыми статусами.
+ */
+
+/* Активная/нормально доступная учетная запись. */
+.registry-state.enabled,
+.registry-state.active,
+.registry-state.present,
+.registry-state.ok {
+  background: #dcfce7;
+  color: #166534;
+}
+
+/* Учетная запись существует, но доступ ограничен, либо обнаружено расхождение. */
+.registry-state.disabled,
+.registry-state.closed,
+.registry-state.locked,
+.registry-state.lockout,
+.registry-state.missing,
+.registry-state.no_login,
+.registry-state.no_email,
+.registry-state.address_mismatch,
+.registry-state.issue {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* Временные служебные состояния Zimbra. */
+.registry-state.maintenance,
+.registry-state.pending {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+/* Ошибка внешней проверки. */
+.registry-state.error {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* Статус действительно не определен/не проверен. */
+.registry-state.not_checked {
+  background: #e2e8f0;
+  color: #475569;
+}
