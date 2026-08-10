@@ -20,6 +20,7 @@ from app.models import (
     DismissalSchedule,
     ProvisioningOperation,
 )
+from app.models_notifications import DismissalEquipmentNotice
 from app.routers.employees import (
     _ad_provisioning_journal_item,
     _blocking_journal_item,
@@ -106,6 +107,83 @@ def _deferral_journal_item(event: AuditLog) -> dict[str, object]:
     }
 
 
+def _dismissal_notice_journal_item(
+    notice: DismissalEquipmentNotice,
+) -> dict[str, object]:
+    try:
+        recipients = json.loads(notice.recipients_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        recipients = []
+    if not isinstance(recipients, list):
+        recipients = []
+
+    sent = [
+        str(item.get("email") or "").strip()
+        for item in recipients
+        if isinstance(item, dict) and item.get("sent")
+    ]
+    pending = [
+        str(item.get("email") or "").strip()
+        for item in recipients
+        if isinstance(item, dict) and not item.get("sent")
+    ]
+    corporate_sent = next(
+        (
+            str(item.get("email") or "").strip()
+            for item in recipients
+            if isinstance(item, dict)
+            and item.get("sent")
+            and item.get("kind") == "corporate"
+        ),
+        "",
+    )
+
+    labels = {
+        "pending": ("running", "Ожидает отправки"),
+        "partial": ("partial", "Отправлено частично"),
+        "failed": ("failed", "Ошибка отправки"),
+        "sent": ("success", "Отправлено"),
+        "cancelled": ("partial", "Отменено"),
+    }
+    status_key, status_label = labels.get(
+        notice.status,
+        ("running", notice.status),
+    )
+
+    details = [
+        ("ФИО", notice.fio),
+        (
+            "Дата окончательного увольнения",
+            notice.dismissal_date.strftime("%d.%m.%Y"),
+        ),
+        ("Домен отправителя", notice.sender_domain),
+        ("Отправлено на", ", ".join(value for value in sent if value)),
+    ]
+    if pending:
+        details.append(
+            ("Еще не отправлено", ", ".join(value for value in pending if value))
+        )
+    details.append(("Попыток", str(int(notice.attempts or 0))))
+
+    return {
+        "kind": "dismissal",
+        "record_id": notice.id,
+        "created_at": notice.created_at,
+        "action": "Уведомление о возврате оборудования",
+        "subject": notice.fio or "Работник",
+        "login": "",
+        "corporate_email": corporate_sent,
+        "personal_email": "",
+        "mail_domain": notice.sender_domain,
+        "operator": "Система",
+        "status_key": status_key,
+        "status_label": status_label,
+        "details": details,
+        "error_message": notice.last_error,
+        "completed_at": notice.sent_at or notice.cancelled_at,
+    }
+
+
 def _journal_items(db: Session) -> list[dict[str, object]]:
     provisioning_operations = db.scalars(
         select(ProvisioningOperation)
@@ -150,6 +228,14 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
         .order_by(desc(AuditLog.created_at), desc(AuditLog.id))
         .limit(50)
     ).all()
+    dismissal_notices = db.scalars(
+        select(DismissalEquipmentNotice)
+        .order_by(
+            desc(DismissalEquipmentNotice.created_at),
+            desc(DismissalEquipmentNotice.id),
+        )
+        .limit(50)
+    ).all()
 
     items = [
         *(
@@ -174,6 +260,10 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
         *(
             _deferral_journal_item(item)
             for item in deferral_events
+        ),
+        *(
+            _dismissal_notice_journal_item(item)
+            for item in dismissal_notices
         ),
     ]
     items.sort(key=lambda item: item["created_at"], reverse=True)

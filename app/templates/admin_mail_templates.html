@@ -1,11 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Шаблоны писем{% endblock %}
 {% block content %}
+<link rel="stylesheet" href="/static/mail_templates.css">
+<script src="/static/mail_templates.js" defer></script>
+
 <div class="heading-row">
   <div>
     <h1>Шаблоны писем</h1>
     <p class="muted admin-lead">
-      SMTP-подключение и логин остаются общими. Адрес и имя отправителя выбираются по почтовому домену работника.
+      Слева выбирается письмо, справа редактируется его содержимое. Отправитель настраивается отдельно для каждого почтового домена.
     </p>
   </div>
 </div>
@@ -13,130 +16,155 @@
 {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
-<div class="mail-profile-grid">
-{% for profile in profiles %}
-  <section class="card mail-profile-card">
-    <div class="mail-profile-header">
-      <div>
-        <div class="mail-profile-kicker">Шаблоны для домена</div>
-        <h2>{{ profile.domain }}</h2>
-      </div>
-      <span class="mail-domain-badge">@{{ profile.domain }}</span>
+{% if profiles %}
+<div class="mail-template-workspace"
+     data-mail-template-workspace
+     data-selected-template="{{ selected_key }}">
+  <aside class="card mail-template-sidebar">
+    <div class="mail-template-sidebar-head">
+      <strong>Шаблоны</strong>
+      <span class="muted">{{ profiles|length }} домен(а)</span>
     </div>
 
-    <form method="post"
-          action="/admin/mail-templates/{{ profile.id }}"
-          class="stack mail-template-form">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
+    <nav class="mail-template-nav-list" aria-label="Шаблоны писем">
+      {% for profile in profiles %}
+      <div class="mail-template-domain-group">
+        <div class="mail-template-domain-label">
+          <span>{{ profile.domain }}</span>
+          <code>@{{ profile.domain }}</code>
+        </div>
 
-      <div class="mail-sender-grid">
-        <label>Имя отправителя
-          <input name="sender_name"
-                 value="{{ profile.sender_name }}"
-                 maxlength="256"
-                 placeholder="ИТ-служба">
-        </label>
-        <label>Email отправителя
-          <input type="email"
-                 name="sender_email"
-                 value="{{ profile.sender_email }}"
-                 maxlength="320"
-                 required
-                 placeholder="it@{{ profile.domain }}">
-        </label>
+        {% for template_key in ['personal', 'corporate', 'dismissal'] %}
+        {% set definition = template_definitions[template_key] %}
+        {% set panel_key = profile.id|string + ':' + template_key %}
+        <a href="/admin/mail-templates?selected={{ panel_key }}"
+           class="mail-template-nav-item{% if selected_key == panel_key %} active{% endif %}"
+           data-template-target="{{ panel_key }}">
+          <span>{{ definition.short_label }}</span>
+          <small>{{ definition.description }}</small>
+        </a>
+        {% endfor %}
       </div>
+      {% endfor %}
+    </nav>
+  </aside>
 
-      <div class="mail-template-box">
-        <div class="mail-template-title">
-          <div>
-            <strong>1. Реквизиты корпоративной почты</strong>
-            <div class="muted">Отправляется на личный email работника.</div>
+  <section class="card mail-template-editor-shell">
+    {% for profile in profiles %}
+      {% for template_key in ['personal', 'corporate', 'dismissal'] %}
+        {% set definition = template_definitions[template_key] %}
+        {% set panel_key = profile.id|string + ':' + template_key %}
+        {% if template_key == 'personal' %}
+          {% set subject_value = profile.personal_subject %}
+          {% set body_value = profile.personal_body_html %}
+          {% set updated_by = profile.updated_by %}
+        {% elif template_key == 'corporate' %}
+          {% set subject_value = profile.corporate_subject %}
+          {% set body_value = profile.corporate_body_html %}
+          {% set updated_by = profile.updated_by %}
+        {% else %}
+          {% set dismissal_template = dismissal_templates.get(profile.domain) %}
+          {% set subject_value = dismissal_template.subject if dismissal_template else '' %}
+          {% set body_value = dismissal_template.body_html if dismissal_template else '' %}
+          {% set updated_by = dismissal_template.updated_by if dismissal_template else '' %}
+        {% endif %}
+
+        <div class="mail-template-panel{% if selected_key == panel_key %} active{% endif %}"
+             data-template-panel="{{ panel_key }}">
+          <div class="mail-template-editor-head">
+            <div>
+              <div class="mail-template-editor-domain">{{ profile.domain }}</div>
+              <h2>{{ definition.label }}</h2>
+              <p class="muted">{{ definition.description }}</p>
+            </div>
+            <span class="mail-domain-badge">@{{ profile.domain }}</span>
           </div>
+
+          <form method="post"
+                action="/admin/mail-templates/{{ profile.id }}"
+                class="mail-template-editor-form">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="template_key" value="{{ template_key }}">
+
+            <section class="mail-template-section">
+              <div class="mail-template-section-title">
+                <strong>Отправитель</strong>
+                <span class="muted">Общий для всех писем домена {{ profile.domain }}</span>
+              </div>
+              <div class="mail-sender-grid">
+                <label>Имя отправителя
+                  <input name="sender_name"
+                         value="{{ profile.sender_name }}"
+                         maxlength="256"
+                         placeholder="ИТ-служба">
+                </label>
+                <label>E-mail отправителя
+                  <input type="email"
+                         name="sender_email"
+                         value="{{ profile.sender_email }}"
+                         maxlength="320"
+                         required
+                         placeholder="it@{{ profile.domain }}">
+                </label>
+              </div>
+              <div class="muted mail-template-hint">
+                SMTP-подключение остается общим, а видимый From должен принадлежать домену {{ profile.domain }}.
+              </div>
+            </section>
+
+            <section class="mail-template-section">
+              <label>Тема письма
+                <input name="subject"
+                       value="{{ subject_value }}"
+                       maxlength="512"
+                       required>
+              </label>
+
+              <label>HTML-шаблон письма
+                <textarea name="body_html"
+                          rows="18"
+                          required
+                          spellcheck="false">{{ body_value }}</textarea>
+              </label>
+
+              <div class="template-variables">
+                <span>Доступные переменные:</span>
+                {% for variable in definition.variables|sort %}
+                  <code>{{ "{{ " }}{{ variable }}{{ " }}" }}</code>
+                {% endfor %}
+              </div>
+            </section>
+
+            {% if template_key == 'dismissal' %}
+            <div class="alert warning mail-template-inline-note">
+              Письмо отправляется только при окончательном увольнении: если у человека остается активная должность или работа в другой организации, рассылки не будет. Отсрочка блокировки повторное письмо не отправляет.
+              {% if not updated_by %}
+              <br><strong>Авторассылка для этого домена начнется только после первого сохранения шаблона.</strong>
+              {% endif %}
+            </div>
+            {% endif %}
+
+            <div class="mail-template-actions">
+              <div class="muted">
+                {% if updated_by %}
+                  Последнее изменение: {{ updated_by }}
+                {% else %}
+                  Используется начальный шаблон
+                {% endif %}
+              </div>
+              <button type="submit">Сохранить</button>
+            </div>
+          </form>
         </div>
-
-        <label>Тема письма
-          <input name="personal_subject"
-                 value="{{ profile.personal_subject }}"
-                 maxlength="512"
-                 required>
-        </label>
-
-        <label>HTML-шаблон письма
-          <textarea name="personal_body_html"
-                    rows="13"
-                    required
-                    spellcheck="false">{{ profile.personal_body_html }}</textarea>
-        </label>
-
-        <div class="template-variables">
-          <span>Доступные переменные:</span>
-          {% for variable in personal_variables %}
-            <code>{{ "{{ " }}{{ variable }}{{ " }}" }}</code>
-          {% endfor %}
-        </div>
-      </div>
-
-      <div class="mail-template-box">
-        <div class="mail-template-title">
-          <div>
-            <strong>2. Реквизиты доменной учетной записи</strong>
-            <div class="muted">Отправляется на созданный корпоративный адрес.</div>
-          </div>
-        </div>
-
-        <label>Тема письма
-          <input name="corporate_subject"
-                 value="{{ profile.corporate_subject }}"
-                 maxlength="512"
-                 required>
-        </label>
-
-        <label>HTML-шаблон письма
-          <textarea name="corporate_body_html"
-                    rows="13"
-                    required
-                    spellcheck="false">{{ profile.corporate_body_html }}</textarea>
-        </label>
-
-        <div class="template-variables">
-          <span>Доступные переменные:</span>
-          {% for variable in corporate_variables %}
-            <code>{{ "{{ " }}{{ variable }}{{ " }}" }}</code>
-          {% endfor %}
-        </div>
-      </div>
-
-      <div class="mail-template-actions">
-        <div class="muted">
-          {% if profile.updated_by %}
-            Последнее изменение: {{ profile.updated_by }}
-          {% else %}
-            Используются начальные шаблоны
-          {% endif %}
-        </div>
-        <button type="submit">Сохранить шаблоны для {{ profile.domain }}</button>
-      </div>
-    </form>
+      {% endfor %}
+    {% endfor %}
   </section>
-{% else %}
-  <section class="card">
-    <div class="candidate-pool-empty">
-      В настройках Zimbra не указаны почтовые домены.
-    </div>
-  </section>
-{% endfor %}
 </div>
-
+{% else %}
 <section class="card">
-  <h2>Как выбирается отправитель</h2>
-  <p>
-    Для работника с адресом <code>ivanov.ii@domain.ru</code> используются отправитель,
-    темы и шаблоны из раздела <code>domain.ru</code>. Для адреса
-    <code>ivanov.ii@domain.com</code> – настройки раздела <code>domain.com</code>.
-  </p>
-  <p class="muted">
-    Логин SMTP может оставаться одним. Почтовый сервер должен разрешать этой учетной записи отправку
-    от имени обоих указанных адресов.
-  </p>
+  <div class="candidate-pool-empty">
+    В настройках Zimbra не указаны почтовые домены.
+  </div>
 </section>
+{% endif %}
 {% endblock %}
