@@ -50,18 +50,168 @@
   });
 
   const onecCard = document.getElementById('onec-card');
-  if (onecCard) {
-    const moved = new Set([
-      'Папка',
-      'Фильтр отправителя',
-      'Домен выгрузки 1С',
-      'Имя вложения',
-    ]);
-    onecCard.querySelectorAll('dt').forEach(dt => {
-      if (!moved.has((dt.textContent || '').trim())) return;
-      const dd = dt.nextElementSibling;
-      if (dd && dd.tagName === 'DD') dd.remove();
-      dt.remove();
+  if (!onecCard) return;
+
+  const moved = new Set([
+    'Папка',
+    'Фильтр отправителя',
+    'Домен выгрузки 1С',
+    'Имя вложения',
+  ]);
+  onecCard.querySelectorAll('dt').forEach(dt => {
+    if (!moved.has((dt.textContent || '').trim())) return;
+    const dd = dt.nextElementSibling;
+    if (dd && dd.tagName === 'DD') dd.remove();
+    dt.remove();
+  });
+
+  const escapeHtml = value => String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+
+  const resultNode = document.getElementById('onec-result');
+
+  let summaryHost = document.getElementById('onec-multisource-summary');
+  if (!summaryHost) {
+    summaryHost = document.createElement('div');
+    summaryHost.id = 'onec-multisource-summary';
+    summaryHost.className = 'onec-registry-summary';
+
+    if (resultNode?.parentNode) {
+      resultNode.parentNode.insertBefore(summaryHost, resultNode);
+    } else {
+      onecCard.append(summaryHost);
+    }
+  }
+
+  const hideLegacySummaries = () => {
+    onecCard.querySelectorAll('.onec-registry-summary').forEach(node => {
+      if (node.id !== 'onec-multisource-summary') {
+        node.hidden = true;
+      }
+    });
+
+    resultNode?.querySelectorAll('.onec-report-section').forEach(section => {
+      const heading = section.querySelector('strong');
+      if (
+        (heading?.textContent || '').trim()
+        === 'Сверка 1С / AD / Zimbra'
+      ) {
+        section.hidden = true;
+      }
+    });
+  };
+
+  const renderSummary = payload => {
+    const summary = payload.summary || {};
+    const organizations = Array.isArray(payload.organizations)
+      ? payload.organizations
+      : [];
+
+    const rows = organizations.map(item => `
+      <tr>
+        <td>
+          <strong>${escapeHtml(item.source_name || item.source_id)}</strong>
+          <div class="journal-object-meta">
+            <code>${escapeHtml(item.source_id)}</code>
+          </div>
+        </td>
+        <td>${item.total ?? 0}</td>
+        <td>${item.ok ?? 0}</td>
+        <td>${item.checked ?? 0}</td>
+        <td>${item.issues ?? 0}</td>
+        <td>${item.errors ?? 0}</td>
+        <td>${item.not_checked ?? 0}</td>
+      </tr>
+    `).join('');
+
+    summaryHost.hidden = false;
+    summaryHost.innerHTML = `
+      <div class="onec-report-heading">
+        <strong>Сверка 1С / AD / Zimbra – все организации</strong>
+        <span class="muted">
+          Организаций: ${summary.organizations ?? organizations.length}
+        </span>
+      </div>
+
+      <div class="onec-diff-grid">
+        <div><span>В реестре</span><strong>${summary.total ?? 0}</strong></div>
+        <div><span>Соответствует</span><strong>${summary.ok ?? 0}</strong></div>
+        <div><span>Проверены</span><strong>${summary.checked ?? 0}</strong></div>
+        <div><span>Требует проверки</span><strong>${summary.issues ?? 0}</strong></div>
+        <div><span>Ошибки</span><strong>${summary.errors ?? 0}</strong></div>
+        <div><span>Не проверено</span><strong>${summary.not_checked ?? 0}</strong></div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="journal-table">
+          <thead>
+            <tr>
+              <th>Организация</th>
+              <th>В реестре</th>
+              <th>Соответствует</th>
+              <th>Проверены</th>
+              <th>Требует проверки</th>
+              <th>Ошибки</th>
+              <th>Не проверено</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows || '<tr><td colspan="7" class="muted">Кадровых источников пока нет.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    hideLegacySummaries();
+  };
+
+  let refreshTimer = 0;
+  let requestNumber = 0;
+
+  const refreshMultiSourceSummary = () => {
+    window.clearTimeout(refreshTimer);
+    refreshTimer = window.setTimeout(async () => {
+      const currentRequest = ++requestNumber;
+      try {
+        const response = await fetch(
+          '/settings/onec-sources/summary',
+          {
+            method: 'GET',
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: {'Accept': 'application/json'},
+          }
+        );
+        const payload = await response.json();
+        if (
+          currentRequest !== requestNumber
+          || !response.ok
+          || payload.ok === false
+        ) {
+          return;
+        }
+        renderSummary(payload);
+      } catch (_) {
+        // Старый блок оставляем как запасной вариант при локальной ошибке.
+      }
+    }, 80);
+  };
+
+  hideLegacySummaries();
+  refreshMultiSourceSummary();
+
+  if (resultNode) {
+    const observer = new MutationObserver(() => {
+      hideLegacySummaries();
+      refreshMultiSourceSummary();
+    });
+    observer.observe(resultNode, {
+      childList: true,
+      subtree: true,
     });
   }
 })();

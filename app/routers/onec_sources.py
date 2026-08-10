@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.db import get_db
 from app.security import get_or_create_csrf, require_admin, validate_csrf
+from app.services.hr_registry_multisource import MultiSourceHRRegistryViewService
 from app.services.onec_additional_import import OneCAdditionalImportService
 from app.services.onec_import import OneCImportService
 from app.services.onec_sources import OneCSourceRegistryService
@@ -56,6 +57,48 @@ def source_page(
             saved=bool(saved),
         ),
     )
+
+
+@router.get("/settings/onec-sources/summary")
+def source_summary(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    """Легкая сводка по всем организациям только из локальной БД."""
+    require_admin(request)
+    service = MultiSourceHRRegistryViewService(settings, db)
+    overall = service.summary()
+
+    organizations: list[dict[str, object]] = []
+    for source in service.source_options():
+        source_id = str(source.get("id") or "").strip().lower()
+        if not source_id:
+            continue
+        part = service.summary(source_id=source_id)
+        organizations.append(
+            {
+                "source_id": source_id,
+                "source_name": str(
+                    source.get("name")
+                    or part.get("source_name")
+                    or source_id
+                ),
+                "total": int(part.get("total", 0) or 0),
+                "ok": int(part.get("ok", 0) or 0),
+                "checked": int(part.get("checked", 0) or 0),
+                "issues": int(part.get("issues", 0) or 0),
+                "errors": int(part.get("errors", 0) or 0),
+                "not_checked": int(part.get("not_checked", 0) or 0),
+                "mapping_count": int(part.get("mapping_count", 0) or 0),
+            }
+        )
+
+    return {
+        "ok": True,
+        "summary": overall,
+        "organizations": organizations,
+    }
 
 
 @router.post("/settings/onec-sources/save")
