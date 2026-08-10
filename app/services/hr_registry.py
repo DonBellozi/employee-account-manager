@@ -15,6 +15,7 @@ from app.models import (
     HRPerson,
     HRSourceRecord,
 )
+from app.models_onec_sources import HREmploymentState
 from app.services.ad import ActiveDirectoryService
 from app.services.email_login_mapping import EmailLoginMappingService
 from app.services.hr_employment import sync_workbook_employment
@@ -31,7 +32,14 @@ AD_LABELS = {
     "no_login": "Нет логина",
 }
 ZIMBRA_LABELS = {
-    "present": "Адрес существует",
+    "active": "Есть, активна",
+    "closed": "Есть, закрыта",
+    "locked": "Есть, заблокирована",
+    "lockout": "Есть, вход заблокирован",
+    "maintenance": "Есть, обслуживание",
+    "pending": "Есть, ожидает активации",
+    # Совместимость со старыми строками до первой новой сверки.
+    "present": "Есть, статус не уточнен",
     "missing": "Адрес не найден",
     "address_mismatch": "Ящик найден, e-mail 1С не привязан",
     "error": "Ошибка проверки",
@@ -45,6 +53,71 @@ RECON_LABELS = {
     "error": "Ошибка сверки",
     "not_checked": "Не проверено полностью",
 }
+
+ZIMBRA_ACCOUNT_STATES = {
+    "active",
+    "closed",
+    "locked",
+    "lockout",
+    "maintenance",
+    "pending",
+}
+
+
+def zimbra_registry_status(identity) -> str:
+    """Нормализовать реальный zimbraAccountStatus для кадрового реестра."""
+    if identity is None:
+        return "missing"
+    status = str(getattr(identity, "account_status", "") or "").strip().lower()
+    return status if status in ZIMBRA_ACCOUNT_STATES else "present"
+
+
+def reconciliation_status_for(
+    record: HRSourceRecord,
+    *,
+    requires_active_accounts: bool | None,
+) -> str:
+    """Сверить фактическое состояние УЗ с кадровым состоянием человека.
+
+    requires_active_accounts=True  – человек продолжает работать хотя бы в
+    одной организации; False – окончательно уволен во всех организациях;
+    None – старые/неполные кадровые данные, сохраняем прежнюю модель ожиданий.
+    """
+    if record.ad_status == "error" or record.zimbra_status == "error":
+        return "error"
+
+    expect_active = requires_active_accounts is not False
+    if expect_active:
+        ad_ok = record.ad_status == "enabled"
+        # present оставлен только как совместимость до первой новой сверки.
+        zimbra_ok = record.zimbra_status in {"active", "present"}
+        ad_unknown = record.ad_status == "not_checked"
+        zimbra_unknown = record.zimbra_status == "not_checked"
+    else:
+        ad_ok = record.ad_status in {"disabled", "missing", "no_login"}
+        zimbra_ok = record.zimbra_status in {"closed", "missing", "no_email"}
+        ad_unknown = record.ad_status == "not_checked"
+        zimbra_unknown = record.zimbra_status == "not_checked"
+
+    # Известное несоответствие важнее второго непроверенного источника.
+    if (not ad_ok and not ad_unknown) or (not zimbra_ok and not zimbra_unknown):
+        return "issue"
+    if ad_unknown or zimbra_unknown:
+        return "not_checked"
+    return "ok" if ad_ok and zimbra_ok else "issue"
+
+
+def worker_requires_active_accounts(
+    states: list[HREmploymentState],
+) -> bool | None:
+    statuses = {str(state.status or "").strip().lower() for state in states}
+    statuses.discard("")
+    if statuses & {"active", "scheduled"}:
+        return True
+    if statuses and statuses <= {"dismissed"}:
+        return False
+    return None
+
 
 MANUAL_CHECK_ACTION = "hr_accounts_not_required_confirmed"
 MANUAL_CHECK_INVALIDATED_ACTION = "hr_accounts_not_required_invalidated"
@@ -531,6 +604,30 @@ class HRRegistryService:
         latest_checks, _ = self._latest_manual_check_events(records)
 
         worker_keys = [record.worker_key for record in records]
+        employment_rows = (
+            list(
+                self.db.scalars(
+                    select(HREmploymentState).where(
+                        HREmploymentState.worker_key.in_(worker_keys)
+                    )
+                ).all()
+            )
+            if worker_keys
+            else []
+        )
+        employment_by_worker: dict[str, list[HREmploymentState]] = {}
+        for employment in employment_rows:
+            employment_by_worker.setdefault(
+                employment.worker_key,
+                [],
+            ).append(employment)
+        requires_active_by_worker = {
+            worker_key: worker_requires_active_accounts(
+                employment_by_worker.get(worker_key, [])
+            )
+            for worker_key in worker_keys
+        }
+
         mappings = self.mapping_service.mapping_by_worker(
             worker_keys,
             source_id,
@@ -655,7 +752,9 @@ class HRRegistryService:
                 elif email not in z_identity.addresses:
                     record.zimbra_status = "address_mismatch"
                 else:
-                    record.zimbra_status = "present"
+                    record.zimbra_status = zimbra_registry_status(
+                        z_identity
+                    )
 
                 if ad_user is not None and z_identity is not None:
                     mapping.ad_login = ad_user.username
@@ -685,7 +784,9 @@ class HRRegistryService:
                 elif z_identity is None:
                     record.zimbra_status = "missing"
                 else:
-                    record.zimbra_status = "present"
+                    record.zimbra_status = zimbra_registry_status(
+                        z_identity
+                    )
 
                 candidate = candidate_logins.get(
                     record.worker_key,
@@ -729,29 +830,12 @@ class HRRegistryService:
                     reason,
                 )
 
-            if (
-                record.ad_status == "error"
-                or record.zimbra_status == "error"
-            ):
-                record.reconciliation_status = "error"
-            elif (
-                record.ad_status
-                in {"missing", "disabled", "no_login"}
-                or record.zimbra_status
-                in {
-                    "missing",
-                    "no_email",
-                    "address_mismatch",
-                }
-            ):
-                record.reconciliation_status = "issue"
-            elif (
-                record.ad_status == "not_checked"
-                or record.zimbra_status == "not_checked"
-            ):
-                record.reconciliation_status = "not_checked"
-            else:
-                record.reconciliation_status = "ok"
+            record.reconciliation_status = reconciliation_status_for(
+                record,
+                requires_active_accounts=requires_active_by_worker.get(
+                    record.worker_key
+                ),
+            )
 
             record.reconciliation_error = "\n".join(errors)
             record.reconciled_at = now
@@ -947,7 +1031,7 @@ class HRRegistryService:
             if (
                 mapping is None
                 and record.ad_status == "missing"
-                and record.zimbra_status == "present"
+                and record.zimbra_status in {"active", "present"}
                 and record.corporate_email.strip()
             ):
                 create_ad_url = (

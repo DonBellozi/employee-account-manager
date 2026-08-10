@@ -7,9 +7,14 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import EmailLoginMapping, HRSourceRecord
-from app.models_onec_sources import OneCAdditionalSource
+from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
 from app.services.ad import ActiveDirectoryService
-from app.services.hr_registry import HRRegistryService
+from app.services.hr_registry import (
+    HRRegistryService,
+    reconciliation_status_for,
+    worker_requires_active_accounts,
+    zimbra_registry_status,
+)
 from app.services.hr_registry_alias import HRRegistryAliasService
 from app.services.zimbra import ZimbraService
 
@@ -35,6 +40,7 @@ class MultiSourceHRRegistryViewService:
     def __init__(self, settings: Settings, db: Session):
         self.settings = settings
         self.db = db
+        self._employment_expectation_cache: dict[str, bool | None] = {}
 
     def _configured_sources(self) -> dict[str, str]:
         result: dict[str, str] = {}
@@ -118,26 +124,30 @@ class MultiSourceHRRegistryViewService:
             self.db,
         )
 
-    @staticmethod
-    def _recalculate_status(record: HRSourceRecord) -> None:
-        if (
-            record.ad_status == "error"
-            or record.zimbra_status == "error"
-        ):
-            record.reconciliation_status = "error"
-        elif (
-            record.ad_status in {"missing", "disabled", "no_login"}
-            or record.zimbra_status
-            in {"missing", "no_email", "address_mismatch"}
-        ):
-            record.reconciliation_status = "issue"
-        elif (
-            record.ad_status == "not_checked"
-            or record.zimbra_status == "not_checked"
-        ):
-            record.reconciliation_status = "not_checked"
-        else:
-            record.reconciliation_status = "ok"
+    def _requires_active_accounts(
+        self,
+        worker_key: str,
+    ) -> bool | None:
+        if worker_key in self._employment_expectation_cache:
+            return self._employment_expectation_cache[worker_key]
+        states = list(
+            self.db.scalars(
+                select(HREmploymentState).where(
+                    HREmploymentState.worker_key == worker_key
+                )
+            ).all()
+        )
+        value = worker_requires_active_accounts(states)
+        self._employment_expectation_cache[worker_key] = value
+        return value
+
+    def _recalculate_status(self, record: HRSourceRecord) -> None:
+        record.reconciliation_status = reconciliation_status_for(
+            record,
+            requires_active_accounts=self._requires_active_accounts(
+                record.worker_key
+            ),
+        )
 
     def _shared_ad_hints(
         self,
@@ -294,7 +304,7 @@ class MultiSourceHRRegistryViewService:
             }:
                 record.zimbra_status = "address_mismatch"
             else:
-                record.zimbra_status = "present"
+                record.zimbra_status = zimbra_registry_status(identity)
                 mapping.zimbra_email = identity.primary_email
                 resolved += 1
 
