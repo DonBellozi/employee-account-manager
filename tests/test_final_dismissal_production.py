@@ -26,12 +26,12 @@ class FinalDismissalProductionTests(unittest.TestCase):
         )
         self.assertIn("historical_backfill=false", text)
 
-    def test_blocking_time_is_1830(self):
+    def test_blocking_time_is_1910(self):
         text = (
             ROOT / "app/services/final_dismissal_lifecycle.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("BLOCK_TIME = time(18, 30)", text)
-        self.assertIn('BLOCK_TIME_LABEL = "18:30"', text)
+        self.assertIn("BLOCK_TIME = time(19, 10)", text)
+        self.assertIn('BLOCK_TIME_LABEL = "19:10"', text)
 
     def test_every_external_attempt_rechecks_hr_state(self):
         text = (
@@ -77,8 +77,8 @@ class FinalDismissalProductionTests(unittest.TestCase):
             ROOT / "app/services/final_dismissal_lifecycle.py"
         ).read_text(encoding="utf-8")
         self.assertIn("def _sources_synchronized", text)
-        self.assertIn("timedelta(hours=36)", text)
-        self.assertIn("timedelta(minutes=30)", text)
+        self.assertIn("OneCSourceFreshnessService", text)
+        self.assertIn("all_control_exports_ready", text)
         self.assertIn("def _import_running", text)
 
     def test_upcoming_service_exposes_past_only_for_blocking_worker(self):
@@ -99,7 +99,7 @@ class FinalDismissalProductionTests(unittest.TestCase):
             ROOT / "app/templates/upcoming_dismissals_fragment.html"
         ).read_text(encoding="utf-8")
         self.assertIn("Автоблокировка", text)
-        self.assertIn("18:30", text)
+        self.assertIn("19:10", text)
 
 
 if __name__ == "__main__":

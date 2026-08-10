@@ -52,6 +52,44 @@
   const onecCard = document.getElementById('onec-card');
   if (!onecCard) return;
 
+  // Автоимпорт теперь является круглосуточным read-only IMAP polling.
+  // Старое ONEC_AUTO_IMPORT_TIME оставлено только для совместимости ENV.
+  onecCard.querySelectorAll('dt').forEach(dt => {
+    const label = (dt.textContent || '').trim();
+    const dd = dt.nextElementSibling;
+    if (!dd || dd.tagName !== 'DD') return;
+
+    if (label === 'Автоматический импорт') {
+      dt.textContent = 'Автоматический забор XLSX';
+    } else if (label === 'Время автоимпорта') {
+      dt.textContent = 'Проверка IMAP';
+      dd.textContent = 'каждые 5 минут, круглосуточно';
+    } else if (label === 'Catch-up после запуска') {
+      dt.textContent = 'Проверка сразу после запуска';
+    } else if (label === 'Следующий плановый запуск') {
+      dt.textContent = 'Следующая проверка IMAP';
+    }
+  });
+
+  const details = onecCard.querySelector('.integration-details');
+  if (details && !details.querySelector('[data-onec-control-export]')) {
+    const controlDt = document.createElement('dt');
+    controlDt.textContent = 'Контрольная выгрузка';
+    controlDt.setAttribute('data-onec-control-export', 'true');
+    const controlDd = document.createElement('dd');
+    controlDd.textContent = 'после 19:00; автоблокировка не ранее 19:10';
+    details.append(controlDt, controlDd);
+  }
+
+  const safetyNote = onecCard.querySelector('.onec-safety-note');
+  if (safetyNote) {
+    safetyNote.textContent =
+      'Почта читается через IMAP только в режиме read-only. Новый XLSX применяется ' +
+      'только после проверки структуры и защитных проверок. Автоблокировка AD/Zimbra ' +
+      'выполняется отдельным контуром не ранее 19:10 и только после контрольной ' +
+      'выгрузки всех включенных источников после 19:00.';
+  }
+
   const moved = new Set([
     'Папка',
     'Фильтр отправителя',

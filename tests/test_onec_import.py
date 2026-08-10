@@ -32,6 +32,7 @@ def make_xlsx() -> bytes:
                 "Сотрудник.Физическое лицо.ФИО",
                 "Физическое лицо.Адрес электронной почты",
                 "Должность",
+                "Дата увольнения",
             ]
         )
         ws.append(["Отдел ИТ"])
@@ -41,6 +42,7 @@ def make_xlsx() -> bytes:
                 "Иванов Иван Иванович",
                 "ivanov.ii@example.ru",
                 "Специалист",
+                "",
             ]
         )
         wb.save(path)
@@ -170,8 +172,10 @@ class OneCImportHistoryTests(unittest.TestCase):
         imap_cls.return_value.find_latest_attachment.return_value = self.attachment
 
         registry = self.registry_mock()
+
         def fail_reconciliation():
             raise RuntimeError("AD временно недоступен")
+
         registry.reconcile_current = fail_reconciliation
         registry_cls.return_value = registry
 

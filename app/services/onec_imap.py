@@ -21,6 +21,18 @@ class OneCAttachment:
     payload: bytes
 
 
+@dataclass(frozen=True)
+class OneCImapScanResult:
+    """Результат инкрементального просмотра IMAP.
+
+    max_uid можно безопасно сохранить как курсор только после того, как найденная
+    выгрузка была успешно принята либо признана точным дубликатом текущего снимка.
+    """
+
+    max_uid: str
+    attachment: OneCAttachment | None
+
+
 def decode_mime(value: str | None) -> str:
     if not value:
         return ""
@@ -82,13 +94,13 @@ class OneCImapService:
                 )
         return "IMAP-подключение работает."
 
-    def find_latest_attachment(
+    def _filters(
         self,
         *,
-        folder: str | None = None,
-        sender_filter: str | None = None,
-        attachment_filename: str | None = None,
-    ) -> OneCAttachment:
+        folder: str | None,
+        sender_filter: str | None,
+        attachment_filename: str | None,
+    ) -> tuple[str, str, str]:
         sender = (
             self.settings.onec_imap_from_contains
             if sender_filter is None
@@ -106,26 +118,96 @@ class OneCImapService:
         ).strip() or "INBOX"
         if not expected:
             raise RuntimeError("Не задано имя вложения кадровой выгрузки")
+        return selected_folder, sender, expected
+
+    @staticmethod
+    def _uid_number(value: str | bytes | None) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _fetch_raw(self, imap, uid: str) -> bytes:
+        status, message_data = imap.uid(
+            "fetch",
+            uid,
+            "(BODY.PEEK[])",
+        )
+        if status != "OK" or not message_data:
+            raise RuntimeError(f"Не удалось прочитать письмо IMAP UID {uid}")
+
+        for item in message_data:
+            if isinstance(item, tuple) and isinstance(item[1], bytes):
+                return item[1]
+        raise RuntimeError(f"Письмо IMAP UID {uid} получено без содержимого")
+
+    @staticmethod
+    def _attachment_from_raw(
+        *,
+        uid: str,
+        raw: bytes,
+        expected_filename: str,
+    ) -> OneCAttachment | None:
+        message = email.message_from_bytes(raw)
+        message_sender = decode_mime(message.get("From"))
+        subject = decode_mime(message.get("Subject"))
+        message_date = decode_mime(message.get("Date"))
+
+        for part in message.walk():
+            filename = decode_mime(part.get_filename())
+            if filename != expected_filename:
+                continue
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            return OneCAttachment(
+                uid=uid,
+                message_date=message_date,
+                sender=message_sender,
+                subject=subject,
+                filename=filename,
+                file_hash=hashlib.sha256(payload).hexdigest(),
+                payload=payload,
+            )
+        return None
+
+    def scan_newest_attachment(
+        self,
+        *,
+        after_uid: str = "",
+        folder: str | None = None,
+        sender_filter: str | None = None,
+        attachment_filename: str | None = None,
+    ) -> OneCImapScanResult:
+        """Просматривает только письма новее after_uid и возвращает самый новый XLSX.
+
+        Если среди новых писем нужного вложения нет, attachment=None, а max_uid
+        позволяет сдвинуть курсор и больше не перечитывать эти письма.
+        """
+
+        selected_folder, sender, expected = self._filters(
+            folder=folder,
+            sender_filter=sender_filter,
+            attachment_filename=attachment_filename,
+        )
+        after_number = self._uid_number(after_uid)
 
         with self._connect() as imap:
-            status, _ = imap.select(
-                selected_folder,
-                readonly=True,
-            )
+            status, _ = imap.select(selected_folder, readonly=True)
             if status != "OK":
                 raise RuntimeError(
-                    f"Не удалось открыть папку "
-                    f"{selected_folder} в режиме readonly"
+                    f"Не удалось открыть папку {selected_folder} в режиме readonly"
                 )
 
             since = (
                 datetime.now()
-                - timedelta(
-                    days=max(1, self.settings.onec_imap_lookback_days)
-                )
+                - timedelta(days=max(1, self.settings.onec_imap_lookback_days))
             ).strftime("%d-%b-%Y")
 
-            criteria: list[str] = ["SINCE", since]
+            criteria: list[str] = []
+            if after_number:
+                criteria.extend(["UID", f"{after_number + 1}:*"])
+            criteria.extend(["SINCE", since])
             if sender:
                 criteria.extend(["FROM", f'"{sender}"'])
 
@@ -133,50 +215,64 @@ class OneCImapService:
             if status != "OK":
                 raise RuntimeError("Ошибка поиска письма по IMAP")
 
-            uids = data[0].split() if data and data[0] else []
-            if not uids:
-                raise FileNotFoundError("Подходящие письма не найдены")
-
-            for uid_bytes in reversed(uids):
-                uid = uid_bytes.decode()
-                status, message_data = imap.uid(
-                    "fetch",
-                    uid,
-                    "(BODY.PEEK[])",
+            uid_values = data[0].split() if data and data[0] else []
+            # Некоторые IMAP-серверы трактуют диапазон N:* необычно, если N
+            # уже больше текущего максимального UID. Отсекаем старые UID сами.
+            uid_values = [
+                value
+                for value in uid_values
+                if self._uid_number(value) > after_number
+            ]
+            if not uid_values:
+                return OneCImapScanResult(
+                    max_uid=str(after_number) if after_number else "",
+                    attachment=None,
                 )
-                if status != "OK" or not message_data:
-                    continue
 
-                raw = None
-                for item in message_data:
-                    if isinstance(item, tuple) and isinstance(item[1], bytes):
-                        raw = item[1]
-                        break
-                if raw is None:
-                    continue
+            numeric_uids = [self._uid_number(value) for value in uid_values]
+            max_uid = max(numeric_uids)
 
-                message = email.message_from_bytes(raw)
-                message_sender = decode_mime(message.get("From"))
-                subject = decode_mime(message.get("Subject"))
-                message_date = decode_mime(message.get("Date"))
-
-                for part in message.walk():
-                    filename = decode_mime(part.get_filename())
-                    if filename != expected:
-                        continue
-                    payload = part.get_payload(decode=True)
-                    if not payload:
-                        continue
-                    return OneCAttachment(
-                        uid=uid,
-                        message_date=message_date,
-                        sender=message_sender,
-                        subject=subject,
-                        filename=filename,
-                        file_hash=hashlib.sha256(payload).hexdigest(),
-                        payload=payload,
+            # Идем с конца: полный XLSX является снимком, поэтому при накопившихся
+            # нескольких выгрузках достаточно самого нового корректного письма.
+            for uid_bytes in reversed(uid_values):
+                uid = uid_bytes.decode()
+                raw = self._fetch_raw(imap, uid)
+                attachment = self._attachment_from_raw(
+                    uid=uid,
+                    raw=raw,
+                    expected_filename=expected,
+                )
+                if attachment is not None:
+                    return OneCImapScanResult(
+                        max_uid=str(max_uid),
+                        attachment=attachment,
                     )
 
+            return OneCImapScanResult(
+                max_uid=str(max_uid),
+                attachment=None,
+            )
+
+    def find_latest_attachment(
+        self,
+        *,
+        folder: str | None = None,
+        sender_filter: str | None = None,
+        attachment_filename: str | None = None,
+    ) -> OneCAttachment:
+        result = self.scan_newest_attachment(
+            folder=folder,
+            sender_filter=sender_filter,
+            attachment_filename=attachment_filename,
+        )
+        if result.attachment is not None:
+            return result.attachment
+
+        _, _, expected = self._filters(
+            folder=folder,
+            sender_filter=sender_filter,
+            attachment_filename=attachment_filename,
+        )
         raise FileNotFoundError(
             f"В найденных письмах нет вложения {expected}"
         )

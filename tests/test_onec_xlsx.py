@@ -20,6 +20,7 @@ class OneCXlsxTests(unittest.TestCase):
                 "Физическое лицо.Email",
                 "Должность",
                 "Состояние",
+                "Дата увольнения",
             ]
         )
         ws.append(["Отдел ИТ"])
@@ -31,6 +32,7 @@ class OneCXlsxTests(unittest.TestCase):
                 personal_email,
                 "Специалист",
                 state,
+                "",
             ]
         )
         file = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)

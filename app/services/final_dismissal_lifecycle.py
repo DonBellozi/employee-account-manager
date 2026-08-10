@@ -21,8 +21,8 @@ from app.models_dismissal_lifecycle import (
     FinalDismissalBlockRun,
     FinalDismissalBlockTarget,
 )
-from app.models_onec_sources import OneCAdditionalSource
 from app.services.ad import ActiveDirectoryService
+from app.services.onec_freshness import OneCSourceFreshnessService
 from app.services.upcoming_dismissals import UpcomingDismissalService
 from app.services.zimbra import ZimbraService
 
@@ -30,8 +30,8 @@ from app.services.zimbra import ZimbraService
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 60
-BLOCK_TIME = time(18, 30)
-BLOCK_TIME_LABEL = "18:30"
+BLOCK_TIME = time(19, 10)
+BLOCK_TIME_LABEL = "19:10"
 SUCCESS_TARGET_STATUSES = {"completed", "already_completed"}
 RETRY_DELAYS_MINUTES = (1, 2, 5, 10, 15, 30, 60)
 
@@ -111,52 +111,14 @@ class FinalDismissalLifecycleService:
             )
         )
 
-    @staticmethod
-    def _aware_utc(value: datetime) -> datetime:
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
-
     def _sources_synchronized(self) -> bool:
-        source_ids = [
-            normalize(row.source_id)
-            for row in self.db.scalars(
-                select(OneCAdditionalSource).where(
-                    OneCAdditionalSource.enabled.is_(True)
-                )
-            ).all()
-            if normalize(row.source_id)
-        ]
-        source_ids = list(dict.fromkeys(source_ids))
-        if not source_ids:
-            return True
-
-        completed: list[datetime] = []
-        for source_id in source_ids:
-            run = self.db.scalar(
-                select(OneCImportRun)
-                .where(
-                    OneCImportRun.source_id == source_id,
-                    OneCImportRun.status.in_(
-                        ["success", "partial", "duplicate"]
-                    ),
-                )
-                .order_by(
-                    OneCImportRun.completed_at.desc(),
-                    OneCImportRun.id.desc(),
-                )
-                .limit(1)
-            )
-            if run is None or run.completed_at is None:
-                return False
-            completed.append(self._aware_utc(run.completed_at))
-
-        newest = max(completed)
-        oldest = min(completed)
-        now = utcnow()
-        if now - newest > timedelta(hours=36):
-            return False
-        return newest - oldest <= timedelta(minutes=30)
+        # После 19:10 внешние изменения разрешаются только если по КАЖДОМУ
+        # включенному источнику IMAP-worker уже принял контрольное письмо
+        # текущего дня, отправленное не ранее 19:00.
+        return OneCSourceFreshnessService(
+            self.settings,
+            self.db,
+        ).all_control_exports_ready(expected_date=self.today)
 
     def _ready(self) -> bool:
         return not self._import_running() and self._sources_synchronized()
