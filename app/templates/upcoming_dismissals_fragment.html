@@ -48,15 +48,15 @@
           {% if item.deferred %}
           <span class="registry-state checked">Отложено</span>
           <div class="muted">
-            Не блокировать до {{ item.deferred_until.strftime('%d.%m.%Y') }}
+            Автоблокировка {{ item.deferred_until.strftime('%d.%m.%Y') }} в 18:30
           </div>
           {% if item.deferral_operator %}
           <div class="muted">{{ item.deferral_operator }}</div>
           {% endif %}
           {% else %}
-          <span class="registry-state not_checked">По дате увольнения</span>
+          <span class="registry-state not_checked">Автоматически</span>
           <div class="muted">
-            Не ранее {{ item.effective_block_date.strftime('%d.%m.%Y') }}
+            {{ item.effective_block_date.strftime('%d.%m.%Y') }} в 18:30
           </div>
           {% endif %}
         </td>

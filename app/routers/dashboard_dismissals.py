@@ -21,6 +21,10 @@ from app.models import (
     ProvisioningOperation,
 )
 from app.models_notifications import DismissalEquipmentNotice
+from app.models_dismissal_lifecycle import (
+    FinalDismissalBlockRun,
+    FinalDismissalBlockTarget,
+)
 from app.routers.employees import (
     _ad_provisioning_journal_item,
     _blocking_journal_item,
@@ -184,6 +188,109 @@ def _dismissal_notice_journal_item(
     }
 
 
+
+def _final_dismissal_block_journal_item(
+    run: FinalDismissalBlockRun,
+    targets: list[FinalDismissalBlockTarget],
+) -> dict[str, object]:
+    labels = {
+        "pending": ("running", "Ожидает"),
+        "running": ("running", "Выполняется"),
+        "partial": ("partial", "Выполнено частично"),
+        "success": ("success", "Выполнено"),
+        "intervention": ("failed", "Требует вмешательства"),
+        "cancelled": ("partial", "Отменено"),
+    }
+    status_key, status_label = labels.get(
+        run.status,
+        ("running", run.status),
+    )
+
+    target_labels = {
+        "pending": "Ожидает блокировки",
+        "completed": "Заблокирована системой",
+        "already_completed": "Уже была заблокирована",
+        "intervention": "Требует вмешательства",
+        "cancelled": "Отменено",
+    }
+
+    blocking_systems = []
+    for target in targets:
+        label = (
+            "Active Directory"
+            if target.system == "ad"
+            else "Zimbra"
+        )
+        blocking_systems.append(
+            {
+                "label": label,
+                "result": target_labels.get(
+                    target.status,
+                    target.status,
+                ),
+                "timestamp": (
+                    target.completed_at
+                    or target.last_attempt_at
+                ),
+            }
+        )
+
+    ad_identifier = next(
+        (
+            item.target_identifier
+            for item in targets
+            if item.system == "ad"
+            and item.target_identifier
+        ),
+        "",
+    )
+    zimbra_identifier = next(
+        (
+            item.target_identifier
+            for item in targets
+            if item.system == "zimbra"
+            and item.target_identifier
+        ),
+        "",
+    )
+
+    details = [
+        ("ФИО", run.fio),
+        (
+            "Дата окончательного увольнения",
+            run.dismissal_date.strftime("%d.%m.%Y"),
+        ),
+        (
+            "Дата автоматической блокировки",
+            run.effective_block_date.strftime("%d.%m.%Y")
+            + " 18:30",
+        ),
+        (
+            "Целей AD/Zimbra",
+            str(len(targets)),
+        ),
+    ]
+
+    return {
+        "kind": "blocking",
+        "record_id": run.id,
+        "created_at": run.created_at,
+        "action": "Автоблокировка при увольнении",
+        "subject": run.fio or "Работник",
+        "login": ad_identifier,
+        "corporate_email": zimbra_identifier,
+        "personal_email": "",
+        "mail_domain": "",
+        "operator": "Система",
+        "status_key": status_key,
+        "status_label": status_label,
+        "details": details,
+        "blocking_systems": blocking_systems,
+        "equipment_snapshot": [],
+        "error_message": run.last_error,
+        "completed_at": run.completed_at or run.cancelled_at,
+    }
+
 def _journal_items(db: Session) -> list[dict[str, object]]:
     provisioning_operations = db.scalars(
         select(ProvisioningOperation)
@@ -237,6 +344,36 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
         .limit(50)
     ).all()
 
+    final_block_runs = db.scalars(
+        select(FinalDismissalBlockRun)
+        .order_by(
+            desc(FinalDismissalBlockRun.created_at),
+            desc(FinalDismissalBlockRun.id),
+        )
+        .limit(50)
+    ).all()
+    final_block_run_ids = [item.id for item in final_block_runs]
+    final_block_targets = (
+        db.scalars(
+            select(FinalDismissalBlockTarget).where(
+                FinalDismissalBlockTarget.run_id.in_(
+                    final_block_run_ids
+                )
+            )
+        ).all()
+        if final_block_run_ids
+        else []
+    )
+    final_targets_by_run: dict[
+        int,
+        list[FinalDismissalBlockTarget],
+    ] = {}
+    for target in final_block_targets:
+        final_targets_by_run.setdefault(
+            target.run_id,
+            [],
+        ).append(target)
+
     items = [
         *(
             _provisioning_journal_item(item)
@@ -264,6 +401,13 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
         *(
             _dismissal_notice_journal_item(item)
             for item in dismissal_notices
+        ),
+        *(
+            _final_dismissal_block_journal_item(
+                item,
+                final_targets_by_run.get(item.id, []),
+            )
+            for item in final_block_runs
         ),
     ]
     items.sort(key=lambda item: item["created_at"], reverse=True)

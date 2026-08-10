@@ -29,6 +29,7 @@ from app.routers import (
 from app.security import CSRFMismatchError, ensure_bootstrap_admin
 from app.services.blocking_worker import BlockingQueueWorker
 from app.services.dismissal_notifications import DismissalNotificationWorker
+from app.services.final_dismissal_lifecycle import FinalDismissalLifecycleWorker
 from app.services.onec_scheduler import OneCAutoImportScheduler
 from app.services.onec_sources import OneCSourceRegistryService
 from app.services.telegram_worker import TelegramNotificationWorker
@@ -55,6 +56,10 @@ async def lifespan(_: FastAPI):
         settings,
         SessionLocal,
     )
+    final_dismissal_worker = FinalDismissalLifecycleWorker(
+        settings,
+        SessionLocal,
+    )
     telegram_worker = TelegramNotificationWorker(
         settings.app_secret_key,
         SessionLocal,
@@ -63,6 +68,7 @@ async def lifespan(_: FastAPI):
     onec_scheduler.start()
     blocking_worker.start()
     dismissal_notification_worker.start()
+    final_dismissal_worker.start()
     telegram_worker.start()
     zimbra_observer_scheduler.start()
     try:
@@ -70,6 +76,7 @@ async def lifespan(_: FastAPI):
     finally:
         zimbra_observer_scheduler.stop()
         telegram_worker.stop()
+        final_dismissal_worker.stop()
         dismissal_notification_worker.stop()
         blocking_worker.stop()
         onec_scheduler.stop()

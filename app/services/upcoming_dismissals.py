@@ -138,7 +138,7 @@ class UpcomingDismissalService:
             if row.source_id
         }
 
-    def _all_candidates(self) -> list[dict]:
+    def _all_candidates(self, *, include_expired: bool = False) -> list[dict]:
         employment_rows = list(
             self.db.scalars(
                 select(HREmploymentState).order_by(
@@ -199,10 +199,17 @@ class UpcomingDismissalService:
             deferral = deferral_by_pair.get((worker_key, final_date))
             deferred_until = deferral.deferred_until if deferral else None
 
-            # Блок предназначен для будущих увольнений. После даты запись
-            # остается видимой только если оператор ранее поставил отсрочку.
-            if final_date < today and (
-                deferred_until is None or deferred_until < today
+            # В интерфейсе старые завершенные увольнения не показываем.
+            # Автоматическая блокировка запрашивает include_expired=True,
+            # потому что временная ошибка AD/Zimbra может пережить дату
+            # увольнения и должна безопасно повториться позднее.
+            if (
+                not include_expired
+                and final_date < today
+                and (
+                    deferred_until is None
+                    or deferred_until < today
+                )
             ):
                 continue
 
@@ -326,6 +333,17 @@ class UpcomingDismissalService:
     def list_upcoming(self, *, limit: int = 20) -> list[dict]:
         self.ensure_primary_employment_state()
         return self._all_candidates()[: max(1, int(limit))]
+
+    def list_for_blocking(self, *, limit: int = 10000) -> list[dict]:
+        """Все окончательные увольнения, включая уже наступившие.
+
+        Исторический backfill ограничивается датой фактического включения
+        автоматизации в FinalDismissalLifecycleService.
+        """
+        self.ensure_primary_employment_state()
+        return self._all_candidates(
+            include_expired=True
+        )[: max(1, int(limit))]
 
     def defer(
         self,
