@@ -16,12 +16,18 @@ from app.models import (
     HRSourceRecord,
     OneCImportRun,
 )
+from app.models_onec_sources import HREmploymentState
 from app.models_dismissal_lifecycle import (
     FinalDismissalAutomationState,
     FinalDismissalBlockRun,
     FinalDismissalBlockTarget,
 )
 from app.services.ad import ActiveDirectoryService
+from app.services.hr_registry import (
+    reconciliation_status_for,
+    worker_requires_active_accounts,
+    zimbra_registry_status,
+)
 from app.services.onec_freshness import OneCSourceFreshnessService
 from app.services.upcoming_dismissals import UpcomingDismissalService
 from app.services.zimbra import ZimbraService
@@ -34,6 +40,8 @@ BLOCK_TIME = time(19, 10)
 BLOCK_TIME_LABEL = "19:10"
 SUCCESS_TARGET_STATUSES = {"completed", "already_completed"}
 RETRY_DELAYS_MINUTES = (1, 2, 5, 10, 15, 30, 60)
+POST_RECONCILE_ACTION = "final_dismissal_post_reconcile"
+POST_RECONCILE_RETRY_MINUTES = 5
 
 
 def utcnow() -> datetime:
@@ -229,6 +237,250 @@ class FinalDismissalLifecycleService:
             ).all()
         )
         return records, mappings
+
+    @staticmethod
+    def _post_reconcile_target(run: FinalDismissalBlockRun) -> str:
+        return f"{run.worker_key}:{run.dismissal_date.isoformat()}"
+
+    def _post_reconcile_due(self, run: FinalDismissalBlockRun) -> bool:
+        latest = self.db.scalar(
+            select(AuditLog)
+            .where(
+                AuditLog.action == POST_RECONCILE_ACTION,
+                AuditLog.target == self._post_reconcile_target(run),
+            )
+            .order_by(AuditLog.id.desc())
+            .limit(1)
+        )
+        if latest is None:
+            return True
+        if latest.result == "success":
+            return False
+
+        created_at = latest.created_at
+        if created_at is None:
+            return True
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        return utcnow() - created_at >= timedelta(
+            minutes=POST_RECONCILE_RETRY_MINUTES
+        )
+
+    @staticmethod
+    def _identity_addresses(identity) -> set[str]:
+        if identity is None:
+            return set()
+        return {
+            normalize(value)
+            for value in getattr(identity, "addresses", ())
+            if normalize(value)
+        }
+
+    def _post_reconcile_worker(
+        self,
+        run: FinalDismissalBlockRun,
+    ) -> bool:
+        """Точечно проверить только что заблокированного работника.
+
+        Полная сверка реестра намеренно не запускается: после успешных
+        изменений проверяются только связанные с worker_key объекты AD/Zimbra,
+        а результат сразу записывается в кадровые строки всех организаций.
+        """
+        records, mappings = self._records_and_mappings(run.worker_key)
+        if not records:
+            self.db.add(
+                AuditLog(
+                    actor="system",
+                    action=POST_RECONCILE_ACTION,
+                    target=self._post_reconcile_target(run),
+                    result="success",
+                    details="records=0",
+                )
+            )
+            self.db.commit()
+            return True
+
+        states = list(
+            self.db.scalars(
+                select(HREmploymentState).where(
+                    HREmploymentState.worker_key == run.worker_key
+                )
+            ).all()
+        )
+        requires_active = worker_requires_active_accounts(states)
+
+        mappings_by_source = {
+            normalize(mapping.source_domain): mapping
+            for mapping in mappings
+            if normalize(mapping.source_domain)
+        }
+
+        errors: list[str] = []
+        now = utcnow()
+
+        # AD у человека общий. Проверяем один актуальный объект, определенный
+        # теми же правилами, которыми пользовалась автоблокировка.
+        ad_status = "no_login"
+        ad_user = None
+        ad_plan = self._ad_plan(records, mappings)
+        if ad_plan is not None:
+            if ad_plan.get("error"):
+                ad_status = "error"
+                errors.append(f"AD: {ad_plan['error']}")
+            elif not self.settings.ad_check_enabled:
+                ad_status = "not_checked"
+            else:
+                try:
+                    ad = ActiveDirectoryService(self.settings)
+                    if normalize(ad_plan.get("stable_id", "")):
+                        ad_user = ad.get_user_by_object_guid(
+                            normalize(ad_plan["stable_id"])
+                        )
+                    if ad_user is None and normalize(
+                        ad_plan.get("identifier", "")
+                    ):
+                        ad_user = ad.get_user(
+                            normalize(ad_plan["identifier"])
+                        )
+                    if ad_user is None:
+                        ad_status = "missing"
+                    else:
+                        ad_status = (
+                            "enabled" if ad_user.is_enabled else "disabled"
+                        )
+                except Exception as exc:
+                    ad_status = "error"
+                    errors.append(f"AD: {exc}")
+
+        if ad_user is not None:
+            for mapping in mappings:
+                mapping.ad_login = ad_user.username
+                if ad_user.object_guid:
+                    mapping.ad_object_guid = ad_user.object_guid
+                mapping.last_verified_at = now
+
+        # Zimbra может содержать несколько физических ящиков одного человека.
+        # Проверяем только цели этого worker_key, без обхода всего домена.
+        zimbra_by_id: dict[str, object] = {}
+        zimbra_by_address: dict[str, object] = {}
+        zimbra_error = ""
+        zimbra_plans = self._zimbra_plan(records, mappings)
+
+        if self.settings.zimbra_check_enabled and zimbra_plans:
+            try:
+                zimbra = ZimbraService(self.settings)
+                stable_ids = sorted(
+                    {
+                        normalize(plan.get("stable_id", ""))
+                        for plan in zimbra_plans
+                        if normalize(plan.get("stable_id", ""))
+                    }
+                )
+                if stable_ids:
+                    zimbra_by_id.update(
+                        zimbra.accounts_by_ids(stable_ids)
+                    )
+
+                for plan in zimbra_plans:
+                    identity = None
+                    stable_id = normalize(plan.get("stable_id", ""))
+                    identifier = normalize(plan.get("identifier", ""))
+                    if stable_id:
+                        identity = zimbra_by_id.get(stable_id)
+                    if identity is None and identifier:
+                        identity = zimbra.account_by_address(identifier)
+                    if identity is None:
+                        continue
+                    if normalize(getattr(identity, "zimbra_id", "")):
+                        zimbra_by_id[
+                            normalize(identity.zimbra_id)
+                        ] = identity
+                    for address in self._identity_addresses(identity):
+                        zimbra_by_address[address] = identity
+            except Exception as exc:
+                zimbra_error = str(exc)
+                errors.append(f"Zimbra: {exc}")
+
+        for mapping in mappings:
+            identity = None
+            if normalize(mapping.zimbra_id):
+                identity = zimbra_by_id.get(normalize(mapping.zimbra_id))
+            if identity is None:
+                for address in (mapping.source_email, mapping.zimbra_email):
+                    identity = zimbra_by_address.get(normalize(address))
+                    if identity is not None:
+                        break
+            if identity is not None:
+                if getattr(identity, "zimbra_id", ""):
+                    mapping.zimbra_id = identity.zimbra_id
+                mapping.zimbra_email = identity.primary_email
+                mapping.last_verified_at = now
+
+        for record in records:
+            source_id = normalize(record.source_id)
+            mapping = mappings_by_source.get(source_id)
+            record.ad_status = ad_status
+
+            expected_addresses = {
+                normalize(record.corporate_email),
+                normalize(mapping.source_email) if mapping is not None else "",
+                normalize(mapping.zimbra_email) if mapping is not None else "",
+            }
+            expected_addresses.discard("")
+
+            if not expected_addresses:
+                record.zimbra_status = "no_email"
+            elif not self.settings.zimbra_check_enabled:
+                record.zimbra_status = "not_checked"
+            elif zimbra_error:
+                record.zimbra_status = "error"
+            else:
+                identity = None
+                if mapping is not None and normalize(mapping.zimbra_id):
+                    identity = zimbra_by_id.get(
+                        normalize(mapping.zimbra_id)
+                    )
+                if identity is None:
+                    for address in sorted(expected_addresses):
+                        identity = zimbra_by_address.get(address)
+                        if identity is not None:
+                            break
+
+                if identity is None:
+                    record.zimbra_status = "missing"
+                else:
+                    actual_addresses = self._identity_addresses(identity)
+                    source_email = normalize(record.corporate_email)
+                    if source_email and source_email not in actual_addresses:
+                        record.zimbra_status = "address_mismatch"
+                    else:
+                        record.zimbra_status = zimbra_registry_status(identity)
+
+            record.reconciliation_status = reconciliation_status_for(
+                record,
+                requires_active_accounts=requires_active,
+            )
+            record.reconciliation_error = "\n".join(errors)[:4000]
+            record.reconciled_at = now
+
+        self.db.add(
+            AuditLog(
+                actor="system",
+                action=POST_RECONCILE_ACTION,
+                target=self._post_reconcile_target(run),
+                result="success" if not errors else "error",
+                details=(
+                    f"records={len(records)}; "
+                    f"ad={ad_status}; "
+                    "zimbra="
+                    + ",".join(
+                        sorted({record.zimbra_status for record in records})
+                    )
+                )[:4000],
+            )
+        )
+        self.db.commit()
+        return not errors
 
     @staticmethod
     def _ad_plan(
@@ -777,6 +1029,29 @@ class FinalDismissalLifecycleService:
 
             self._refresh_run(run)
             self.db.commit()
+
+            # После успешной автоблокировки немедленно обновляем фактические
+            # статусы только этого работника. Для уже завершенных до установки
+            # патча run такая проверка выполнится один раз при следующем цикле.
+            if run.status == "success" and self._post_reconcile_due(run):
+                try:
+                    self._post_reconcile_worker(run)
+                except Exception as exc:
+                    self.db.rollback()
+                    self.db.add(
+                        AuditLog(
+                            actor="system",
+                            action=POST_RECONCILE_ACTION,
+                            target=self._post_reconcile_target(run),
+                            result="error",
+                            details=str(exc)[:4000],
+                        )
+                    )
+                    self.db.commit()
+                    logger.exception(
+                        "Ошибка точечной сверки после автоблокировки: %s",
+                        run.fio or run.worker_key,
+                    )
 
         return {
             "status": "ok",
