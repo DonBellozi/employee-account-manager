@@ -4,7 +4,7 @@ from urllib.parse import quote_plus
 
 from email_validator import EmailNotValidError, validate_email
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
@@ -19,7 +19,9 @@ from app.services.dismissal_mailer import (
 from app.services.mailer import (
     CORPORATE_TEMPLATE_VARIABLES,
     PERSONAL_TEMPLATE_VARIABLES,
+    CredentialMailer,
     ensure_domain_mail_profiles,
+    render_mail_template,
     validate_mail_template,
 )
 
@@ -48,6 +50,61 @@ TEMPLATE_DEFINITIONS = {
     },
 }
 
+
+
+def _test_context(template_key: str, domain: str) -> dict[str, str]:
+    corporate_email = f"ivanov.ii@{domain}"
+    common = {
+        "full_name": "Иванов Иван Иванович",
+        "corporate_email": corporate_email,
+        "mail_domain": domain,
+    }
+    if template_key == "personal":
+        return {
+            **common,
+            "mail_password": "TEST-Mail-Password-123!",
+        }
+    if template_key == "corporate":
+        return {
+            **common,
+            "ad_login": "ivanov.ii",
+            "ad_password": "TEST-AD-Password-123!",
+        }
+    if template_key == "dismissal":
+        return {
+            **common,
+            "dismissal_date": "20.08.2026",
+            "return_deadline": "18.08.2026",
+            "return_deadline_text": "не позднее 18.08.2026",
+            "organization": "Тестовая организация",
+            "organizations": "Тестовая организация",
+            "personal_email": "ivanov@example.net",
+        }
+    raise ValueError("Неизвестный тип шаблона")
+
+
+def _validate_sender_for_profile(
+    *,
+    profile: DomainMailProfile,
+    sender_email: str,
+) -> str:
+    try:
+        normalized_sender = validate_email(
+            sender_email.strip(),
+            check_deliverability=False,
+        ).normalized.lower()
+    except EmailNotValidError as exc:
+        raise ValueError(
+            f"Некорректный e-mail отправителя: {exc}"
+        ) from exc
+
+    sender_domain = normalized_sender.rsplit("@", 1)[1]
+    if sender_domain != profile.domain.strip().lower():
+        raise ValueError(
+            "E-mail отправителя должен принадлежать домену "
+            f"{profile.domain}"
+        )
+    return normalized_sender
 
 def _redirect(
     *,
@@ -152,22 +209,10 @@ def update_mail_template(
         if configured_domains and profile.domain.lower() not in configured_domains:
             raise ValueError("Этот домен отсутствует в настройках Zimbra")
 
-        try:
-            normalized_sender = validate_email(
-                sender_email.strip(),
-                check_deliverability=False,
-            ).normalized.lower()
-        except EmailNotValidError as exc:
-            raise ValueError(
-                f"Некорректный e-mail отправителя: {exc}"
-            ) from exc
-
-        sender_domain = normalized_sender.rsplit("@", 1)[1]
-        if sender_domain != profile.domain.strip().lower():
-            raise ValueError(
-                "E-mail отправителя должен принадлежать домену "
-                f"{profile.domain}"
-            )
+        normalized_sender = _validate_sender_for_profile(
+            profile=profile,
+            sender_email=sender_email,
+        )
 
         validate_mail_template(
             subject,
@@ -227,4 +272,123 @@ def update_mail_template(
             profile_id=profile_id,
             template_key=key or "personal",
             error=str(exc),
+        )
+
+
+@router.post("/admin/mail-templates/{profile_id}/test")
+def test_mail_template(
+    profile_id: int,
+    request: Request,
+    template_key: str = Form(...),
+    sender_name: str = Form(""),
+    sender_email: str = Form(...),
+    subject: str = Form(...),
+    body_html: str = Form(...),
+    test_recipient: str = Form(...),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_admin(request)
+    key = template_key.strip().lower()
+
+    try:
+        definition = TEMPLATE_DEFINITIONS.get(key)
+        if definition is None:
+            raise ValueError("Неизвестный тип шаблона")
+
+        profile = db.get(DomainMailProfile, profile_id)
+        if profile is None:
+            raise ValueError("Профиль почтового домена не найден")
+
+        configured_domains = {
+            domain.strip().lower()
+            for domain in settings.zimbra_domains
+            if domain.strip()
+        }
+        if configured_domains and profile.domain.lower() not in configured_domains:
+            raise ValueError("Этот домен отсутствует в настройках Zimbra")
+
+        normalized_sender = _validate_sender_for_profile(
+            profile=profile,
+            sender_email=sender_email,
+        )
+        try:
+            normalized_recipient = validate_email(
+                test_recipient.strip(),
+                check_deliverability=False,
+            ).normalized.lower()
+        except EmailNotValidError as exc:
+            raise ValueError(
+                f"Некорректный тестовый адрес: {exc}"
+            ) from exc
+
+        variables = set(definition["variables"])
+        validate_mail_template(
+            subject,
+            allowed_variables=variables,
+            field_name="Тема письма",
+            autoescape=False,
+        )
+        validate_mail_template(
+            body_html,
+            allowed_variables=variables,
+            field_name="HTML-шаблон письма",
+            autoescape=True,
+        )
+
+        context = _test_context(key, profile.domain.strip().lower())
+        rendered_subject = render_mail_template(
+            subject,
+            context,
+            autoescape=False,
+        )
+        rendered_body = render_mail_template(
+            body_html,
+            context,
+            autoescape=True,
+        )
+
+        if settings.dry_run:
+            return {
+                "ok": True,
+                "sent": False,
+                "message": (
+                    "DRY_RUN включен – тестовое письмо сформировано, "
+                    "но не отправлено."
+                ),
+            }
+
+        CredentialMailer(settings)._send(
+            normalized_recipient,
+            f"[ТЕСТ] {rendered_subject}",
+            rendered_body,
+            sender_email=normalized_sender,
+            sender_name=sender_name.strip(),
+        )
+
+        db.add(
+            AuditLog(
+                actor=current.username,
+                action="mail_template_test_send",
+                target=f"{profile.domain}:{key}",
+                result="success",
+                details=(
+                    f"recipient={normalized_recipient}; "
+                    f"sender={normalized_sender}"
+                ),
+            )
+        )
+        db.commit()
+        return {
+            "ok": True,
+            "sent": True,
+            "message": f"Тестовое письмо отправлено на {normalized_recipient}",
+        }
+    except Exception as exc:
+        db.rollback()
+        return JSONResponse(
+            {"ok": False, "error": str(exc)},
+            status_code=400,
         )

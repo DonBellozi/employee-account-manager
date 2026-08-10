@@ -192,3 +192,57 @@ button.mail-template-nav-item.active {
     width: 100%;
   }
 }
+
+.mail-template-test-section {
+  display: grid;
+  gap: 12px;
+  padding: 16px 17px;
+  border: 1px dashed #93c5fd;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.mail-template-test-row {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.mail-template-test-row button {
+  min-width: 160px;
+  white-space: nowrap;
+}
+
+.mail-template-test-result {
+  min-height: 20px;
+  font-size: .9rem;
+  font-weight: 600;
+}
+
+.mail-template-test-result.pending {
+  color: #1e40af;
+}
+
+.mail-template-test-result.success {
+  color: #166534;
+}
+
+.mail-template-test-result.warning {
+  color: #854d0e;
+}
+
+.mail-template-test-result.error {
+  color: #991b1b;
+}
+
+@media (max-width: 650px) {
+  .mail-template-test-row {
+    grid-template-columns: 1fr;
+  }
+
+  .mail-template-test-row button {
+    width: 100%;
+    min-width: 0;
+  }
+}
