@@ -202,7 +202,14 @@ class OneCAdditionalImportService:
                 hash_secret=self.hash_secret,
                 header_search_rows=self.settings.onec_header_search_rows,
             )
-            dismissal = self._dismissal_dates(incoming_path)
+            dismissal = {
+                "column": workbook.dismissal_column,
+                "ambiguous": workbook.dismissal_column_ambiguous,
+                "dates": {
+                    worker.worker_key: worker.dismissal_date
+                    for worker in workbook.workers
+                },
+            }
             current_snapshot = {
                 worker.worker_key: {
                     **worker_snapshot(worker),

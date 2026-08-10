@@ -18,29 +18,39 @@
 </div>
 {% endif %}
 
-<section class="card hr-reconciliation-card">
+<section class="card upcoming-dismissals-card">
   <div class="upcoming-dismissals-heading">
     <div>
-      <h2>Сверка 1С / AD / Zimbra</h2>
-      <p class="muted">Текущий кадровый источник: {{ registry_summary.source_name }}. Сверка выполняется только на чтение.</p>
+      <h2>Ближайшие увольнения</h2>
+      <p class="muted">
+        Показываются только окончательные увольнения: если у человека остается
+        хотя бы одна активная должность или организация, он сюда не попадает.
+      </p>
     </div>
-    <a class="button secondary" href="/employees/registry">Открыть реестр</a>
+    <a class="button secondary" href="/employees/registry">Кадровый реестр</a>
   </div>
-  {% if registry_summary.total %}
-  <div class="hr-summary-grid">
-    <div><span>В реестре</span><strong>{{ registry_summary.total }}</strong></div>
-    <div class="good"><span>Соответствует</span><strong>{{ registry_summary.ok }}</strong></div>
-    <div class="good"><span>Проверены</span><strong>{{ registry_summary.checked }}</strong></div>
-    <div class="warn"><span>Требует проверки</span><strong>{{ registry_summary.issues }}</strong></div>
-    <div class="bad"><span>Ошибки сверки</span><strong>{{ registry_summary.errors }}</strong></div>
-    <div><span>Не проверено</span><strong>{{ registry_summary.not_checked }}</strong></div>
-  </div>
-  {% if registry_issues %}
-  <div class="hr-issues-table-wrap">
-    <table class="upcoming-table hr-issues-table">
-      <thead><tr><th>Работник</th><th>AD</th><th>Zimbra</th><th>Результат</th><th></th></tr></thead>
+
+  {% if dismissal_message %}
+  <div class="alert success">{{ dismissal_message }}</div>
+  {% endif %}
+  {% if dismissal_error %}
+  <div class="alert error">{{ dismissal_error }}</div>
+  {% endif %}
+
+  {% if upcoming_dismissals %}
+  <div class="table-wrap">
+    <table class="upcoming-table">
+      <thead>
+        <tr>
+          <th>Работник</th>
+          <th>Дата увольнения</th>
+          <th>Занятость</th>
+          <th>Блокировка</th>
+          <th></th>
+        </tr>
+      </thead>
       <tbody>
-        {% for item in registry_issues %}
+        {% for item in upcoming_dismissals %}
         <tr>
           <td>
             <strong>{{ item.fio }}</strong>
@@ -48,40 +58,58 @@
               {% if item.login %}<code>{{ item.login }}</code>{% endif %}
               {% if item.email %}<span>{{ item.email }}</span>{% endif %}
             </div>
-            {% if item.manual_check_previous_note %}
-            <div class="muted">{{ item.manual_check_previous_note }}</div>
+          </td>
+          <td>
+            <strong>{{ item.dismissal_date.strftime('%d.%m.%Y') }}</strong>
+            <div class="muted">{{ item.timing_label }}</div>
+          </td>
+          <td>
+            {% for organization in item.organizations %}
+            <div class="registry-placement">
+              <strong>{{ organization.source_name }}</strong>
+              {% if organization.dismissal_date %}
+              <span class="muted"> – до {{ organization.dismissal_date.strftime('%d.%m.%Y') }}</span>
+              {% endif %}
+              {% for placement in organization.placements %}
+              <div class="muted">{{ placement }}</div>
+              {% endfor %}
+            </div>
+            {% endfor %}
+          </td>
+          <td>
+            {% if item.deferred %}
+            <span class="registry-state checked">Отложено</span>
+            <div class="muted">
+              Не блокировать до {{ item.deferred_until.strftime('%d.%m.%Y') }}
+            </div>
+            {% if item.deferral_operator %}
+            <div class="muted">{{ item.deferral_operator }}</div>
+            {% endif %}
+            {% else %}
+            <span class="registry-state not_checked">По дате увольнения</span>
+            <div class="muted">
+              Не ранее {{ item.effective_block_date.strftime('%d.%m.%Y') }}
+            </div>
             {% endif %}
           </td>
-          <td><span class="registry-state {{ item.ad_status }}">{{ item.ad_label }}</span></td>
-          <td><span class="registry-state {{ item.zimbra_status }}">{{ item.zimbra_label }}</span></td>
-          <td><span class="registry-state {{ item.reconciliation_class }}">{{ item.reconciliation_label }}</span></td>
           <td>
-            <div class="registry-actions">
-              {% if item.can_mark_checked %}
-              <form method="post" action="/employees/registry/{{ item.id }}/checked">
-                <input type="hidden" name="csrf" value="{{ csrf }}">
-                <input type="hidden" name="return_to" value="/">
-                <button class="button secondary small" type="submit" title="Подтвердить, что учетные записи этому работнику не требуются">Проверен</button>
-              </form>
-              {% endif %}
-              {% if item.has_mapping %}
-                <span class="registry-mapped">Сопоставлено</span>
-              {% else %}
-                {% if item.mapping_url %}<a class="button secondary small" href="{{ item.mapping_url }}">Сопоставить</a>{% endif %}
-                {% if item.create_ad_url %}<a class="button small" href="{{ item.create_ad_url }}">Создать AD</a>{% elif item.create_url %}<a class="button secondary small" href="{{ item.create_url }}">Создать</a>{% endif %}
-              {% endif %}
-            </div>
+            <form method="post" action="/dismissals/upcoming/defer">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="worker_key" value="{{ item.worker_key }}">
+              <input type="hidden" name="dismissal_date" value="{{ item.dismissal_date.isoformat() }}">
+              <button class="button secondary small" type="submit"
+                      title="Оператор проверил ситуацию. Отложить блокировку еще на семь дней.">
+                {{ 'Еще на неделю' if item.deferred else 'Отложить' }}
+              </button>
+            </form>
           </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
-  {% elif registry_summary.issues == 0 and registry_summary.errors == 0 %}
-  <div class="upcoming-empty">Проблем по текущей сверке не обнаружено.</div>
-  {% endif %}
   {% else %}
-  <div class="upcoming-empty">Кадровый реестр пока пуст. Повторно выполните «Получить и проанализировать» в настройках 1С.</div>
+  <div class="upcoming-empty">Ближайших окончательных увольнений нет.</div>
   {% endif %}
 </section>
 

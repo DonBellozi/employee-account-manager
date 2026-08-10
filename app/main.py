@@ -13,6 +13,7 @@ from app.routers import (
     admin,
     auth,
     employees,
+    dashboard_dismissals,
     hr_reconcile_multisource,
     hr_registry_alias,
     hr_registry_mapping,
@@ -80,6 +81,7 @@ app.include_router(auth.router)
 app.include_router(hr_registry_multisource.router)
 app.include_router(hr_registry_alias.router)
 app.include_router(hr_registry_mapping.router)
+app.include_router(dashboard_dismissals.router)
 app.include_router(employees.router)
 app.include_router(hr_reconcile_multisource.router)
 app.include_router(settings_ui.router)

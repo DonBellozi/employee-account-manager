@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+from datetime import date, datetime
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
+from openpyxl.utils.datetime import from_excel
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -40,6 +42,7 @@ class OneCWorker:
     login: str | None
     placements: tuple[OneCPlacement, ...]
     personal_email: str | None = None
+    dismissal_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,8 @@ class OneCWorkbook:
     header_row: int
     detected_columns: dict[str, str]
     potential_dismissal_columns: tuple[str, ...]
+    dismissal_column: str = ""
+    dismissal_column_ambiguous: bool = False
 
     @property
     def placements_count(self) -> int:
@@ -220,6 +225,74 @@ def _append_placement(
     return (*placements, placement)
 
 
+DISMISSAL_MARKERS = (
+    ("дата увольнения", 100),
+    ("уволь", 80),
+    ("дата прекращ", 70),
+    ("дата окончания", 60),
+    ("расторж", 50),
+    ("termination", 40),
+    ("dismiss", 40),
+)
+
+
+def _parse_dismissal_date(value: Any, *, epoch) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            parsed = from_excel(value, epoch=epoch)
+            return parsed.date() if isinstance(parsed, datetime) else parsed
+        except Exception:
+            return None
+
+    text = normalize_text(value)
+    if not text:
+        return None
+    for fmt in (
+        "%d.%m.%Y",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%Y-%m-%d",
+        "%d.%m.%y",
+    ):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _dismissal_column(sheet, header_row: int) -> tuple[int | None, str, bool]:
+    candidates: list[tuple[int, int, str]] = []
+    for col in range(1, sheet.max_column + 1):
+        raw = sheet.cell(row=header_row, column=col).value
+        header = normalize_text(raw)
+        normalized = normalize_header(header)
+        best_score = 0
+        for marker, score in DISMISSAL_MARKERS:
+            if marker in normalized:
+                best_score = max(best_score, score)
+        if best_score:
+            candidates.append((best_score, col, header))
+
+    if not candidates:
+        return None, "", False
+
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    best_score = candidates[0][0]
+    best = [item for item in candidates if item[0] == best_score]
+    if len(best) != 1:
+        return None, "", True
+
+    _, column, name = best[0]
+    return column, name, False
+
+
 def _dismissal_candidates(headers: tuple[str, ...]) -> tuple[str, ...]:
     markers = (
         "уволь",
@@ -263,10 +336,15 @@ def parse_onec_xlsx(
         email_col = mapping.get("email")
         personal_email_col = mapping.get("personal_email")
         position_col = mapping.get("position")
+        dismissal_col, dismissal_name, dismissal_ambiguous = _dismissal_column(
+            sheet,
+            header_row,
+        )
 
         department_hierarchy: dict[int, str] = {}
         current_department: str | None = None
         merged: dict[str, OneCWorker] = {}
+        dismissal_rows: dict[str, list[date | None]] = {}
 
         for row_idx in range(header_row + 1, sheet.max_row + 1):
             values = [
@@ -322,6 +400,13 @@ def parse_onec_xlsx(
                 position=position,
             )
             key = worker_key(snils, hash_secret)
+            if dismissal_col is not None:
+                dismissal_rows.setdefault(key, []).append(
+                    _parse_dismissal_date(
+                        values[dismissal_col - 1],
+                        epoch=workbook.epoch,
+                    )
+                )
             existing = merged.get(key)
 
             if existing:
@@ -346,6 +431,19 @@ def parse_onec_xlsx(
                     personal_email=personal_email,
                 )
 
+        # Окончательная дата по организации появляется только когда
+        # дата увольнения заполнена во ВСЕХ строках/должностях человека.
+        # Если хотя бы одна должность продолжается, человек остается активным.
+        if dismissal_col is not None and not dismissal_ambiguous:
+            for key, worker in merged.items():
+                values = dismissal_rows.get(key, [])
+                if values and all(value is not None for value in values):
+                    worker.dismissal_date = max(
+                        value for value in values if value is not None
+                    )
+                else:
+                    worker.dismissal_date = None
+
         detected_columns = {
             key: expected[key]
             for key in mapping
@@ -357,6 +455,8 @@ def parse_onec_xlsx(
             header_row=header_row,
             detected_columns=detected_columns,
             potential_dismissal_columns=_dismissal_candidates(headers),
+            dismissal_column=dismissal_name,
+            dismissal_column_ambiguous=dismissal_ambiguous,
         )
     finally:
         workbook.close()
@@ -369,6 +469,11 @@ def worker_snapshot(worker: OneCWorker) -> dict:
         "email": worker.email,
         "personal_email": worker.personal_email,
         "login": worker.login,
+        "dismissal_date": (
+            worker.dismissal_date.isoformat()
+            if worker.dismissal_date is not None
+            else None
+        ),
         "placements": [
             asdict(placement)
             for placement in worker.placements

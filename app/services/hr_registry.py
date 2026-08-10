@@ -17,6 +17,7 @@ from app.models import (
 )
 from app.services.ad import ActiveDirectoryService
 from app.services.email_login_mapping import EmailLoginMappingService
+from app.services.hr_employment import sync_workbook_employment
 from app.services.onec_xlsx import OneCWorkbook
 from app.services.zimbra import ZimbraService
 
@@ -495,11 +496,20 @@ class HRRegistryService:
                 record.is_present = False
                 missing += 1
 
+        employment = sync_workbook_employment(
+            self.db,
+            workbook=workbook,
+            source_id=source_id,
+            source_name=self.source_name,
+            timezone_name=self.settings.app_timezone,
+        )
+
         self.db.commit()
         return {
             "created_people": created_people,
             "created_source_records": created_source_records,
             "marked_missing": missing,
+            **employment,
         }
 
     def reconcile_current(self) -> dict[str, int | str]:
