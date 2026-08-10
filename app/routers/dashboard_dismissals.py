@@ -5,7 +5,7 @@ from datetime import date
 from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
@@ -215,6 +215,39 @@ def dashboard(
     )
 
 
+@router.get("/dismissals/upcoming/fragment")
+def upcoming_dismissals_fragment(
+    request: Request,
+    message: str = "",
+    error: str = "",
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Обновить только виджет ближайших увольнений без перезагрузки журнала."""
+    get_current_user(request)
+    try:
+        upcoming = UpcomingDismissalService(
+            settings,
+            db,
+        ).list_upcoming(limit=20)
+        dismissal_error = error
+    except Exception as exc:
+        db.rollback()
+        upcoming = []
+        dismissal_error = str(exc)
+
+    return templates.TemplateResponse(
+        request,
+        "upcoming_dismissals_fragment.html",
+        _context(
+            request,
+            upcoming_dismissals=upcoming,
+            dismissal_message=message,
+            dismissal_error=dismissal_error,
+        ),
+    )
+
+
 @router.post("/dismissals/upcoming/defer")
 def defer_upcoming_dismissal(
     request: Request,
@@ -239,12 +272,22 @@ def defer_upcoming_dismissal(
             f"Блокировка для {result['fio']} отложена до "
             f"{result['deferred_until'].strftime('%d.%m.%Y')}"
         )
+        if "application/json" in request.headers.get("accept", ""):
+            return JSONResponse(
+                {"ok": True, "message": message},
+                status_code=200,
+            )
         return RedirectResponse(
             f"/?dismissal_message={quote_plus(message)}",
             status_code=303,
         )
     except Exception as exc:
         db.rollback()
+        if "application/json" in request.headers.get("accept", ""):
+            return JSONResponse(
+                {"ok": False, "error": str(exc)},
+                status_code=400,
+            )
         return RedirectResponse(
             f"/?dismissal_error={quote_plus(str(exc))}",
             status_code=303,

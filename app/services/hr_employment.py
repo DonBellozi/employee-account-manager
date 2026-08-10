@@ -108,6 +108,18 @@ def sync_workbook_employment(
         employment.source_name = source_name
         employment.status = "dismissed"
         employment.is_present = False
+
+        # Бизнес-правило: исчезновение из очередной выгрузки означает
+        # увольнение из этой организации. Если реальная прошлая дата уже
+        # была известна, сохраняем ее. Если даты не было либо человек исчез
+        # раньше ранее запланированной даты, фиксируем первый день, когда
+        # отсутствие обнаружено.
+        if (
+            employment.dismissal_date is None
+            or employment.dismissal_date > today
+        ):
+            employment.dismissal_date = today
+
         employment.status_reason = "absent_from_export"
         employment.updated_at = now
         absent += 1

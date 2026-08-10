@@ -557,6 +557,16 @@ class OneCAdditionalImportService:
             employment.fio = record.fio
             employment.status = "dismissed"
             employment.is_present = False
+
+            # Исчезновение из выгрузки = увольнение из этой организации.
+            # Фиксируем дату первого обнаружения отсутствия, но не затираем
+            # уже известную фактическую дату увольнения в прошлом.
+            if (
+                employment.dismissal_date is None
+                or employment.dismissal_date > today
+            ):
+                employment.dismissal_date = today
+
             employment.status_reason = "absent_from_export"
             employment.updated_at = now
             absent += 1

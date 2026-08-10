@@ -30,87 +30,11 @@
     <a class="button secondary" href="/employees/registry">Кадровый реестр</a>
   </div>
 
-  {% if dismissal_message %}
-  <div class="alert success">{{ dismissal_message }}</div>
-  {% endif %}
-  {% if dismissal_error %}
-  <div class="alert error">{{ dismissal_error }}</div>
-  {% endif %}
-
-  {% if upcoming_dismissals %}
-  <div class="table-wrap">
-    <table class="upcoming-table">
-      <thead>
-        <tr>
-          <th>Работник</th>
-          <th>Дата увольнения</th>
-          <th>Занятость</th>
-          <th>Блокировка</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for item in upcoming_dismissals %}
-        <tr>
-          <td>
-            <strong>{{ item.fio }}</strong>
-            <div class="upcoming-meta">
-              {% if item.login %}<code>{{ item.login }}</code>{% endif %}
-              {% if item.email %}<span>{{ item.email }}</span>{% endif %}
-            </div>
-          </td>
-          <td>
-            <strong>{{ item.dismissal_date.strftime('%d.%m.%Y') }}</strong>
-            <div class="muted">{{ item.timing_label }}</div>
-          </td>
-          <td>
-            {% for organization in item.organizations %}
-            <div class="registry-placement">
-              <strong>{{ organization.source_name }}</strong>
-              {% if organization.dismissal_date %}
-              <span class="muted"> – до {{ organization.dismissal_date.strftime('%d.%m.%Y') }}</span>
-              {% endif %}
-              {% for placement in organization.placements %}
-              <div class="muted">{{ placement }}</div>
-              {% endfor %}
-            </div>
-            {% endfor %}
-          </td>
-          <td>
-            {% if item.deferred %}
-            <span class="registry-state checked">Отложено</span>
-            <div class="muted">
-              Не блокировать до {{ item.deferred_until.strftime('%d.%m.%Y') }}
-            </div>
-            {% if item.deferral_operator %}
-            <div class="muted">{{ item.deferral_operator }}</div>
-            {% endif %}
-            {% else %}
-            <span class="registry-state not_checked">По дате увольнения</span>
-            <div class="muted">
-              Не ранее {{ item.effective_block_date.strftime('%d.%m.%Y') }}
-            </div>
-            {% endif %}
-          </td>
-          <td>
-            <form method="post" action="/dismissals/upcoming/defer">
-              <input type="hidden" name="csrf" value="{{ csrf }}">
-              <input type="hidden" name="worker_key" value="{{ item.worker_key }}">
-              <input type="hidden" name="dismissal_date" value="{{ item.dismissal_date.isoformat() }}">
-              <button class="button secondary small" type="submit"
-                      title="Оператор проверил ситуацию. Отложить блокировку еще на семь дней.">
-                {{ 'Еще на неделю' if item.deferred else 'Отложить' }}
-              </button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  <div id="upcoming-dismissals-dynamic"
+       data-fragment-url="/dismissals/upcoming/fragment">
+    {% include "upcoming_dismissals_fragment.html" %}
   </div>
-  {% else %}
-  <div class="upcoming-empty">Ближайших окончательных увольнений нет.</div>
-  {% endif %}
+
 </section>
 
 <section class="card table-wrap journal-card">
@@ -228,4 +152,5 @@
     </tbody>
   </table>
 </section>
+<script src="/static/upcoming_dismissals.js" defer></script>
 {% endblock %}
