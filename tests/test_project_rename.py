@@ -18,8 +18,10 @@ def test_compose_uses_new_runtime_name():
     assert "  employee-offboarding-manager:" in text
     assert "container_name: employee-offboarding-manager" in text
     assert "account-provisioner-data:/app/data" in text
-    assert "./certs:/app/certs:ro" in text
-    assert "./ssh/known_hosts:/app/known_hosts:ro" in text
+    assert "/opt/account-provisioner/certs:/app/certs:ro" in text
+    assert "/opt/account-provisioner/ssh/known_hosts:/app/known_hosts:ro" in text
+    assert "./certs:/app/certs:ro" not in text
+    assert "./ssh/known_hosts:/app/known_hosts:ro" not in text
 
 
 def test_base_template_uses_new_brand():

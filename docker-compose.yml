@@ -107,8 +107,8 @@ services:
 
     volumes:
       - account-provisioner-data:/app/data
-      - ./certs:/app/certs:ro
-      - ./ssh/known_hosts:/app/known_hosts:ro
+      - /opt/account-provisioner/certs:/app/certs:ro
+      - /opt/account-provisioner/ssh/known_hosts:/app/known_hosts:ro
 
     ports:
       - "0.0.0.0:${APP_PORT:-8081}:8000"
