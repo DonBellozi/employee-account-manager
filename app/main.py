@@ -40,7 +40,9 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    if not settings.dry_run and settings.app_secret_key.startswith("change-me"):
+    # В опытной эксплуатации приложение всегда работает с реальными действиями,
+    # поэтому рабочий запуск с шаблонным APP_SECRET_KEY запрещен безусловно.
+    if settings.app_secret_key.startswith("change-me"):
         raise RuntimeError("Замените APP_SECRET_KEY перед рабочим запуском")
     Base.metadata.create_all(bind=engine)
     ensure_compatibility_schema()
@@ -134,4 +136,4 @@ async def security_headers(request, call_next):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "dry_run": settings.dry_run}
+    return {"status": "ok"}

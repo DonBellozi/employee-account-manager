@@ -16,7 +16,13 @@ class Settings(BaseSettings):
     app_base_url: str = "http://localhost:8000"
     app_timezone: str = "Europe/Moscow"
     database_url: str = "sqlite:///./data/app.db"
-    dry_run: bool = True
+
+    # Глобальный безопасный режим снят при переходе проекта в опытную
+    # эксплуатацию. Свойство оставлено только как совместимость со старыми
+    # модулями: оно всегда False и не настраивается через окружение.
+    @property
+    def dry_run(self) -> bool:
+        return False
 
     # Для HTTP оставляем false. После перехода на HTTPS меняем на true.
     session_cookie_secure: bool = False
@@ -30,8 +36,6 @@ class Settings(BaseSettings):
     ad_login_enabled: bool = False
     ad_allowed_group_dn: str = ""
 
-    # Проверки существования могут работать независимо от DRY_RUN.
-    # DRY_RUN блокирует только операции изменения каталога.
     ad_check_enabled: bool = True
     ad_server: str = ""
     ad_port: int = 636
@@ -88,9 +92,9 @@ class Settings(BaseSettings):
     itinvent_query_timeout_seconds: int = 10
     itinvent_issued_location_no: int = 24
 
-    # Получение кадровой выгрузки 1С. На первом этапе настройки read-only:
-    # значения задаются через окружение/Portainer, Web только показывает их
-    # безопасную часть и запускает тесты/DRY_RUN-анализ.
+    # Получение кадровой выгрузки 1С. Настройки задаются через
+    # окружение/Portainer; Web показывает безопасную часть и запускает
+    # проверки/предварительный анализ без изменения внешних систем.
     onec_imap_host: str = ""
     onec_imap_port: int = 993
     onec_imap_ssl: bool = True

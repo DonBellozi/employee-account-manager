@@ -12,7 +12,6 @@ services:
       APP_TIMEZONE: "Europe/Moscow"
       TZ: "Europe/Moscow"
       DATABASE_URL: "sqlite:///./data/app.db"
-      DRY_RUN: "${DRY_RUN:-true}"
 
       SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-false}"
       SESSION_COOKIE_SAMESITE: "${SESSION_COOKIE_SAMESITE:-lax}"
