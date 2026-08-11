@@ -1,12 +1,16 @@
+# Legacy Compose project-id is pinned only to preserve the existing named volume
+# when the source directory is renamed. Runtime service/container use the new name.
+name: account-provisioner
+
 services:
-  account-provisioner:
+  employee-offboarding-manager:
     build:
       context: .
-    container_name: account-provisioner
+    container_name: employee-offboarding-manager
     restart: unless-stopped
 
     environment:
-      APP_NAME: "${APP_NAME:-Управление учетными записями}"
+      APP_NAME: "${APP_NAME:-Управление жизненным циклом учетных записей}"
       APP_SECRET_KEY: "${APP_SECRET_KEY:-change-me-to-a-long-random-secret}"
       APP_BASE_URL: "${APP_BASE_URL:-http://localhost:8081}"
       APP_TIMEZONE: "Europe/Moscow"
@@ -15,7 +19,7 @@ services:
 
       SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-false}"
       SESSION_COOKIE_SAMESITE: "${SESSION_COOKIE_SAMESITE:-lax}"
-      SESSION_COOKIE_NAME: "${SESSION_COOKIE_NAME:-account_provisioner_session}"
+      SESSION_COOKIE_NAME: "${SESSION_COOKIE_NAME:-employee_offboarding_manager_session}"
 
       BOOTSTRAP_ADMIN_USERNAME: "${BOOTSTRAP_ADMIN_USERNAME:-admin}"
       BOOTSTRAP_ADMIN_PASSWORD: "${BOOTSTRAP_ADMIN_PASSWORD:-ChangeMeNow!123}"
@@ -103,8 +107,8 @@ services:
 
     volumes:
       - account-provisioner-data:/app/data
-      - /opt/account-provisioner/certs:/app/certs:ro
-      - /opt/account-provisioner/ssh/known_hosts:/app/known_hosts:ro
+      - ./certs:/app/certs:ro
+      - ./ssh/known_hosts:/app/known_hosts:ro
 
     ports:
       - "0.0.0.0:${APP_PORT:-8081}:8000"
@@ -133,4 +137,6 @@ networks:
         - subnet: fd42:8086:506:2::/64
 
 volumes:
+  # Legacy volume identifier is intentionally retained so the existing
+  # SQLite database is not replaced by an empty volume during rename.
   account-provisioner-data:

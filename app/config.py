@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_name: str = "Управление учетными записями"
+    app_name: str = "Управление жизненным циклом учетных записей"
     app_secret_key: str = "change-me-to-a-long-secret"
     app_base_url: str = "http://localhost:8000"
     app_timezone: str = "Europe/Moscow"
@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # Для HTTP оставляем false. После перехода на HTTPS меняем на true.
     session_cookie_secure: bool = False
     session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
-    session_cookie_name: str = "account_provisioner_session"
+    session_cookie_name: str = "employee_offboarding_manager_session"
 
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: str = "ChangeMeNow!123"
