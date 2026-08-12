@@ -10,7 +10,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import AuditLog
+from app.models import AuditLog, HRSourceRecord
 from app.models_dismissal_lifecycle import (
     FinalDismissalBlockRun,
     FinalDismissalBlockTarget,
@@ -29,6 +29,7 @@ REPORT_TIME_LABEL = "08:45"
 MAX_TELEGRAM_CHARS = 3900
 ARM_ACTION = "telegram_zimbra_daily_report_armed"
 REPORT_ACTION = "telegram_zimbra_daily_report"
+DISMISSAL_REPORTED_ACTION = "telegram_final_dismissal_reported"
 EVENT_TYPE = "zimbra_daily_report"
 DISMISSAL_RE = re.compile(r"Увольнение\s+(\d{2}\.\d{2}\.\d{4})", re.IGNORECASE)
 
@@ -81,6 +82,7 @@ class ZimbraDailyReport:
     disabled: tuple[DisabledEntry, ...]
     deleted: tuple[DeletedEntry, ...]
     retention_months: int
+    dismissal_run_ids: tuple[int, ...] = ()
 
     @property
     def has_events(self) -> bool:
@@ -146,12 +148,27 @@ class TelegramZimbraDailyReportService:
             return 12
         return max(1, int(row.retention_months or 12))
 
+    def _reported_dismissal_run_ids(self) -> set[int]:
+        rows = self.db.scalars(
+            select(AuditLog).where(AuditLog.action == DISMISSAL_REPORTED_ACTION)
+        ).all()
+        result: set[int] = set()
+        for row in rows:
+            try:
+                result.add(int(str(row.target or "").strip()))
+            except (TypeError, ValueError):
+                continue
+        return result
+
     def _dismissal_closures(
         self,
         report_date: date,
         start_utc: datetime,
         end_utc: datetime,
-    ) -> tuple[list[DisabledEntry], set[str], set[str]]:
+    ) -> tuple[list[DisabledEntry], set[str], set[str], tuple[int, ...]]:
+        # Увольнение является общим offboarding-событием: в этот раздел
+        # попадает человек, если за отчетный день реально изменился хотя бы
+        # один внешний объект – AD (disabled) или Zimbra (closed).
         rows = self.db.execute(
             select(FinalDismissalBlockTarget, FinalDismissalBlockRun)
             .join(
@@ -159,36 +176,91 @@ class TelegramZimbraDailyReportService:
                 FinalDismissalBlockRun.id == FinalDismissalBlockTarget.run_id,
             )
             .where(
-                FinalDismissalBlockTarget.system == "zimbra",
                 FinalDismissalBlockTarget.status == "completed",
-                FinalDismissalBlockTarget.last_result == "closed",
+                FinalDismissalBlockTarget.last_result.in_(("disabled", "closed")),
                 FinalDismissalBlockTarget.completed_at >= start_utc,
                 FinalDismissalBlockTarget.completed_at < end_utc,
             )
             .order_by(FinalDismissalBlockTarget.completed_at, FinalDismissalBlockTarget.id)
         ).all()
 
+        already_reported = self._reported_dismissal_run_ids()
+        runs: dict[int, FinalDismissalBlockRun] = {}
+        for _target, run in rows:
+            if run.id not in already_reported:
+                runs.setdefault(run.id, run)
+        if not runs:
+            return [], set(), set(), ()
+
+        all_targets = list(
+            self.db.scalars(
+                select(FinalDismissalBlockTarget)
+                .where(FinalDismissalBlockTarget.run_id.in_(tuple(runs)))
+                .order_by(FinalDismissalBlockTarget.run_id, FinalDismissalBlockTarget.id)
+            ).all()
+        )
+        targets_by_run: dict[int, list[FinalDismissalBlockTarget]] = {}
+        for target in all_targets:
+            targets_by_run.setdefault(target.run_id, []).append(target)
+
         result: list[DisabledEntry] = []
         seen_emails: set[str] = set()
         seen_zimbra_ids: set[str] = set()
-        for target, run in rows:
-            email = str(target.target_identifier or "").strip().lower()
-            zimbra_id = str(target.stable_id or "").strip().lower()
+        included_run_ids: list[int] = []
+
+        for run_id, run in runs.items():
+            targets = targets_by_run.get(run_id, [])
+            zimbra_targets = [item for item in targets if item.system == "zimbra"]
+            email = next(
+                (
+                    str(item.target_identifier or "").strip().lower()
+                    for item in zimbra_targets
+                    if "@" in str(item.target_identifier or "")
+                ),
+                "",
+            )
+            if not email:
+                record = self.db.scalar(
+                    select(HRSourceRecord)
+                    .where(
+                        HRSourceRecord.worker_key == run.worker_key,
+                        HRSourceRecord.corporate_email != "",
+                    )
+                    .order_by(HRSourceRecord.is_present.desc(), HRSourceRecord.id.desc())
+                    .limit(1)
+                )
+                if record is not None:
+                    email = str(record.corporate_email or "").strip().lower()
+
+            if not email:
+                email = next(
+                    (
+                        str(item.target_identifier or "").strip().lower()
+                        for item in targets
+                        if item.system == "ad" and str(item.target_identifier or "").strip()
+                    ),
+                    str(run.fio or "").strip(),
+                )
             if not email:
                 continue
-            if email in seen_emails or (zimbra_id and zimbra_id in seen_zimbra_ids):
-                continue
-            seen_emails.add(email)
-            if zimbra_id:
-                seen_zimbra_ids.add(zimbra_id)
+
+            for item in zimbra_targets:
+                zimbra_id = str(item.stable_id or "").strip().lower()
+                if zimbra_id:
+                    seen_zimbra_ids.add(zimbra_id)
+            if "@" in email:
+                seen_emails.add(email)
+
             result.append(
                 DisabledEntry(
                     email=email,
-                    reason=f"Увольнение {run.dismissal_date.strftime('%d.%m.%Y')}",
+                    reason=f"увольнение {run.dismissal_date.strftime('%d.%m.%Y')}",
                     reason_kind="dismissal",
                 )
             )
-        return result, seen_emails, seen_zimbra_ids
+            included_run_ids.append(run_id)
+
+        return result, seen_emails, seen_zimbra_ids, tuple(included_run_ids)
 
     def _latest_close_event(
         self,
@@ -336,10 +408,12 @@ class TelegramZimbraDailyReportService:
     def collect(self, report_date: date) -> ZimbraDailyReport:
         start_utc, end_utc = local_day_bounds(report_date, self.settings.app_timezone)
 
-        disabled, seen_emails, seen_zimbra_ids = self._dismissal_closures(
-            report_date,
-            start_utc,
-            end_utc,
+        disabled, seen_emails, seen_zimbra_ids, dismissal_run_ids = (
+            self._dismissal_closures(
+                report_date,
+                start_utc,
+                end_utc,
+            )
         )
         disabled.extend(
             self._lifecycle_closures(
@@ -365,24 +439,14 @@ class TelegramZimbraDailyReportService:
             disabled=tuple(disabled),
             deleted=tuple(deleted),
             retention_months=self._observer_retention_months(),
+            dismissal_run_ids=dismissal_run_ids,
         )
 
     @staticmethod
     def _deletion_header(retention_months: int) -> str:
-        if retention_months == 12:
-            return (
-                "Удалены следующие учетные записи по сроку давности "
-                "(не используются более одного (1) года):"
-            )
-        if retention_months % 12 == 0:
-            years = retention_months // 12
-            return (
-                "Удалены следующие учетные записи по сроку давности "
-                f"(не используются более {years} г.):"
-            )
         return (
-            "Удалены следующие учетные записи по сроку давности "
-            f"(не используются более {retention_months} мес.):"
+            "Удалены почтовые учетные записи по сроку давности\n"
+            f"(не используются более {retention_months} месяцев):"
         )
 
     @staticmethod
@@ -391,27 +455,44 @@ class TelegramZimbraDailyReportService:
 
     def _sections(self, report: ZimbraDailyReport) -> list[tuple[str, list[str]]]:
         sections: list[tuple[str, list[str]]] = []
-        if report.disabled:
-            header = (
-                "Отключены следующие учетные записи за "
-                f"{report.report_date.strftime('%d.%m.%Y')}:"
+        dismissed = [item for item in report.disabled if item.reason_kind == "dismissal"]
+        inactive = [item for item in report.disabled if item.reason_kind == "inactive"]
+
+        if dismissed:
+            sections.append(
+                (
+                    "Отключены учетные записи уволенных работников:",
+                    [
+                        f"• {self._safe_line(item.email)} – {self._safe_line(item.reason)}"
+                        for item in dismissed
+                    ],
+                )
             )
-            lines = [
-                f"• {self._safe_line(item.email)} – {self._safe_line(item.reason)}"
-                for item in report.disabled
-            ]
-            sections.append((header, lines))
+
+        if inactive:
+            sections.append(
+                (
+                    "Отключены почтовые учетные записи по неактивности:",
+                    [
+                        f"• {self._safe_line(item.email)} – {self._safe_line(item.reason)}"
+                        for item in inactive
+                    ],
+                )
+            )
 
         if report.deleted:
-            header = self._deletion_header(report.retention_months)
-            lines = [
+            sections.append(
                 (
-                    f"• {self._safe_line(item.email)} "
-                    f"– удалено: {item.deleted_on.strftime('%d.%m.%Y')}"
+                    self._deletion_header(report.retention_months),
+                    [
+                        (
+                            f"• {self._safe_line(item.email)} "
+                            f"– удалено: {item.deleted_on.strftime('%d.%m.%Y')}"
+                        )
+                        for item in report.deleted
+                    ],
                 )
-                for item in report.deleted
-            ]
-            sections.append((header, lines))
+            )
         return sections
 
     def render_messages(self, report: ZimbraDailyReport) -> list[str]:
@@ -419,7 +500,7 @@ class TelegramZimbraDailyReportService:
             return []
 
         title = (
-            "📋 <b>Учетные записи Zimbra за "
+            "📋 <b>Изменения учетных записей за "
             f"{report.report_date.strftime('%d.%m.%Y')}</b>"
         )
         chunks: list[str] = []
@@ -482,6 +563,17 @@ class TelegramZimbraDailyReportService:
                 ),
             )
         )
+        if result == "queued":
+            for run_id in report.dismissal_run_ids:
+                self.db.add(
+                    AuditLog(
+                        actor="system",
+                        action=DISMISSAL_REPORTED_ACTION,
+                        target=str(run_id),
+                        result="queued",
+                        details=f"report_date={report.report_date.isoformat()}",
+                    )
+                )
         self.db.commit()
 
     def enqueue_due(self, *, now: datetime | None = None) -> dict[str, int | str]:

@@ -145,15 +145,16 @@ def test_collects_actual_dismissal_inactive_and_delete_actions():
         "dismissed@domain.ru",
         "inactive@domain.com",
     ]
-    assert report.disabled[0].reason == "Увольнение 11.08.2026"
+    assert report.disabled[0].reason == "увольнение 11.08.2026"
     assert report.disabled[1].reason == "неактивна с 10.01.2026"
     assert [x.email for x in report.deleted] == ["deleted@domain.com"]
 
     text = "\n".join(svc.render_messages(report))
-    assert "Отключены следующие учетные записи за 11.08.2026" in text
-    assert "Увольнение 11.08.2026" in text
+    assert "Отключены учетные записи уволенных работников:" in text
+    assert "Отключены почтовые учетные записи по неактивности:" in text
+    assert "увольнение 11.08.2026" in text
     assert "неактивна с 10.01.2026" in text
-    assert "не используются более одного (1) года" in text
+    assert "не используются более 12 месяцев" in text
     assert "удалено: 11.08.2026" in text
 
 
@@ -256,4 +257,136 @@ def test_report_is_split_without_exceeding_telegram_limit():
     messages = svc.render_messages(report)
     assert len(messages) > 1
     assert all(len(item) <= MAX_TELEGRAM_CHARS for item in messages)
-    assert all("Отключены следующие учетные записи" in item for item in messages)
+    assert all("Отключены почтовые учетные записи по неактивности" in item for item in messages)
+
+
+def test_ad_only_change_still_reports_dismissal_once_with_zimbra_email():
+    db = db_session()
+    enable_telegram(db)
+    svc = TelegramZimbraDailyReportService(settings(), db)
+
+    run = FinalDismissalBlockRun(
+        worker_key="worker-ad-only",
+        dismissal_date=date(2026, 8, 11),
+        effective_block_date=date(2026, 8, 11),
+        fio="Петров Петр",
+        status="partial",
+    )
+    db.add(run)
+    db.flush()
+    db.add_all(
+        [
+            FinalDismissalBlockTarget(
+                run_id=run.id,
+                system="ad",
+                target_key="ad:guid-1",
+                target_identifier="petrov.pp",
+                stable_id="guid-1",
+                status="completed",
+                last_result="disabled",
+                completed_at=datetime(2026, 8, 11, 15, 0, tzinfo=timezone.utc),
+            ),
+            FinalDismissalBlockTarget(
+                run_id=run.id,
+                system="zimbra",
+                target_key="zimbra:z1",
+                target_identifier="petrov.pp@domain.ru",
+                stable_id="z1",
+                status="already_completed",
+                last_result="already_closed",
+                completed_at=datetime(2026, 8, 11, 15, 0, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+    db.commit()
+
+    report = svc.collect(date(2026, 8, 11))
+    assert len(report.disabled) == 1
+    assert report.disabled[0].email == "petrov.pp@domain.ru"
+    assert report.disabled[0].reason == "увольнение 11.08.2026"
+    assert report.dismissal_run_ids == (run.id,)
+
+
+def test_deletion_header_uses_month_setting_without_year_conversion():
+    db = db_session()
+    enable_telegram(db)
+    row = db.get(ZimbraObserverSettings, 1)
+    row.retention_months = 18
+    db.commit()
+
+    db.add(
+        ZimbraLifecycleAction(
+            run_id=30,
+            account_key="z18",
+            zimbra_id="z18",
+            primary_email="old18@domain.com",
+            recommendation="archive_delete",
+            action="delete",
+            status="success",
+            message="Удалена.",
+            completed_at=datetime(2026, 8, 11, 6, 0, tzinfo=timezone.utc),
+        )
+    )
+    db.commit()
+
+    report = TelegramZimbraDailyReportService(settings(), db).collect(date(2026, 8, 11))
+    text = "\n".join(TelegramZimbraDailyReportService(settings(), db).render_messages(report))
+    assert "не используются более 18 месяцев" in text
+    assert "года" not in text
+
+
+def test_reported_dismissal_run_is_not_repeated_on_later_target_completion():
+    db = db_session()
+    enable_telegram(db)
+    svc = TelegramZimbraDailyReportService(settings(), db)
+
+    run = FinalDismissalBlockRun(
+        worker_key="worker-repeat",
+        dismissal_date=date(2026, 8, 11),
+        effective_block_date=date(2026, 8, 11),
+        fio="Повтор Повторов",
+        status="partial",
+    )
+    db.add(run)
+    db.flush()
+    db.add(
+        FinalDismissalBlockTarget(
+            run_id=run.id,
+            system="ad",
+            target_key="ad:g2",
+            target_identifier="repeat.rr",
+            stable_id="g2",
+            status="completed",
+            last_result="disabled",
+            completed_at=datetime(2026, 8, 11, 6, 0, tzinfo=timezone.utc),
+        )
+    )
+    db.add(
+        FinalDismissalBlockTarget(
+            run_id=run.id,
+            system="zimbra",
+            target_key="zimbra:z2",
+            target_identifier="repeat.rr@domain.ru",
+            stable_id="z2",
+            status="pending",
+        )
+    )
+    db.commit()
+
+    first = svc.collect(date(2026, 8, 11))
+    assert first.dismissal_run_ids == (run.id,)
+    svc._mark_done(first, result="queued", chunks=1)
+
+    zimbra = db.scalar(
+        select(FinalDismissalBlockTarget).where(
+            FinalDismissalBlockTarget.run_id == run.id,
+            FinalDismissalBlockTarget.system == "zimbra",
+        )
+    )
+    zimbra.status = "completed"
+    zimbra.last_result = "closed"
+    zimbra.completed_at = datetime(2026, 8, 12, 6, 0, tzinfo=timezone.utc)
+    db.commit()
+
+    second = svc.collect(date(2026, 8, 12))
+    assert all(item.reason_kind != "dismissal" for item in second.disabled)

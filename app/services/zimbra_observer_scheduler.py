@@ -11,6 +11,7 @@ from app.config import Settings
 from app.models_zimbra_observer import ZimbraObservationRun
 from app.services.zimbra_observer import as_utc
 from app.services.zimbra_protection import ManagedZimbraObserverService
+from app.services.zimbra_scheduled_lifecycle import ZimbraScheduledLifecycleExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ def scheduled_datetime(
 
 
 class ZimbraObserverScheduler:
-    """Ежедневная read-only проверка с catch-up после запуска контейнера."""
+    """Ежедневная проверка и автоисполнение разрешенного lifecycle с catch-up."""
 
     POLL_SECONDS = 30
     FAILURE_RETRY_MINUTES = 10
@@ -108,6 +109,34 @@ class ZimbraObserverScheduler:
                                 result.archive_candidates,
                                 result.event_count,
                             )
+
+                            # После успешного планового наблюдения используем
+                            # уже полученный свежий снимок для автоматического
+                            # исполнения разрешенных действий. Повторный gaa -v
+                            # не запускается. Warning/failed никогда не ведут к
+                            # внешним изменениям.
+                            if result.status == "success":
+                                try:
+                                    lifecycle_run = ZimbraScheduledLifecycleExecutor(
+                                        self.settings,
+                                        db,
+                                    ).execute_from_observation(result.id)
+                                    if lifecycle_run is not None:
+                                        logger.info(
+                                            "Автоисполнение Zimbra: run=%s status=%s "
+                                            "closed=%s backup=%s deleted=%s failed=%s",
+                                            lifecycle_run.id,
+                                            lifecycle_run.status,
+                                            lifecycle_run.closed_success,
+                                            lifecycle_run.backup_success,
+                                            lifecycle_run.delete_success,
+                                            lifecycle_run.failed_count,
+                                        )
+                                except Exception:
+                                    logger.exception(
+                                        "Автоматическое исполнение жизненного цикла "
+                                        "Zimbra завершилось ошибкой"
+                                    )
             except Exception:
                 logger.exception("Фоновая проверка Zimbra завершилась ошибкой")
 

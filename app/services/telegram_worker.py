@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramNotificationWorker:
-    """Фоновая доставка сообщений и постановка утреннего Zimbra-отчета."""
+    """Фоновая доставка и постановка утреннего отчета по учетным записям."""
 
     def __init__(
         self,

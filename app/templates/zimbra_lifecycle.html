@@ -6,7 +6,7 @@
     <div>
       <h1>Жизненный цикл Zimbra</h1>
       <p class="muted">
-        DRY RUN-план и поэтапное ручное исполнение рекомендаций наблюдателя.
+        DRY RUN-план, ручное исполнение и автоматический утренний цикл рекомендаций наблюдателя.
         Политика едина для всех почтовых доменов на сервере Zimbra.
       </p>
     </div>
@@ -37,8 +37,8 @@
   {% else %}
   <div class="alert warning">
     <strong>Внимание: разрешены реальные действия.</strong>
-    Кнопка «Выполнить разрешенные действия» сначала повторно проверит Zimbra и
-    исключения, затем исполнит только включенные ниже этапы.
+    После успешной плановой проверки автоматический цикл исполнит разрешенные
+    этапы. Ручной запуск остается доступным и перед исполнением выполняет новую проверку.
   </div>
   {% endif %}
 
@@ -47,8 +47,10 @@
       <div>
         <h2>Разрешения исполнителя</h2>
         <p class="muted">
-          Планировщик автоматического исполнения пока не подключен – действия
-          запускаются только вручную этой страницей.
+          После успешной плановой проверки Zimbra автоматический цикл использует
+          свежий снимок без повторного полного обхода. Закрытие выполняется при
+          разрешенном закрытии; Backup + удаление автоматически запускаются только
+          когда одновременно разрешены оба этапа.
         </p>
       </div>
       <span class="integration-badge{% if lifecycle.any_action_enabled %} active{% endif %}">
@@ -212,7 +214,7 @@
     <div class="observer-card-heading">
       <div>
         <h2>История запусков исполнителя</h2>
-        <p class="muted">Последние 20 ручных планов и исполнений.</p>
+        <p class="muted">Последние 20 ручных и автоматических запусков.</p>
       </div>
     </div>
     <table class="journal-table">
@@ -237,7 +239,7 @@
             {{ item.started_at|app_datetime('%d.%m.%Y') }}
             <span>{{ item.started_at|app_datetime('%H:%M:%S') }}</span>
           </td>
-          <td><a href="/settings/zimbra-lifecycle?run_id={{ item.id }}">{{ 'Исполнение' if item.mode == 'execute' else 'DRY RUN' }}</a></td>
+          <td><a href="/settings/zimbra-lifecycle?run_id={{ item.id }}">{% if item.mode == 'execute' and item.trigger == 'scheduled' %}Автоисполнение{% elif item.mode == 'execute' %}Исполнение{% else %}DRY RUN{% endif %}</a></td>
           <td>{{ item.status }}</td>
           <td>{{ item.planned_close }}</td>
           <td>{{ item.planned_archive }}</td>
