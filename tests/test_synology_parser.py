@@ -81,3 +81,58 @@ def test_bool_parser_handles_enabled_as_not_disabled():
     assert SynologyService._as_bool("expired") is True
     assert SynologyService._as_bool("enabled") is False
     assert SynologyService._as_bool("0") is False
+
+
+
+def test_detail_parser_reads_real_dsm_user_mail_format():
+    output = """
+User Name   : [baranov.gb]
+User Type   : [AUTH_LOCAL]
+User uid    : [1531]
+Primary gid : [100]
+Fullname    : [Баранов Геннадий Борисович]
+User Dir    : [/var/services/homes/baranov.gb]
+User Shell  : [/sbin/nologin]
+Expired     : [true]
+User Mail   : [baranov.gb@roskapstroy.com]
+Alloc Size  : [198]
+Member Of   : [1]
+(100) users
+"""
+    row = SynologyService._parse_detail("baranov.gb", output)
+    assert row.login == "baranov.gb"
+    assert row.stable_id == "uid:1531"
+    assert row.email == "baranov.gb@roskapstroy.com"
+    assert row.description == "Баранов Геннадий Борисович"
+    assert row.is_active is False
+    assert row.status == "expired"
+
+
+def test_connection_skips_unreadable_first_normal_account(monkeypatch):
+    service = SynologyService(types.SimpleNamespace())
+
+    class DummyClient:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "_client", lambda: DummyClient())
+
+    def execute(_client, args, *, allow_nonzero=False):
+        if args == ["--enum", "local"]:
+            return "admin\nbroken.user\nbaranov.gb"
+        if args == ["--get", "broken.user"]:
+            raise RuntimeError("SYNOUserGet failed. synoerr=[0x1D00]")
+        if args == ["--get", "baranov.gb"]:
+            return """
+User Name: [baranov.gb]
+User uid: [1531]
+Fullname: [Баранов Геннадий Борисович]
+Expired: [true]
+User Mail: [baranov.gb@roskapstroy.com]
+"""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(service, "_execute", execute)
+    message = service.test_connection()
+    assert "локальных пользователей 3" in message
+    assert "чтение карточек работает (baranov.gb)" in message

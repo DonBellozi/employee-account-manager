@@ -279,7 +279,13 @@ class SynologyService:
             "name",
         ) or login
         uid = cls._first(fields, "user uid", "uid", "user id")
-        email = cls._first(fields, "email", "mail", "e mail").strip().lower()
+        email = cls._first(
+            fields,
+            "user mail",
+            "email",
+            "mail",
+            "e mail",
+        ).strip().lower()
         description = cls._first(
             fields,
             "description",
@@ -392,16 +398,48 @@ class SynologyService:
             client.close()
 
     def test_connection(self) -> str:
+        """Проверить SSH/synouser без ложного отказа на особой учетке DSM.
+
+        Успешный `--enum local` уже подтверждает доступность интеграции.
+        `--get` дополнительно пробуем на нескольких обычных локальных учетках,
+        потому что отдельные системные/служебные записи DSM могут перечисляться,
+        но не читаться через SYNOUserGet.
+        """
         client = self._client()
         try:
             enum_output = self._execute(client, ["--enum", "local"])
             logins = self._parse_enum_output(enum_output)
-            details_ok = 0
-            if logins:
-                self._execute(client, ["--get", logins[0]])
-                details_ok = 1
-            suffix = ", чтение карточки работает" if details_ok else ""
-            return f"Synology DSM доступен: локальных пользователей {len(logins)}{suffix}."
+            candidates = [
+                login
+                for login in logins
+                if login.casefold() not in self.SYSTEM_LOGINS
+            ][:10]
+
+            detail_errors = 0
+            for login in candidates:
+                try:
+                    detail = self._execute(client, ["--get", login])
+                    parsed = self._parse_detail(login, detail)
+                    if parsed.login:
+                        return (
+                            f"Synology DSM доступен: локальных пользователей {len(logins)}, "
+                            f"чтение карточек работает ({parsed.login})."
+                        )
+                except Exception:
+                    detail_errors += 1
+
+            if not logins:
+                return "Synology DSM доступен: локальных пользователей не найдено."
+            if not candidates:
+                return (
+                    f"Synology DSM доступен: локальных пользователей {len(logins)}; "
+                    "список читается."
+                )
+            return (
+                f"Synology DSM доступен: локальных пользователей {len(logins)}; "
+                f"список читается, но тестовые карточки не прочитаны "
+                f"({detail_errors} из {len(candidates)})."
+            )
         finally:
             client.close()
 
@@ -414,16 +452,23 @@ class SynologyService:
             logins = self._parse_enum_output(enum_output)
             sample_login = ""
             sample_detail = ""
-            for login in logins:
-                if login.casefold() in self.SYSTEM_LOGINS:
-                    continue
-                sample_login = login
-                sample_detail = self._execute(
-                    client,
-                    ["--get", login],
-                    allow_nonzero=True,
-                )
-                break
+            first_error = ""
+            for login in [
+                item for item in logins
+                if item.casefold() not in self.SYSTEM_LOGINS
+            ][:10]:
+                try:
+                    detail = self._execute(client, ["--get", login])
+                    parsed = self._parse_detail(login, detail)
+                    if parsed.login:
+                        sample_login = login
+                        sample_detail = detail
+                        break
+                except Exception as exc:
+                    if not first_error:
+                        first_error = f"{login}: {exc}"
+            if not sample_detail and first_error:
+                sample_detail = first_error
             return SynologyDiagnostic(
                 enum_output=enum_output[:12000],
                 help_output=help_output[:12000],
