@@ -92,6 +92,23 @@ class Settings(BaseSettings):
     itinvent_query_timeout_seconds: int = 10
     itinvent_issued_location_no: int = 24
 
+    # Synology DSM. Первый этап интеграции намеренно read-only: приложение
+    # получает локальные учетные записи по SSH/synouser, классифицирует их и
+    # рассчитывает желаемые lifecycle-действия, но не меняет DSM.
+    synology_enabled: bool = False
+    synology_ssh_host: str = ""
+    synology_ssh_port: int = 22
+    synology_ssh_user: str = "provisioner"
+    synology_ssh_auth: Literal["key", "password", "auto"] = "auto"
+    synology_ssh_private_key: str = "/run/secrets/synology_ssh_key"
+    synology_ssh_password: str = ""
+    synology_ssh_password_file: str = ""
+    synology_ssh_known_hosts: str = "/app/known_hosts"
+    synology_ssh_use_sudo: bool = True
+    synology_synouser_command: str = "synouser"
+    synology_connect_timeout_seconds: int = 10
+    synology_command_timeout_seconds: int = 20
+
     # Получение кадровой выгрузки 1С. Настройки задаются через
     # окружение/Portainer; Web показывает безопасную часть и запускает
     # проверки/предварительный анализ без изменения внешних систем.

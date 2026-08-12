@@ -36,6 +36,13 @@
   });
 
   addCard({
+    key: 'synology',
+    href: '/settings/synology',
+    titleText: 'Synology DSM',
+    descriptionText: 'Локальные учетки, миграция на домен, внешние доступы и исключения.',
+  });
+
+  addCard({
     key: 'zimbra-protection',
     href: '/settings/zimbra-protection',
     titleText: 'Защищенные учетные записи Zimbra',

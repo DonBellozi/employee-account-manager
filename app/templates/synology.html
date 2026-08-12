@@ -1,0 +1,364 @@
+{% extends "base.html" %}
+{% block title %}Synology DSM{% endblock %}
+{% block content %}
+<div class="heading-row">
+  <div>
+    <h1>Synology DSM</h1>
+    <p class="muted">
+      Контроль локальных учетных записей, переход сотрудников на доменную авторизацию,
+      внешние доступы и исключения.
+    </p>
+  </div>
+  <a class="button secondary" href="/settings">Назад к настройкам</a>
+</div>
+
+{% if saved %}<div class="alert success">Политика Synology сохранена.</div>{% endif %}
+{% if exception_saved %}<div class="alert success">Исключение сохранено.</div>{% endif %}
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+<section class="card integration-card integration-card-wide">
+  <div class="integration-card-heading">
+    <div>
+      <h2>Подключение</h2>
+      <span class="integration-badge{% if synology.connection.enabled and synology.connection.configured %} active{% endif %}"
+            id="synology-badge">
+        {% if synology.connection.enabled and synology.connection.configured %}Используется{% elif synology.connection.configured %}Отключено{% else %}Не настроено{% endif %}
+      </span>
+    </div>
+    <div class="integration-card-actions">
+      <button class="button secondary" type="button" id="synology-test">Проверить подключение</button>
+      <button class="button" type="button" id="synology-sync"{% if not synology.connection.enabled %} disabled{% endif %}>Синхронизировать сейчас</button>
+      <button class="button secondary" type="button" id="synology-diagnostics">Диагностика CLI</button>
+    </div>
+  </div>
+
+  <dl class="integration-details">
+    <dt>Включено</dt><dd>{{ 'Да' if synology.connection.enabled else 'Нет' }}</dd>
+    <dt>Сервер</dt><dd>{{ synology.connection.host }}</dd>
+    <dt>Порт</dt><dd>{{ synology.connection.port }}</dd>
+    <dt>Пользователь SSH</dt><dd>{{ synology.connection.user }}</dd>
+    <dt>Авторизация</dt><dd>{{ synology.connection.auth }}</dd>
+    <dt>known_hosts</dt><dd>{{ synology.connection.known_hosts }}</dd>
+    <dt>sudo -n</dt><dd>{{ synology.connection.sudo }}</dd>
+    <dt>CLI</dt><dd><code>{{ synology.connection.command }}</code></dd>
+    <dt>Режим</dt><dd><strong>{{ synology.connection.mode }}</strong></dd>
+  </dl>
+
+  <div class="alert warning">
+    <strong>Только чтение.</strong> Первый этап намеренно только читает DSM. Приложение уже классифицирует учетки,
+    рассчитывает требуемые действия и даты удаления, но пока не меняет срок,
+    не отключает и не удаляет пользователей Synology.
+  </div>
+
+  <div class="integration-test-result" id="synology-result"></div>
+  <details id="synology-diagnostics-result" hidden>
+    <summary>Вывод диагностики Synology CLI</summary>
+    <h3>synouser --help</h3>
+    <pre id="synology-help-output"></pre>
+    <h3>synouser --enum local</h3>
+    <pre id="synology-enum-output"></pre>
+    <h3 id="synology-sample-heading">Пример карточки</h3>
+    <pre id="synology-sample-output"></pre>
+  </details>
+</section>
+
+<section class="card integration-card integration-card-wide">
+  <div class="integration-card-heading">
+    <div>
+      <h2>Политика</h2>
+      <span class="integration-badge active">Наблюдение</span>
+    </div>
+  </div>
+
+  <form method="post" action="/settings/synology/policy">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="form-grid">
+      <label>
+        <span>Проверка DSM, минут</span>
+        <input type="number" name="sync_interval_minutes" min="1" max="1440" value="{{ synology.control.sync_interval_minutes }}" required>
+      </label>
+      <label>
+        <span>Новых сотрудников за цикл</span>
+        <input type="number" name="migration_batch_size" min="1" max="100" value="{{ synology.control.migration_batch_size }}" required>
+      </label>
+      <label>
+        <span>Период миграционного цикла, дней</span>
+        <input type="number" name="migration_interval_days" min="1" max="365" value="{{ synology.control.migration_interval_days }}" required>
+      </label>
+      <label>
+        <span>Локальная учетка сотрудника, месяцев</span>
+        <input type="number" name="internal_expiry_months" min="1" max="24" value="{{ synology.control.internal_expiry_months }}" required>
+      </label>
+      <label>
+        <span>Внешняя учетка, месяцев</span>
+        <input type="number" name="external_expiry_months" min="1" max="24" value="{{ synology.control.external_expiry_months }}" required>
+      </label>
+      <label>
+        <span>Удаление после увольнения, месяцев</span>
+        <input type="number" name="delete_after_months" min="1" max="60" value="{{ synology.control.delete_after_months }}" required>
+      </label>
+    </div>
+    <p class="muted">
+      После включения write-этапа случайная выборка будет запускать по
+      {{ synology.control.migration_batch_size }} локальных учеток раз в
+      {{ synology.control.migration_interval_days }} дн. Текущий этап ничего в DSM не меняет.
+    </p>
+    <div class="integration-card-actions">
+      <button class="button" type="submit">Сохранить</button>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Состояние</h2>
+  <div class="onec-diff-grid">
+    <div><span>Получено</span><strong>{{ synology.counts.total }}</strong></div>
+    <div><span>Наши действующие</span><strong>{{ synology.counts.internal_active }}</strong></div>
+    <div><span>Наши уволенные</span><strong>{{ synology.counts.internal_dismissed }}</strong></div>
+    <div><span>Внешние</span><strong>{{ synology.counts.external }}</strong></div>
+    <div><span>Не определены</span><strong>{{ synology.counts.unknown }}</strong></div>
+    <div><span>Исключения</span><strong>{{ synology.counts.exceptions }}</strong></div>
+    <div><span>Защищенные DSM</span><strong>{{ synology.counts.protected }}</strong></div>
+    <div><span>Требуют действий</span><strong>{{ synology.counts.actions }}</strong></div>
+  </div>
+
+  <dl class="integration-details">
+    <dt>Наши домены</dt><dd>{{ synology.managed_domains|join(', ') if synology.managed_domains else '–' }}</dd>
+    <dt>Последняя синхронизация</dt>
+    <dd>
+      {% if synology.latest %}
+        {{ synology.latest.completed_at|app_datetime('%d.%m.%Y %H:%M:%S') if synology.latest.completed_at else synology.latest.started_at|app_datetime('%d.%m.%Y %H:%M:%S') }} – {{ synology.latest.status }}
+      {% else %}–{% endif %}
+    </dd>
+    <dt>Последняя ошибка</dt><dd>{% if synology.latest and synology.latest.error_message %}<span class="registry-error">{{ synology.latest.error_message }}</span>{% else %}–{% endif %}</dd>
+  </dl>
+</section>
+
+<section class="card table-wrap">
+  <div class="blocking-results-heading">
+    <div>
+      <h2>Локальные учетные записи</h2>
+      <p class="muted">
+        Учетка нашего домена, которой нет среди действующих работников ни одной организации,
+        считается уволенной. Для нее фиксируется дата увольнения из HR, а если ее нет – дата первого обнаружения.
+      </p>
+    </div>
+  </div>
+
+  <table class="journal-table">
+    <thead>
+      <tr>
+        <th>Login</th>
+        <th>Email / описание</th>
+        <th>DSM</th>
+        <th>Срок DSM</th>
+        <th>Классификация</th>
+        <th>HR</th>
+        <th>Требуется</th>
+        <th>Удалить после</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in synology.accounts %}
+      {% set row = item.row %}
+      <tr>
+        <td>
+          <strong>{{ row.login }}</strong>
+          <div class="journal-object-meta"><code>{{ row.stable_id }}</code></div>
+        </td>
+        <td>
+          {{ row.email or '–' }}
+          {% if row.description %}<div class="journal-object-meta">{{ row.description }}</div>{% endif %}
+          {% if row.last_error %}<div class="registry-error">{{ row.last_error }}</div>{% endif %}
+        </td>
+        <td>
+          <span class="status {{ 'success' if row.is_active else 'failed' }}">{{ row.status }}</span>
+        </td>
+        <td>{{ row.expires_at.strftime('%d.%m.%Y') if row.expires_at else 'бессрочно / не определено' }}</td>
+        <td>
+          <span class="status {{ 'success' if row.classification == 'internal_active' else 'failed' if row.classification == 'internal_dismissed' else 'running' }}">
+            {{ item.classification_label }}
+          </span>
+        </td>
+        <td>
+          {% if item.linked %}Связан по e-mail{% elif row.match_method == 'email_ambiguous' %}Несколько HR-записей{% elif row.match_method == 'managed_domain_only' %}Нет среди действующих{% else %}–{% endif %}
+          {% if row.dismissal_reference_date %}
+            <div class="journal-object-meta">
+              увольнение: {{ row.dismissal_reference_date.strftime('%d.%m.%Y') }}
+              ({{ 'HR' if row.dismissal_reference_source == 'hr' else 'обнаружение' }})
+            </div>
+          {% endif %}
+        </td>
+        <td>
+          <strong>{{ item.action_label }}</strong>
+          {% if item.proposed_expiry %}<div class="journal-object-meta">до {{ item.proposed_expiry.strftime('%d.%m.%Y') }}</div>{% endif %}
+          {% if row.desired_reason %}<div class="journal-object-meta">{{ row.desired_reason }}</div>{% endif %}
+        </td>
+        <td>{{ row.delete_after.strftime('%d.%m.%Y') if row.delete_after else '–' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="muted">Синхронизация Synology еще не выполнялась.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Исключения</h2>
+  <p class="muted">Исключения не будут ограничиваться по сроку, отключаться или удаляться.</p>
+  <form method="post" action="/settings/synology/exceptions">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="form-grid">
+      <label>
+        <span>Login Synology</span>
+        <input type="text" name="login" required autocomplete="off">
+      </label>
+      <label>
+        <span>Stable ID</span>
+        <input type="text" name="stable_id" autocomplete="off" placeholder="Необязательно">
+      </label>
+      <label>
+        <span>Причина</span>
+        <input type="text" name="reason" required autocomplete="off" placeholder="Служебная / интеграционная учетка">
+      </label>
+    </div>
+    <div class="integration-card-actions"><button class="button" type="submit">Добавить исключение</button></div>
+  </form>
+
+  <div class="table-wrap">
+    <table class="journal-table">
+      <thead><tr><th>Login</th><th>Stable ID</th><th>Причина</th><th>Добавил</th><th></th></tr></thead>
+      <tbody>
+      {% for item in synology.exceptions %}
+        <tr>
+          <td><strong>{{ item.login }}</strong></td>
+          <td><code>{{ item.stable_id or '–' }}</code></td>
+          <td>{{ item.reason }}</td>
+          <td>{{ item.created_by or '–' }}{% if item.created_at %}<div class="journal-object-meta">{{ item.created_at|app_datetime('%d.%m.%Y %H:%M') }}</div>{% endif %}</td>
+          <td>
+            <form method="post" action="/settings/synology/exceptions/{{ item.id }}/remove">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <button class="button secondary" type="submit">Убрать</button>
+            </form>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5" class="muted">Исключений пока нет.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card table-wrap">
+  <h2>Последние синхронизации</h2>
+  <table class="journal-table">
+    <thead><tr><th>Дата</th><th>Запуск</th><th>Статус</th><th>Учеток</th><th>Новых</th><th>Изменений</th><th>Действий</th><th>Ошибка</th></tr></thead>
+    <tbody>
+    {% for run in synology.runs %}
+      <tr>
+        <td>{{ run.started_at|app_datetime('%d.%m.%Y %H:%M:%S') }}</td>
+        <td>{{ run.trigger }}</td>
+        <td><span class="status {{ 'success' if run.status == 'success' else 'running' if run.status == 'partial' else 'failed' }}">{{ run.status }}</span></td>
+        <td>{{ run.users_count }}</td>
+        <td>{{ run.new_accounts }}</td>
+        <td>{{ run.changed_accounts }}</td>
+        <td>{{ run.planned_actions }}</td>
+        <td>{% if run.error_message %}<span class="registry-error">{{ run.error_message }}</span>{% elif run.detail_errors %}Ошибок карточек: {{ run.detail_errors }}{% else %}–{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8" class="muted">Запусков пока нет.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<script>
+(() => {
+  const csrf = {{ csrf|tojson }};
+  const result = document.getElementById('synology-result');
+  const badge = document.getElementById('synology-badge');
+
+  async function post(url) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({csrf}),
+      credentials: 'same-origin',
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || 'Ошибка Synology');
+    return payload;
+  }
+
+  const test = document.getElementById('synology-test');
+  test?.addEventListener('click', async () => {
+    const text = test.textContent;
+    test.disabled = true;
+    test.textContent = 'Проверяю...';
+    result.className = 'integration-test-result checking';
+    result.textContent = 'Проверяю SSH и read-only synouser...';
+    try {
+      const payload = await post('/settings/synology/test');
+      result.className = 'integration-test-result success';
+      result.textContent = payload.message;
+      if (badge) { badge.className = 'integration-badge active'; badge.textContent = 'Работает'; }
+    } catch (error) {
+      result.className = 'integration-test-result error';
+      result.textContent = error.message || String(error);
+      if (badge) { badge.className = 'integration-badge error'; badge.textContent = 'Ошибка'; }
+    } finally {
+      test.disabled = false;
+      test.textContent = text;
+    }
+  });
+
+  const sync = document.getElementById('synology-sync');
+  sync?.addEventListener('click', async () => {
+    const text = sync.textContent;
+    sync.disabled = true;
+    sync.textContent = 'Синхронизирую...';
+    result.className = 'integration-test-result checking';
+    result.textContent = 'Читаю локальные учетные записи DSM и сверяю с кадровыми источниками...';
+    try {
+      const payload = await post('/settings/synology/sync');
+      result.className = 'integration-test-result success';
+      result.textContent = payload.message;
+      window.setTimeout(() => window.location.reload(), 700);
+    } catch (error) {
+      result.className = 'integration-test-result error';
+      result.textContent = error.message || String(error);
+      sync.disabled = false;
+      sync.textContent = text;
+    }
+  });
+
+  const diagnostics = document.getElementById('synology-diagnostics');
+  diagnostics?.addEventListener('click', async () => {
+    const text = diagnostics.textContent;
+    diagnostics.disabled = true;
+    diagnostics.textContent = 'Получаю...';
+    result.className = 'integration-test-result checking';
+    result.textContent = 'Получаю безопасную диагностику synouser...';
+    try {
+      const payload = await post('/settings/synology/diagnostics');
+      document.getElementById('synology-help-output').textContent = payload.help || '–';
+      document.getElementById('synology-enum-output').textContent = payload.enum || '–';
+      document.getElementById('synology-sample-heading').textContent = payload.sample_login ? `Карточка ${payload.sample_login}` : 'Пример карточки';
+      document.getElementById('synology-sample-output').textContent = payload.sample_detail || 'Нет подходящей карточки.';
+      const details = document.getElementById('synology-diagnostics-result');
+      details.hidden = false;
+      details.open = true;
+      result.className = 'integration-test-result success';
+      result.textContent = 'Диагностика получена. Команды изменения DSM не выполнялись.';
+    } catch (error) {
+      result.className = 'integration-test-result error';
+      result.textContent = error.message || String(error);
+    } finally {
+      diagnostics.disabled = false;
+      diagnostics.textContent = text;
+    }
+  });
+})();
+</script>
+{% endblock %}

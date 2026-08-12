@@ -21,6 +21,7 @@ from app.routers import (
     mail_templates,
     onec_sources,
     settings_ui,
+    synology,
     telegram_settings,
     zimbra_lifecycle,
     zimbra_observer,
@@ -32,6 +33,7 @@ from app.services.dismissal_notifications import DismissalNotificationWorker
 from app.services.final_dismissal_lifecycle import FinalDismissalLifecycleWorker
 from app.services.onec_scheduler import OneCAutoImportScheduler
 from app.services.onec_sources import OneCSourceRegistryService
+from app.services.synology_scheduler import SynologyLifecycleScheduler
 from app.services.telegram_worker import TelegramNotificationWorker
 from app.services.zimbra_observer_scheduler import ZimbraObserverScheduler
 
@@ -62,6 +64,7 @@ async def lifespan(_: FastAPI):
         settings,
         SessionLocal,
     )
+    synology_scheduler = SynologyLifecycleScheduler(settings, SessionLocal)
     telegram_worker = TelegramNotificationWorker(
         settings.app_secret_key,
         SessionLocal,
@@ -71,6 +74,7 @@ async def lifespan(_: FastAPI):
     blocking_worker.start()
     dismissal_notification_worker.start()
     final_dismissal_worker.start()
+    synology_scheduler.start()
     telegram_worker.start()
     zimbra_observer_scheduler.start()
     try:
@@ -78,6 +82,7 @@ async def lifespan(_: FastAPI):
     finally:
         zimbra_observer_scheduler.stop()
         telegram_worker.stop()
+        synology_scheduler.stop()
         final_dismissal_worker.stop()
         dismissal_notification_worker.stop()
         blocking_worker.stop()
@@ -103,6 +108,7 @@ app.include_router(employees.router)
 app.include_router(hr_reconcile_multisource.router)
 app.include_router(settings_ui.router)
 app.include_router(onec_sources.router)
+app.include_router(synology.router)
 app.include_router(telegram_settings.router)
 app.include_router(zimbra_observer.router)
 app.include_router(zimbra_protection.router)
