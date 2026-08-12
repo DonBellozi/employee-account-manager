@@ -3,14 +3,16 @@ from __future__ import annotations
 import logging
 import threading
 
+from app.config import get_settings
 from app.services.telegram import TelegramService
+from app.services.telegram_zimbra_daily_report import TelegramZimbraDailyReportService
 
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramNotificationWorker:
-    """Фоновая доставка сообщений из локальной Telegram-очереди."""
+    """Фоновая доставка сообщений и постановка утреннего Zimbra-отчета."""
 
     def __init__(
         self,
@@ -44,9 +46,14 @@ class TelegramNotificationWorker:
         self._thread = None
 
     def _run(self) -> None:
+        settings = get_settings()
         while not self._stop.is_set():
             try:
                 with self.session_factory() as db:
+                    TelegramZimbraDailyReportService(
+                        settings,
+                        db,
+                    ).enqueue_due()
                     TelegramService(
                         self.app_secret_key,
                         db,
