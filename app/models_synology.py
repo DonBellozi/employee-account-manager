@@ -31,6 +31,16 @@ class SynologyControlSettings(Base):
     last_migration_batch_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # Предохранитель от массовой блокировки. Если за один прогон к отключению
+    # оказалось больше учеток, чем разрешено, этап блокировок не выполняется
+    # вообще: одиночная ошибка кадровых данных не должна отключить всех сразу.
+    max_disables_per_run: Mapped[int] = mapped_column(Integer, default=10)
+    mass_disable_ack_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    mass_disable_ack_count: Mapped[int] = mapped_column(Integer, default=0)
+    mass_disable_ack_by: Mapped[str] = mapped_column(String(256), default="")
     updated_by: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
@@ -148,7 +158,11 @@ class SynologySyncRun(Base):
     changed_accounts: Mapped[int] = mapped_column(Integer, default=0)
     planned_actions: Mapped[int] = mapped_column(Integer, default=0)
     detail_errors: Mapped[int] = mapped_column(Integer, default=0)
+    disabled_accounts: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str] = mapped_column(Text, default="")
+    # Текст сработавшего предохранителя массовой блокировки. Пустая строка
+    # означает, что этап блокировок отработал штатно.
+    guard_message: Mapped[str] = mapped_column(Text, default="")
     error_message: Mapped[str] = mapped_column(Text, default="")
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True

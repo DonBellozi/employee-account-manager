@@ -78,7 +78,7 @@ def test_classification_precedence_and_external_unknown():
     ) == CLASS_EXCEPTION
 
 
-def test_dismissed_account_disable_then_delete():
+def test_dismissed_account_is_disabled_and_never_deleted():
     decision = desired_action(
         classification=CLASS_INTERNAL_DISMISSED,
         is_active=True,
@@ -93,6 +93,8 @@ def test_dismissed_account_disable_then_delete():
     )
     assert decision.action == ACTION_DISABLE
 
+    # Уже отключенная учетка не удаляется и не включается обратно:
+    # удаление на текущем этапе не входит в write-scope.
     decision = desired_action(
         classification=CLASS_INTERNAL_DISMISSED,
         is_active=False,
@@ -105,7 +107,8 @@ def test_dismissed_account_disable_then_delete():
         internal_months=3,
         external_months=6,
     )
-    assert decision.action == ACTION_DELETE
+    assert decision.action == ACTION_NONE
+    assert decision.action != ACTION_DELETE
 
 
 def test_external_never_becomes_unlimited():
@@ -114,15 +117,33 @@ def test_external_never_becomes_unlimited():
         is_active=True,
         today=date(2026, 8, 11),
         delete_after=None,
-        enrolled=False,
-        policy_expires_at=None,
         previous_active=True,
         internal_months=3,
         external_months=6,
     )
-    assert desired_action(observed_expires_at=None, **base).action == ACTION_SET_EXPIRY_EXTERNAL
-    assert desired_action(observed_expires_at=date(2027, 3, 1), **base).action == ACTION_SET_EXPIRY_EXTERNAL
-    assert desired_action(observed_expires_at=date(2027, 2, 11), **base).action == ACTION_NONE
+    # Срок контроля хранится приложением, а не DSM: наблюдаемая в DSM дата
+    # больше не влияет на решение.
+    assert desired_action(
+        observed_expires_at=None, enrolled=False, policy_expires_at=None, **base
+    ).action == ACTION_SET_EXPIRY_EXTERNAL
+    assert desired_action(
+        observed_expires_at=date(2027, 3, 1),
+        enrolled=False,
+        policy_expires_at=None,
+        **base,
+    ).action == ACTION_SET_EXPIRY_EXTERNAL
+    assert desired_action(
+        observed_expires_at=None,
+        enrolled=True,
+        policy_expires_at=date(2027, 2, 11),
+        **base,
+    ).action == ACTION_NONE
+    assert desired_action(
+        observed_expires_at=None,
+        enrolled=True,
+        policy_expires_at=date(2026, 8, 11),
+        **base,
+    ).action == ACTION_DISABLE
 
 
 def test_internal_migration_and_reactivation_do_not_slide_each_sync():
@@ -154,7 +175,8 @@ def test_internal_migration_and_reactivation_do_not_slide_each_sync():
     )
     assert active_cycle.action == ACTION_NONE
 
-    reactivated = desired_action(
+    # Истекший цикл превращается в блокировку, а не в бесконечное продление.
+    overdue = desired_action(
         classification=CLASS_INTERNAL_ACTIVE,
         is_active=True,
         observed_expires_at=None,
@@ -166,7 +188,23 @@ def test_internal_migration_and_reactivation_do_not_slide_each_sync():
         internal_months=3,
         external_months=6,
     )
-    assert reactivated.action == ACTION_SET_EXPIRY_INTERNAL
+    assert overdue.action == ACTION_DISABLE
+
+    # Новый цикл после повторного включения назначает сам lifecycle-сервис,
+    # поэтому политика видит запись как еще не зачисленную.
+    reactivated = desired_action(
+        classification=CLASS_INTERNAL_ACTIVE,
+        is_active=True,
+        observed_expires_at=None,
+        today=date(2026, 12, 1),
+        delete_after=None,
+        enrolled=False,
+        policy_expires_at=None,
+        previous_active=False,
+        internal_months=3,
+        external_months=6,
+    )
+    assert reactivated.action == ACTION_MIGRATION_CANDIDATE
 
 
 def test_unknown_requires_manual_classification():

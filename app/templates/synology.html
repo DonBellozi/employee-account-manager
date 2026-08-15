@@ -14,7 +14,37 @@
 
 {% if saved %}<div class="alert success">Политика Synology сохранена.</div>{% endif %}
 {% if exception_saved %}<div class="alert success">Исключение сохранено.</div>{% endif %}
+{% if guard_acknowledged %}<div class="alert success">Массовая блокировка подтверждена. Она будет выполнена в ближайшем цикле синхронизации.</div>{% endif %}
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+{% if synology.guard_triggered %}
+<section class="card">
+  <div class="alert error">
+    <strong>Сработал предохранитель массовой блокировки.</strong>
+    К отключению готовы <strong>{{ synology.pending_disables }}</strong> учетных записей
+    при лимите <strong>{{ synology.disable_limit }}</strong> за прогон.
+    Блокировки не выполняются до подтверждения: такой объем чаще означает
+    ошибку кадровой выгрузки, а не реальное увольнение.
+  </div>
+  <p class="muted">
+    Проверьте список ниже и полноту выгрузок 1С. Подтверждение действует
+    {{ synology.guard_ack_ttl_minutes }} мин. и только на текущий объем
+    ({{ synology.pending_disables }} шт.); следующее превышение снова
+    потребует разбора.
+  </p>
+  <form method="post" action="/settings/synology/mass-disable-ack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="button" type="submit">
+      Подтвердить блокировку {{ synology.pending_disables }} учеток
+    </button>
+  </form>
+</section>
+{% elif synology.guard_ack_valid and synology.pending_disables > synology.disable_limit %}
+<div class="alert warning">
+  <strong>Массовая блокировка подтверждена.</strong>
+  {{ synology.pending_disables }} учетных записей будут отключены в ближайшем цикле.
+</div>
+{% endif %}
 
 <section class="card integration-card integration-card-wide">
   <div class="integration-card-heading">
@@ -105,6 +135,10 @@
         <span>Удаление после увольнения, месяцев</span>
         <input type="number" name="delete_after_months" min="1" max="60" value="{{ synology.control.delete_after_months }}" required>
       </label>
+      <label>
+        <span>Максимум блокировок за прогон</span>
+        <input type="number" name="max_disables_per_run" min="1" max="500" value="{{ synology.control.max_disables_per_run }}" required>
+      </label>
     </div>
 
     <label style="display:flex;align-items:center;gap:.6rem;margin-top:1rem;">
@@ -117,6 +151,11 @@
       после подтвержденной контрольной выгрузки. Действующие сотрудники получают 3-месячные циклы
       пакетами по {{ synology.control.migration_batch_size }} раз в {{ synology.control.migration_interval_days }} дн.;
       внешние учетки – 6-месячный цикл. Удаление пока не выполняется.
+    </p>
+    <p class="muted">
+      Если за один прогон к отключению готово больше
+      {{ synology.control.max_disables_per_run }} учеток, этап блокировок
+      пропускается целиком и требует ручного подтверждения.
     </p>
     <div class="integration-card-actions">
       <button class="button" type="submit">Сохранить</button>
@@ -135,6 +174,7 @@
     <div><span>Исключения</span><strong>{{ synology.counts.exceptions }}</strong></div>
     <div><span>Защищенные DSM</span><strong>{{ synology.counts.protected }}</strong></div>
     <div><span>Требуют действий</span><strong>{{ synology.counts.actions }}</strong></div>
+    <div><span>К отключению</span><strong>{{ synology.pending_disables }} / {{ synology.disable_limit }}</strong></div>
   </div>
 
   <dl class="integration-details">
@@ -282,7 +322,7 @@
 <section class="card table-wrap">
   <h2>Последние синхронизации</h2>
   <table class="journal-table">
-    <thead><tr><th>Дата</th><th>Запуск</th><th>Статус</th><th>Учеток</th><th>Новых</th><th>Изменений</th><th>Действий</th><th>Ошибка</th></tr></thead>
+    <thead><tr><th>Дата</th><th>Запуск</th><th>Статус</th><th>Учеток</th><th>Новых</th><th>Изменений</th><th>Действий</th><th>Отключено</th><th>Ошибка</th></tr></thead>
     <tbody>
     {% for run in synology.runs %}
       <tr>
@@ -293,10 +333,16 @@
         <td>{{ run.new_accounts }}</td>
         <td>{{ run.changed_accounts }}</td>
         <td>{{ run.planned_actions }}</td>
-        <td>{% if run.error_message %}<span class="registry-error">{{ run.error_message }}</span>{% elif run.detail_errors %}Ошибок: {{ run.detail_errors }}{% else %}–{% endif %}</td>
+        <td>{{ run.disabled_accounts }}</td>
+        <td>
+          {% if run.error_message %}<span class="registry-error">{{ run.error_message }}</span>
+          {% elif run.guard_message %}<span class="registry-error">{{ run.guard_message }}</span>
+          {% elif run.detail_errors %}Ошибок: {{ run.detail_errors }}
+          {% else %}–{% endif %}
+        </td>
       </tr>
     {% else %}
-      <tr><td colspan="8" class="muted">Запусков пока нет.</td></tr>
+      <tr><td colspan="9" class="muted">Запусков пока нет.</td></tr>
     {% endfor %}
     </tbody>
   </table>

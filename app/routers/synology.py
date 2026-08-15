@@ -24,6 +24,7 @@ def _context(
     db: Session,
     saved: bool = False,
     exception_saved: bool = False,
+    guard_acknowledged: bool = False,
     error: str = "",
 ):
     current = require_admin(request)
@@ -34,6 +35,7 @@ def _context(
         "synology": service.view(),
         "saved": saved,
         "exception_saved": exception_saved,
+        "guard_acknowledged": guard_acknowledged,
         "error": error,
     }
 
@@ -43,6 +45,7 @@ def synology_page(
     request: Request,
     saved: int = 0,
     exception_saved: int = 0,
+    guard_acknowledged: int = 0,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
@@ -55,6 +58,7 @@ def synology_page(
             db=db,
             saved=bool(saved),
             exception_saved=bool(exception_saved),
+            guard_acknowledged=bool(guard_acknowledged),
         ),
     )
 
@@ -69,6 +73,7 @@ def synology_policy_save(
     internal_expiry_months: int = Form(...),
     external_expiry_months: int = Form(...),
     delete_after_months: int = Form(...),
+    max_disables_per_run: int = Form(...),
     write_enabled: str = Form(""),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -83,10 +88,44 @@ def synology_policy_save(
             internal_expiry_months=internal_expiry_months,
             external_expiry_months=external_expiry_months,
             delete_after_months=delete_after_months,
+            max_disables_per_run=max_disables_per_run,
             write_enabled=write_enabled.strip().lower() in {"1", "true", "yes", "on"},
             actor=current.username,
         )
         return RedirectResponse("/settings/synology?saved=1", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return templates.TemplateResponse(
+            request,
+            "synology.html",
+            _context(
+                request,
+                settings=settings,
+                db=db,
+                error=str(exc),
+            ),
+            status_code=400,
+        )
+
+
+@router.post("/settings/synology/mass-disable-ack")
+def synology_mass_disable_ack(
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Разово подтвердить блокировку объема, превысившего лимит прогона."""
+    validate_csrf(request, csrf)
+    current = require_admin(request)
+    try:
+        SynologyLifecycleService(settings, db).acknowledge_mass_disable(
+            actor=current.username,
+        )
+        return RedirectResponse(
+            "/settings/synology?guard_acknowledged=1",
+            status_code=303,
+        )
     except Exception as exc:
         db.rollback()
         return templates.TemplateResponse(

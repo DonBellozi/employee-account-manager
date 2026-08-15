@@ -38,22 +38,24 @@ def test_config_and_compose_have_synology_readonly_connection():
     assert "/opt/account-provisioner/ssh/known_hosts:/app/known_hosts:ro" in compose
 
 
-def test_settings_has_synology_card_and_readonly_page():
+def test_settings_has_synology_card_and_page():
     js = read("app/static/settings_extensions.js")
     page = read("app/templates/synology.html")
     assert "href: '/settings/synology'" in js
     assert "Synology DSM" in js
-    assert "Только чтение" in page
     assert "которой нет среди действующих работников" in page
 
 
-def test_first_phase_contains_no_synology_mutating_command_methods():
+def test_write_scope_is_limited_to_expired_flag():
     service = read("app/services/synology.py")
-    # Разрешены только read-side вызовы enum/get/help.
+    # Разрешены read-side вызовы enum/get/help и единственное изменение —
+    # установка Expired=1 через --modify.
     assert '["--enum", "local"]' in service
     assert '["--get", login]' in service
     assert '["--help"]' in service
-    for token in ("--del", "--delete", "--disable", "--setpw", "--modify"):
+    assert '"--modify",' in service
+    # Удаление, сброс пароля и прочие изменяющие подкоманды не появились.
+    for token in ("--del", "--delete", "--setpw", "--add", "--rename"):
         assert token not in service
 
 
@@ -62,5 +64,30 @@ def test_gradual_batch_is_bounded_and_waits_for_pending_batch():
     assert "migration_batch_size" in lifecycle
     assert "last_migration_batch_at" in lifecycle
     assert "SystemRandom().sample" in lifecycle
-    assert "if pending:" in lifecycle
-    assert "ACTION_SET_EXPIRY_INTERNAL" in lifecycle
+    assert "migration_interval_days" in lifecycle
+
+
+def test_mass_disable_guard_is_wired_end_to_end():
+    lifecycle = read("app/services/synology_lifecycle.py")
+    router = read("app/routers/synology.py")
+    page = read("app/templates/synology.html")
+    db = read("app/db.py")
+
+    assert "max_disables_per_run" in lifecycle
+    assert "synology_mass_disable_blocked" in lifecycle
+    assert "_mass_disable_ack_valid_for" in lifecycle
+    assert "/settings/synology/mass-disable-ack" in router
+    assert "acknowledge_mass_disable" in router
+    assert "max_disables_per_run" in page
+    assert "mass-disable-ack" in page
+    # Новые колонки должны доезжать в уже существующую рабочую БД.
+    assert "synology_control_settings" in db
+    assert "synology_sync_runs" in db
+
+
+def test_synouser_commands_have_a_hard_deadline():
+    service = read("app/services/synology.py")
+    # recv_exit_status() без таймаута вешал фоновый поток вместе с локом.
+    assert "TimeoutError" in service
+    assert "deadline" in service
+    assert "channel.settimeout" in service

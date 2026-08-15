@@ -31,7 +31,41 @@ def ensure_compatibility_schema() -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
 
+    def add_missing_columns(
+        connection,
+        table: str,
+        definitions: dict[str, str],
+    ) -> None:
+        if table not in tables:
+            return
+        existing = {column["name"] for column in inspector.get_columns(table)}
+        for name, definition in definitions.items():
+            if name in existing:
+                continue
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+            )
+
     with engine.begin() as connection:
+        add_missing_columns(
+            connection,
+            "synology_control_settings",
+            {
+                "max_disables_per_run": "INTEGER NOT NULL DEFAULT 10",
+                "mass_disable_ack_at": "DATETIME",
+                "mass_disable_ack_count": "INTEGER NOT NULL DEFAULT 0",
+                "mass_disable_ack_by": "VARCHAR(256) NOT NULL DEFAULT ''",
+            },
+        )
+        add_missing_columns(
+            connection,
+            "synology_sync_runs",
+            {
+                "disabled_accounts": "INTEGER NOT NULL DEFAULT 0",
+                "guard_message": "TEXT NOT NULL DEFAULT ''",
+            },
+        )
+
         if "hr_source_records" in tables:
             columns = {
                 column["name"]

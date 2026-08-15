@@ -46,6 +46,10 @@ from app.services.synology_policy import (
 
 _SYNC_LOCK = threading.Lock()
 
+# Подтверждение массовой блокировки действует ограниченное время: администратор
+# подтверждает конкретный разбор ситуации, а не снимает предохранитель навсегда.
+MASS_DISABLE_ACK_TTL_MINUTES = 60
+
 CLASSIFICATION_LABELS = {
     CLASS_INTERNAL_ACTIVE: "Наш сотрудник",
     CLASS_INTERNAL_DISMISSED: "Уволен / нет среди действующих",
@@ -112,6 +116,7 @@ class SynologyLifecycleService:
         internal_expiry_months: int,
         external_expiry_months: int,
         delete_after_months: int,
+        max_disables_per_run: int,
         write_enabled: bool,
         actor: str,
     ) -> SynologyControlSettings:
@@ -122,6 +127,7 @@ class SynologyLifecycleService:
             "internal_expiry_months": (internal_expiry_months, 1, 24),
             "external_expiry_months": (external_expiry_months, 1, 24),
             "delete_after_months": (delete_after_months, 1, 60),
+            "max_disables_per_run": (max_disables_per_run, 1, 500),
         }
         for name, (value, minimum, maximum) in values.items():
             if not minimum <= int(value) <= maximum:
@@ -135,9 +141,16 @@ class SynologyLifecycleService:
         row.internal_expiry_months = int(internal_expiry_months)
         row.external_expiry_months = int(external_expiry_months)
         row.delete_after_months = int(delete_after_months)
+        previous_limit = int(row.max_disables_per_run or 0)
+        row.max_disables_per_run = int(max_disables_per_run)
         row.write_enabled = bool(write_enabled)
         row.updated_by = actor
         row.updated_at = self.utcnow()
+
+        # Повышение лимита не должно молча наследовать старое подтверждение:
+        # администратор подтверждал другую по объему ситуацию.
+        if previous_limit != row.max_disables_per_run:
+            self._clear_mass_disable_ack(row)
 
         mode = "blocking" if row.write_enabled else "observe"
         self.db.add(
@@ -151,7 +164,8 @@ class SynologyLifecycleService:
                     f"batch={row.migration_batch_size}/{row.migration_interval_days}d; "
                     f"internal={row.internal_expiry_months}m; "
                     f"external={row.external_expiry_months}m; "
-                    f"delete={row.delete_after_months}m; mode={mode}"
+                    f"delete={row.delete_after_months}m; "
+                    f"max_disables={row.max_disables_per_run}; mode={mode}"
                 ),
             )
         )
@@ -167,6 +181,71 @@ class SynologyLifecycleService:
             )
         self.db.commit()
         return row
+
+    @staticmethod
+    def _clear_mass_disable_ack(row: SynologyControlSettings) -> None:
+        row.mass_disable_ack_at = None
+        row.mass_disable_ack_count = 0
+        row.mass_disable_ack_by = ""
+
+    def _mass_disable_ack_valid_for(
+        self,
+        control: SynologyControlSettings,
+        candidates: int,
+    ) -> bool:
+        """Проверить, покрывает ли действующее подтверждение текущий объем."""
+        moment = control.mass_disable_ack_at
+        if moment is None:
+            return False
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        expires_at = moment + timedelta(minutes=MASS_DISABLE_ACK_TTL_MINUTES)
+        if self.utcnow() >= expires_at:
+            return False
+        # Подтверждение действует на объем не больше того, который видел
+        # администратор: внезапно выросшая выборка снова требует разбора.
+        return candidates <= int(control.mass_disable_ack_count or 0)
+
+    def acknowledge_mass_disable(self, *, actor: str) -> SynologyControlSettings:
+        """Разово разрешить блокировку объема, превышающего лимит прогона."""
+        control = self.control_settings()
+        candidates = self.pending_disable_count()
+        if candidates == 0:
+            raise ValueError("Нет учетных записей, ожидающих блокировки")
+        if candidates <= int(control.max_disables_per_run or 0):
+            raise ValueError(
+                "Предохранитель не сработал: подтверждение не требуется"
+            )
+
+        control.mass_disable_ack_at = self.utcnow()
+        control.mass_disable_ack_count = candidates
+        control.mass_disable_ack_by = actor
+        self._audit(
+            action="synology_mass_disable_acknowledged",
+            target="Synology DSM",
+            result="warning",
+            details=(
+                f"candidates={candidates}; "
+                f"limit={control.max_disables_per_run}; "
+                f"ttl_minutes={MASS_DISABLE_ACK_TTL_MINUTES}"
+            ),
+            actor=actor,
+        )
+        self.db.commit()
+        self.db.refresh(control)
+        return control
+
+    def pending_disable_count(self) -> int:
+        return int(
+            self.db.scalar(
+                select(func.count(SynologyAccountState.id)).where(
+                    SynologyAccountState.is_present.is_(True),
+                    SynologyAccountState.is_active.is_(True),
+                    SynologyAccountState.desired_action == ACTION_DISABLE,
+                )
+            )
+            or 0
+        )
 
     def managed_domains(self) -> set[str]:
         domains = {
@@ -668,10 +747,14 @@ class SynologyLifecycleService:
         managed_domains: set[str],
         exception_by_login: dict[str, SynologyException],
         exception_by_stable: dict[str, SynologyException],
-    ) -> tuple[int, int, int]:
-        """Исполнить только Expired=1. Возвращает success, failed, deferred."""
+    ) -> tuple[int, int, int, str]:
+        """Исполнить только Expired=1.
+
+        Возвращает ``success, failed, deferred, guard_message``. Непустой
+        ``guard_message`` означает, что этап блокировок не выполнялся вообще.
+        """
         if not control.write_enabled:
-            return 0, 0, 0
+            return 0, 0, 0, ""
 
         by_stable = {account.stable_id: account for account in accounts}
         rows = list(
@@ -684,7 +767,41 @@ class SynologyLifecycleService:
             ).all()
         )
         if not rows:
-            return 0, 0, 0
+            return 0, 0, 0, ""
+
+        # Предохранитель: единичная ошибка кадровой выгрузки не должна
+        # превратиться в массовое отключение. Частичное исполнение здесь тоже
+        # недопустимо, поэтому этап пропускается целиком.
+        limit = max(1, int(control.max_disables_per_run or 1))
+        if len(rows) > limit:
+            if not self._mass_disable_ack_valid_for(control, len(rows)):
+                guard = (
+                    f"Сработал предохранитель массовой блокировки: "
+                    f"к отключению {len(rows)} учеток при лимите {limit}. "
+                    f"Блокировки не выполнялись. Проверьте кадровые данные и "
+                    f"подтвердите операцию вручную."
+                )
+                self._audit(
+                    action="synology_mass_disable_blocked",
+                    target="Synology DSM",
+                    result="warning",
+                    details=f"candidates={len(rows)}; limit={limit}",
+                )
+                self.db.commit()
+                return 0, 0, len(rows), guard
+            self._audit(
+                action="synology_mass_disable_confirmed",
+                target="Synology DSM",
+                result="warning",
+                details=(
+                    f"candidates={len(rows)}; limit={limit}; "
+                    f"actor={control.mass_disable_ack_by or '-'}"
+                ),
+            )
+            # Подтверждение одноразовое: следующий превышающий лимит прогон
+            # снова потребует разбора.
+            self._clear_mass_disable_ack(control)
+            self.db.commit()
 
         dsm = SynologyService(self.settings)
         success = failed = deferred = 0
@@ -750,7 +867,12 @@ class SynologyLifecycleService:
                     details=str(exc),
                 )
 
-        return success, failed, deferred
+            # Изменение в DSM уже произошло и откатить его нельзя. Фиксируем
+            # результат сразу, иначе ошибка на следующей учетке откатила бы
+            # журнал и состояние уже отключенных записей.
+            self.db.commit()
+
+        return success, failed, deferred, ""
 
     def sync(self, *, trigger: str = "manual") -> SynologySyncRun:
         if not self.settings.synology_enabled:
@@ -809,7 +931,12 @@ class SynologyLifecycleService:
                     row.desired_action = ACTION_NONE
                     row.desired_reason = "Учетная запись отсутствует в текущем списке DSM."
 
-            disabled, disable_errors, deferred = self._execute_disables(
+            # Наблюдение фиксируется до внешних изменений: дальше каждая
+            # успешная блокировка коммитится отдельно и не может быть потеряна
+            # откатом общей транзакции прогона.
+            self.db.commit()
+
+            disabled, disable_errors, deferred, guard_message = self._execute_disables(
                 accounts=accounts,
                 control=control,
                 managed_domains=domains,
@@ -833,11 +960,14 @@ class SynologyLifecycleService:
             run.changed_accounts = changed_count
             run.planned_actions = planned
             run.detail_errors = detail_errors
-            run.status = "partial" if detail_errors else "success"
+            run.disabled_accounts = disabled
+            run.guard_message = guard_message
+            run.status = "partial" if detail_errors or guard_message else "success"
             run.message = (
                 f"users={len(accounts)}; new={new_count}; changed={changed_count}; "
                 f"planned={planned}; disabled={disabled}; deferred={deferred}; "
                 f"detail_errors={detail_errors}; "
+                f"guard={'triggered' if guard_message else 'ok'}; "
                 f"mode={'blocking' if control.write_enabled else 'observe'}"
             )
             run.completed_at = self.utcnow()
@@ -1027,6 +1157,15 @@ class SynologyLifecycleService:
             )
 
         hr_ready, hr_reason = self._hr_write_ready()
+        pending_disables = sum(
+            1 for row in states if row.desired_action == ACTION_DISABLE and row.is_active
+        )
+        limit = max(1, int(control.max_disables_per_run or 1))
+        guard_triggered = (
+            control.write_enabled
+            and pending_disables > limit
+            and not self._mass_disable_ack_valid_for(control, pending_disables)
+        )
         return {
             "connection": self.connection_view(control),
             "control": control,
@@ -1050,4 +1189,11 @@ class SynologyLifecycleService:
             "observe_only": not control.write_enabled,
             "hr_write_ready": hr_ready,
             "hr_write_reason": hr_reason,
+            "pending_disables": pending_disables,
+            "disable_limit": limit,
+            "guard_triggered": guard_triggered,
+            "guard_ack_valid": self._mass_disable_ack_valid_for(
+                control, pending_disables
+            ),
+            "guard_ack_ttl_minutes": MASS_DISABLE_ACK_TTL_MINUTES,
         }

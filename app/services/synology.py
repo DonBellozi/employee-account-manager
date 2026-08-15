@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -135,6 +136,11 @@ class SynologyService:
             return f"sudo -n {quoted}"
         return quoted
 
+    # Верхняя граница вывода одной команды. Защищает фоновый поток от
+    # неограниченного чтения, если DSM начнет печатать бесконечный поток.
+    MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+    _POLL_INTERVAL_SECONDS = 0.02
+
     def _execute(
         self,
         client: paramiko.SSHClient,
@@ -142,16 +148,71 @@ class SynologyService:
         *,
         allow_nonzero: bool = False,
     ) -> str:
+        """Выполнить synouser с жестким верхним пределом по времени.
+
+        ``recv_exit_status()`` блокируется без таймаута: если DSM принял
+        соединение, но не закрывает канал, фоновый поток сверки повисает
+        навсегда и вместе с ним удерживается глобальный лок синхронизации.
+        Поэтому ожидание завершения и чтение вывода выполняются циклом с
+        собственным дедлайном.
+        """
+        timeout = max(5, self.settings.synology_command_timeout_seconds)
         command = f"{self._synouser_base()} {shlex.join(args)}"
-        stdin, stdout, stderr = client.exec_command(
-            command,
-            timeout=max(5, self.settings.synology_command_timeout_seconds),
-        )
-        stdin.channel.shutdown_write()
-        code = stdout.channel.recv_exit_status()
-        out = stdout.read().decode("utf-8", errors="replace").strip()
-        err = stderr.read().decode("utf-8", errors="replace").strip()
+        display = f"{self.settings.synology_synouser_command} {' '.join(args)}".strip()
+
+        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+        channel = stdout.channel
+        try:
+            channel.settimeout(timeout)
+            stdin.channel.shutdown_write()
+
+            deadline = time.monotonic() + timeout
+            out_chunks: list[bytes] = []
+            err_chunks: list[bytes] = []
+            received = 0
+            truncated = False
+
+            while True:
+                progressed = False
+                if channel.recv_ready():
+                    chunk = channel.recv(65536)
+                    received += len(chunk)
+                    if not truncated:
+                        out_chunks.append(chunk)
+                    progressed = True
+                if channel.recv_stderr_ready():
+                    chunk = channel.recv_stderr(65536)
+                    received += len(chunk)
+                    if not truncated:
+                        err_chunks.append(chunk)
+                    progressed = True
+
+                if received > self.MAX_OUTPUT_BYTES:
+                    truncated = True
+
+                # Команда завершена и буферы вычитаны.
+                if not progressed and channel.exit_status_ready():
+                    break
+
+                # Дедлайн проверяется и при активном потоке вывода: иначе
+                # бесконечно печатающая команда обошла бы таймаут.
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"synouser не ответил за {timeout} с: {display}"
+                    )
+
+                if not progressed:
+                    time.sleep(self._POLL_INTERVAL_SECONDS)
+
+            code = channel.recv_exit_status()
+        finally:
+            channel.close()
+
+        out = b"".join(out_chunks).decode("utf-8", errors="replace").strip()
+        err = b"".join(err_chunks).decode("utf-8", errors="replace").strip()
         combined = "\n".join(part for part in (out, err) if part).strip()
+        if truncated:
+            combined = f"{combined}\n[вывод обрезан по лимиту приложения]".strip()
         if code != 0 and not allow_nonzero:
             raise RuntimeError(
                 f"synouser завершился с кодом {code}: {combined or 'нет вывода'}"
