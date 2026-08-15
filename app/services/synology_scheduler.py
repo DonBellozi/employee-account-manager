@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class SynologyLifecycleScheduler:
-    """Периодическая read-only сверка DSM с кадровым lifecycle."""
+    """Периодическая сверка DSM и применение разрешенных блокировок."""
 
     POLL_SECONDS = 30
 

@@ -11,7 +11,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import AuditLog, HRSourceRecord
+from app.models import AuditLog, HRSourceRecord, OneCImportRun
 from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
 from app.models_synology import (
     SynologyAccountState,
@@ -19,6 +19,7 @@ from app.models_synology import (
     SynologyException,
     SynologySyncRun,
 )
+from app.services.onec_freshness import OneCSourceFreshnessService
 from app.services.synology import SynologyLocalUser, SynologyService
 from app.services.synology_policy import (
     ACTION_CLASSIFY,
@@ -57,21 +58,22 @@ CLASSIFICATION_LABELS = {
 ACTION_LABELS = {
     ACTION_NONE: "–",
     ACTION_CLASSIFY: "Требует классификации",
-    ACTION_MIGRATION_CANDIDATE: "Кандидат на 3 месяца",
-    ACTION_SET_EXPIRY_INTERNAL: "Установить 3 месяца",
-    ACTION_SET_EXPIRY_EXTERNAL: "Установить 6 месяцев",
+    ACTION_MIGRATION_CANDIDATE: "Ожидает 3-месячный цикл",
+    ACTION_SET_EXPIRY_INTERNAL: "Запустить 3-месячный цикл",
+    ACTION_SET_EXPIRY_EXTERNAL: "Запустить 6-месячный цикл",
     ACTION_DISABLE: "Отключить",
-    ACTION_DELETE: "Удалить",
+    # Старое значение может остаться в БД до первой новой синхронизации.
+    ACTION_DELETE: "Удаление отключено",
 }
 
 
 class SynologyLifecycleService:
-    """Сверка локальных DSM-учеток с общим кадровым lifecycle проекта.
+    """Сверка локальных DSM-учеток и этап фактической блокировки.
 
-    Эта версия – первый безопасный этап: она ничего не меняет и не удаляет на
-    Synology. Все вычисленные действия сохраняются как desired_action и
-    показываются администратору. Это позволяет проверить классификацию,
-    исключения и фактические поля DSM перед включением write-адаптера.
+    Текущий write-scope намеренно ограничен одним действием в DSM:
+    ``Expired=1``. Удаление и автоматическое включение учеток отсутствуют.
+    Календарные 3/6-месячные сроки хранятся в SQLite и по их окончании
+    превращаются в действие ``disable``.
     """
 
     def __init__(self, settings: Settings, db: Session):
@@ -93,12 +95,8 @@ class SynologyLifecycleService:
     def control_settings(self) -> SynologyControlSettings:
         row = self.db.get(SynologyControlSettings, 1)
         if row is not None:
-            # Первый этап никогда не должен случайно перейти в write-режим даже
-            # после ручного изменения SQLite.
-            if row.write_enabled:
-                row.write_enabled = False
-                self.db.commit()
             return row
+        # После установки патча write остается выключен до явного включения в Web.
         row = SynologyControlSettings(id=1, write_enabled=False)
         self.db.add(row)
         self.db.commit()
@@ -114,6 +112,7 @@ class SynologyLifecycleService:
         internal_expiry_months: int,
         external_expiry_months: int,
         delete_after_months: int,
+        write_enabled: bool,
         actor: str,
     ) -> SynologyControlSettings:
         values = {
@@ -126,20 +125,21 @@ class SynologyLifecycleService:
         }
         for name, (value, minimum, maximum) in values.items():
             if not minimum <= int(value) <= maximum:
-                raise ValueError(
-                    f"{name}: допустимо от {minimum} до {maximum}"
-                )
+                raise ValueError(f"{name}: допустимо от {minimum} до {maximum}")
 
         row = self.control_settings()
+        previous_write = bool(row.write_enabled)
         row.sync_interval_minutes = int(sync_interval_minutes)
         row.migration_batch_size = int(migration_batch_size)
         row.migration_interval_days = int(migration_interval_days)
         row.internal_expiry_months = int(internal_expiry_months)
         row.external_expiry_months = int(external_expiry_months)
         row.delete_after_months = int(delete_after_months)
-        row.write_enabled = False
+        row.write_enabled = bool(write_enabled)
         row.updated_by = actor
         row.updated_at = self.utcnow()
+
+        mode = "blocking" if row.write_enabled else "observe"
         self.db.add(
             AuditLog(
                 actor=actor,
@@ -151,10 +151,20 @@ class SynologyLifecycleService:
                     f"batch={row.migration_batch_size}/{row.migration_interval_days}d; "
                     f"internal={row.internal_expiry_months}m; "
                     f"external={row.external_expiry_months}m; "
-                    f"delete={row.delete_after_months}m; mode=observe"
+                    f"delete={row.delete_after_months}m; mode={mode}"
                 ),
             )
         )
+        if previous_write != row.write_enabled:
+            self.db.add(
+                AuditLog(
+                    actor=actor,
+                    action="synology_blocking_mode_changed",
+                    target="Synology DSM",
+                    result="enabled" if row.write_enabled else "disabled",
+                    details="write_scope=expired_true_only; delete=false; enable=false",
+                )
+            )
         self.db.commit()
         return row
 
@@ -168,9 +178,7 @@ class SynologyLifecycleService:
             domains.add(normalize_domain(self.settings.onec_source_domain))
 
         rows = self.db.scalars(
-            select(OneCAdditionalSource).where(
-                OneCAdditionalSource.enabled.is_(True)
-            )
+            select(OneCAdditionalSource).where(OneCAdditionalSource.enabled.is_(True))
         ).all()
         for row in rows:
             domain = normalize_domain(row.mail_domain)
@@ -178,11 +186,11 @@ class SynologyLifecycleService:
                 domains.add(domain)
         return domains
 
-    def _active_exceptions(self) -> tuple[dict[str, SynologyException], dict[str, SynologyException]]:
+    def _active_exceptions(
+        self,
+    ) -> tuple[dict[str, SynologyException], dict[str, SynologyException]]:
         rows = self.db.scalars(
-            select(SynologyException).where(
-                SynologyException.is_active.is_(True)
-            )
+            select(SynologyException).where(SynologyException.is_active.is_(True))
         ).all()
         by_login = {
             normalize_login(row.login): row
@@ -251,6 +259,24 @@ class SynologyLifecycleService:
             "dismissal_date": max(dates) if dates else None,
         }
 
+    def _hr_write_ready(self) -> tuple[bool, str]:
+        running = bool(
+            self.db.scalar(
+                select(OneCImportRun.id)
+                .where(OneCImportRun.status == "running")
+                .limit(1)
+            )
+        )
+        if running:
+            return False, "Выполняется импорт 1С"
+        ready = OneCSourceFreshnessService(
+            self.settings,
+            self.db,
+        ).all_control_exports_ready(expected_date=self.today)
+        if not ready:
+            return False, "Нет контрольной выгрузки 1С после 19:00 по всем источникам"
+        return True, "Контрольные выгрузки 1С актуальны"
+
     def _find_state(self, account: SynologyLocalUser) -> SynologyAccountState | None:
         row = self.db.scalar(
             select(SynologyAccountState).where(
@@ -269,8 +295,6 @@ class SynologyLifecycleService:
         if row is None:
             return None
 
-        # Если сначала DSM не дал UID, а затем дал – тихо усиливаем стабильный
-        # идентификатор, сохраняя накопленное lifecycle-состояние.
         conflict = self.db.scalar(
             select(SynologyAccountState.id).where(
                 SynologyAccountState.stable_id == account.stable_id,
@@ -315,12 +339,43 @@ class SynologyLifecycleService:
             row.classification,
             row.worker_key,
             row.match_method,
+            row.lifecycle_started_at,
+            row.cycle_started_at,
+            row.policy_expires_at,
             row.dismissal_reference_date,
             row.dismissal_reference_source,
             row.delete_after,
             row.desired_action,
             row.desired_reason,
+            row.last_action,
+            row.last_action_at,
         )
+
+    def _start_cycle(
+        self,
+        row: SynologyAccountState,
+        *,
+        months: int,
+        now: datetime,
+        source: str,
+    ) -> None:
+        if row.lifecycle_started_at is None:
+            row.lifecycle_started_at = now
+        row.cycle_started_at = now
+        row.policy_expires_at = add_months(self.today, months)
+        self._audit(
+            action="synology_cycle_started",
+            target=row.login,
+            details=(
+                f"classification={row.classification}; months={months}; "
+                f"policy_expires_at={row.policy_expires_at.isoformat()}; source={source}"
+            ),
+        )
+
+    @staticmethod
+    def _clear_cycle(row: SynologyAccountState) -> None:
+        row.cycle_started_at = None
+        row.policy_expires_at = None
 
     def _apply_observation(
         self,
@@ -346,13 +401,11 @@ class SynologyLifecycleService:
             previous_classification = ""
             previous_action = ""
             previous_active = None
-            previous_expiry = None
         else:
             previous_signature = self._state_signature(row)
             previous_classification = row.classification
             previous_action = row.desired_action
             previous_active = row.last_observed_active
-            previous_expiry = row.last_observed_expires_at
 
         exception = (
             exception_by_stable.get(account.stable_id)
@@ -367,7 +420,6 @@ class SynologyLifecycleService:
             active_employee=bool(hr["active"]),
         )
 
-        # Реальный HR worker_key нужен только при однозначном совпадении email.
         worker_key = str(hr["worker_key"] or "") if classification in {
             CLASS_INTERNAL_ACTIVE,
             CLASS_INTERNAL_DISMISSED,
@@ -391,31 +443,30 @@ class SynologyLifecycleService:
         row.match_method = match_method
         row.last_error = account.detail_error
 
+        reactivated = previous_active is False and account.is_active
+
         if classification == CLASS_INTERNAL_ACTIVE:
-            # Новая активная занятость полностью отменяет старый countdown на
-            # удаление. При следующем увольнении будет зафиксирована новая дата.
             row.dismissal_reference_date = None
             row.dismissal_reference_source = ""
             row.delete_after = None
+            if reactivated:
+                self._start_cycle(
+                    row,
+                    months=control.internal_expiry_months,
+                    now=now,
+                    source="reactivation",
+                )
         elif classification == CLASS_INTERNAL_DISMISSED:
+            self._clear_cycle(row)
             explicit_date = hr["dismissal_date"]
-            if (
-                explicit_date is not None
-                and row.dismissal_reference_source != "hr"
-            ):
+            if explicit_date is not None and row.dismissal_reference_source != "hr":
                 row.dismissal_reference_date = explicit_date
                 row.dismissal_reference_source = "hr"
-                row.delete_after = add_months(
-                    explicit_date,
-                    control.delete_after_months,
-                )
+                row.delete_after = add_months(explicit_date, control.delete_after_months)
             elif row.dismissal_reference_date is None:
                 row.dismissal_reference_date = self.today
                 row.dismissal_reference_source = "detected"
-                row.delete_after = add_months(
-                    self.today,
-                    control.delete_after_months,
-                )
+                row.delete_after = add_months(self.today, control.delete_after_months)
                 self._audit(
                     action="synology_dismissal_detected",
                     target=account.login,
@@ -425,10 +476,26 @@ class SynologyLifecycleService:
                         f"delete_after={row.delete_after.isoformat()}"
                     ),
                 )
-        elif classification in {CLASS_EXTERNAL, CLASS_UNKNOWN}:
+        elif classification == CLASS_EXTERNAL:
             row.dismissal_reference_date = None
             row.dismissal_reference_source = ""
             row.delete_after = None
+            if account.is_active and (
+                row.cycle_started_at is None
+                or row.policy_expires_at is None
+                or reactivated
+            ):
+                self._start_cycle(
+                    row,
+                    months=control.external_expiry_months,
+                    now=now,
+                    source="reactivation" if reactivated else "first_seen",
+                )
+        else:
+            row.dismissal_reference_date = None
+            row.dismissal_reference_source = ""
+            row.delete_after = None
+            self._clear_cycle(row)
 
         decision = desired_action(
             classification=classification,
@@ -461,25 +528,13 @@ class SynologyLifecycleService:
                 details=f"{previous_classification or '-'} -> {classification}",
             )
 
-        if previous_active is False and account.is_active:
+        if reactivated:
             self._audit(
                 action=(
                     "synology_dismissed_reactivated"
                     if classification == CLASS_INTERNAL_DISMISSED
                     else "synology_account_reactivated"
                 ),
-                target=account.login,
-                result="warning",
-                details=f"classification={classification}",
-            )
-
-        if (
-            previous_expiry is not None
-            and account.expires_at is None
-            and classification not in {CLASS_EXCEPTION, CLASS_PROTECTED, CLASS_UNKNOWN}
-        ):
-            self._audit(
-                action="synology_expiration_removed",
                 target=account.login,
                 result="warning",
                 details=f"classification={classification}",
@@ -493,19 +548,13 @@ class SynologyLifecycleService:
                 action="synology_action_required",
                 target=account.login,
                 result="warning",
-                details=(
-                    f"action={row.desired_action}; "
-                    f"reason={row.desired_reason}; mode=observe"
-                ),
+                details=f"action={row.desired_action}; reason={row.desired_reason}",
             )
 
         row.last_observed_active = account.is_active
         row.last_observed_expires_at = account.expires_at
 
-        changed = (
-            previous_signature is None
-            or previous_signature != self._state_signature(row)
-        )
+        changed = previous_signature is None or previous_signature != self._state_signature(row)
         return row, is_new, changed
 
     def _stage_migration_batch(
@@ -514,26 +563,7 @@ class SynologyLifecycleService:
         control: SynologyControlSettings,
         now: datetime,
     ) -> int:
-        """Выбрать следующий ограниченный пакет внутренних локальных учеток.
-
-        В read-only этапе это только фиксация плана в нашей БД. Следующий пакет
-        не выбирается, пока предыдущий все еще ожидает фактической установки
-        срока. Поэтому наблюдательный этап не накопит десятки неисполненных
-        пакетов и не превратит постепенную миграцию в массовую.
-        """
-        pending = int(
-            self.db.scalar(
-                select(func.count(SynologyAccountState.id)).where(
-                    SynologyAccountState.is_present.is_(True),
-                    SynologyAccountState.classification == CLASS_INTERNAL_ACTIVE,
-                    SynologyAccountState.desired_action == ACTION_SET_EXPIRY_INTERNAL,
-                )
-            )
-            or 0
-        )
-        if pending:
-            return 0
-
+        """Запустить 3-месячный цикл для очередного случайного пакета сотрудников."""
         last_batch = control.last_migration_batch_at
         if last_batch is not None:
             if last_batch.tzinfo is None:
@@ -560,28 +590,167 @@ class SynologyLifecycleService:
 
         count = min(max(1, int(control.migration_batch_size)), len(candidates))
         selected = random.SystemRandom().sample(candidates, count)
-        policy_expiry = add_months(self.today, control.internal_expiry_months)
         for row in selected:
-            if row.lifecycle_started_at is None:
-                row.lifecycle_started_at = now
-            row.cycle_started_at = now
-            row.policy_expires_at = policy_expiry
-            row.desired_action = ACTION_SET_EXPIRY_INTERNAL
-            row.desired_reason = (
-                "Выбран в очередной пакет постепенной миграции; "
-                f"плановый срок {policy_expiry.isoformat()}."
+            self._start_cycle(
+                row,
+                months=control.internal_expiry_months,
+                now=now,
+                source="migration_batch",
             )
+            row.desired_action = ACTION_NONE
+            row.desired_reason = f"Цикл действует до {row.policy_expires_at.isoformat()}."
             self._audit(
                 action="synology_migration_selected",
                 target=row.login,
                 details=(
-                    f"policy_expires_at={policy_expiry.isoformat()}; "
-                    f"batch_size={count}; mode=observe"
+                    f"policy_expires_at={row.policy_expires_at.isoformat()}; "
+                    f"batch_size={count}"
                 ),
             )
 
         control.last_migration_batch_at = now
         return count
+
+    def _refresh_action_for_current_snapshot(
+        self,
+        row: SynologyAccountState,
+        account: SynologyLocalUser,
+        *,
+        managed_domains: set[str],
+        exception_by_login: dict[str, SynologyException],
+        exception_by_stable: dict[str, SynologyException],
+        control: SynologyControlSettings,
+    ) -> str:
+        exception = (
+            exception_by_stable.get(account.stable_id)
+            or exception_by_login.get(normalize_login(account.login))
+        )
+        hr = self._hr_snapshot(account.email)
+        classification = classify_account(
+            email=account.email,
+            managed_domains=managed_domains,
+            protected=account.protected,
+            exception=exception is not None,
+            active_employee=bool(hr["active"]),
+        )
+        if classification != row.classification:
+            row.classification = classification
+            row.worker_key = str(hr["worker_key"] or "") if classification in {
+                CLASS_INTERNAL_ACTIVE,
+                CLASS_INTERNAL_DISMISSED,
+            } else ""
+            row.match_method = str(hr["match_method"] or "") if classification in {
+                CLASS_INTERNAL_ACTIVE,
+                CLASS_INTERNAL_DISMISSED,
+            } else ""
+
+        decision = desired_action(
+            classification=classification,
+            is_active=account.is_active,
+            observed_expires_at=account.expires_at,
+            today=self.today,
+            delete_after=row.delete_after,
+            enrolled=row.cycle_started_at is not None,
+            policy_expires_at=row.policy_expires_at,
+            previous_active=row.last_observed_active,
+            internal_months=control.internal_expiry_months,
+            external_months=control.external_expiry_months,
+        )
+        row.desired_action = decision.action
+        row.desired_reason = decision.reason
+        return classification
+
+    def _execute_disables(
+        self,
+        *,
+        accounts: list[SynologyLocalUser],
+        control: SynologyControlSettings,
+        managed_domains: set[str],
+        exception_by_login: dict[str, SynologyException],
+        exception_by_stable: dict[str, SynologyException],
+    ) -> tuple[int, int, int]:
+        """Исполнить только Expired=1. Возвращает success, failed, deferred."""
+        if not control.write_enabled:
+            return 0, 0, 0
+
+        by_stable = {account.stable_id: account for account in accounts}
+        rows = list(
+            self.db.scalars(
+                select(SynologyAccountState).where(
+                    SynologyAccountState.is_present.is_(True),
+                    SynologyAccountState.is_active.is_(True),
+                    SynologyAccountState.desired_action == ACTION_DISABLE,
+                )
+            ).all()
+        )
+        if not rows:
+            return 0, 0, 0
+
+        dsm = SynologyService(self.settings)
+        success = failed = deferred = 0
+
+        for row in rows:
+            account = by_stable.get(row.stable_id)
+            if account is None or account.detail_error:
+                failed += 1
+                row.last_error = account.detail_error if account is not None else "DSM: учетка исчезла из снимка"
+                continue
+
+            classification = self._refresh_action_for_current_snapshot(
+                row,
+                account,
+                managed_domains=managed_domains,
+                exception_by_login=exception_by_login,
+                exception_by_stable=exception_by_stable,
+                control=control,
+            )
+            if row.desired_action != ACTION_DISABLE:
+                deferred += 1
+                continue
+            if classification in {CLASS_EXCEPTION, CLASS_PROTECTED, CLASS_UNKNOWN}:
+                deferred += 1
+                continue
+            if classification in {CLASS_INTERNAL_ACTIVE, CLASS_INTERNAL_DISMISSED}:
+                # Проверка выполняется непосредственно перед каждым внешним
+                # изменением: импорт мог начаться уже после начала DSM-sync.
+                hr_ready, hr_reason = self._hr_write_ready()
+                if not hr_ready:
+                    deferred += 1
+                    # Это штатное ожидание, не ошибка карточки.
+                    row.desired_reason = f"{row.desired_reason} Ожидание: {hr_reason}."
+                    continue
+
+            try:
+                after = dsm.expire_account(account)
+                row.status = after.status
+                row.is_active = after.is_active
+                row.expires_at = after.expires_at
+                row.last_observed_active = False
+                row.last_action = "disable"
+                row.last_action_at = self.utcnow()
+                row.last_error = ""
+                row.desired_action = ACTION_NONE
+                row.desired_reason = "Учетная запись отключена в DSM (Expired=1)."
+                self._audit(
+                    action="synology_account_disabled",
+                    target=row.login,
+                    details=(
+                        f"classification={classification}; email={row.email}; "
+                        "method=Expired=1"
+                    ),
+                )
+                success += 1
+            except Exception as exc:
+                failed += 1
+                row.last_error = str(exc)
+                self._audit(
+                    action="synology_disable_failed",
+                    target=row.login,
+                    result="error",
+                    details=str(exc),
+                )
+
+        return success, failed, deferred
 
     def sync(self, *, trigger: str = "manual") -> SynologySyncRun:
         if not self.settings.synology_enabled:
@@ -612,7 +781,6 @@ class SynologyLifecycleService:
 
             new_count = 0
             changed_count = 0
-            planned = 0
             detail_errors = 0
             seen_ids: set[int] = set()
 
@@ -631,22 +799,34 @@ class SynologyLifecycleService:
                 new_count += int(is_new)
                 changed_count += int(changed)
                 detail_errors += int(bool(account.detail_error))
-                if row.desired_action != ACTION_NONE:
-                    planned += 1
 
-            # Выбираем только один ограниченный пакет внутренних учеток. Пока
-            # выбранный пакет не исполнен, следующий не формируется.
             self._stage_migration_batch(control=control, now=now)
 
-            # Пропавшая учетная запись остается в истории, но больше не
-            # участвует в lifecycle. Отдельный AuditLog на каждый обычный sync
-            # не создаем, чтобы журнал не превращался в технический шум.
             for row in states:
                 if row.id in seen_ids:
                     continue
                 if previously_present.get(row.id, False):
                     row.desired_action = ACTION_NONE
                     row.desired_reason = "Учетная запись отсутствует в текущем списке DSM."
+
+            disabled, disable_errors, deferred = self._execute_disables(
+                accounts=accounts,
+                control=control,
+                managed_domains=domains,
+                exception_by_login=by_login,
+                exception_by_stable=by_stable,
+            )
+            detail_errors += disable_errors
+
+            planned = int(
+                self.db.scalar(
+                    select(func.count(SynologyAccountState.id)).where(
+                        SynologyAccountState.is_present.is_(True),
+                        SynologyAccountState.desired_action != ACTION_NONE,
+                    )
+                )
+                or 0
+            )
 
             run.users_count = len(accounts)
             run.new_accounts = new_count
@@ -656,7 +836,9 @@ class SynologyLifecycleService:
             run.status = "partial" if detail_errors else "success"
             run.message = (
                 f"users={len(accounts)}; new={new_count}; changed={changed_count}; "
-                f"planned={planned}; detail_errors={detail_errors}; mode=observe"
+                f"planned={planned}; disabled={disabled}; deferred={deferred}; "
+                f"detail_errors={detail_errors}; "
+                f"mode={'blocking' if control.write_enabled else 'observe'}"
             )
             run.completed_at = self.utcnow()
             self.db.commit()
@@ -718,18 +900,17 @@ class SynologyLifecycleService:
             row.removed_by = ""
             row.removed_at = None
 
+        conditions = [func.lower(SynologyAccountState.login) == normalized]
+        if row.stable_id:
+            conditions.append(SynologyAccountState.stable_id == row.stable_id)
         states = list(
             self.db.scalars(
-                select(SynologyAccountState).where(
-                    or_(
-                        func.lower(SynologyAccountState.login) == normalized,
-                        SynologyAccountState.stable_id == row.stable_id,
-                    )
-                )
+                select(SynologyAccountState).where(or_(*conditions))
             ).all()
         )
         for state in states:
             state.classification = CLASS_EXCEPTION
+            self._clear_cycle(state)
             state.desired_action = ACTION_NONE
             state.desired_reason = "Учетная запись находится в списке исключений."
 
@@ -760,7 +941,10 @@ class SynologyLifecycleService:
             self.db.commit()
         return row
 
-    def connection_view(self) -> dict[str, object]:
+    def connection_view(
+        self,
+        control: SynologyControlSettings | None = None,
+    ) -> dict[str, object]:
         auth = self.settings.synology_ssh_auth
         password_present = bool(
             self.settings.synology_ssh_password
@@ -783,6 +967,7 @@ class SynologyLifecycleService:
             and auth_ready
         )
         known_hosts = Path(self.settings.synology_ssh_known_hosts)
+        control = control or self.control_settings()
         return {
             "enabled": self.settings.synology_enabled,
             "configured": configured,
@@ -793,15 +978,13 @@ class SynologyLifecycleService:
             "known_hosts": "найден" if known_hosts.is_file() else "не найден",
             "sudo": "Да" if self.settings.synology_ssh_use_sudo else "Нет",
             "command": self.settings.synology_synouser_command,
-            "mode": "Только чтение",
+            "mode": "Блокировка (Expired=1)" if control.write_enabled else "Наблюдение",
         }
 
     def view(self, *, limit: int = 2000) -> dict[str, object]:
         control = self.control_settings()
         latest = self.db.scalar(
-            select(SynologySyncRun)
-            .order_by(SynologySyncRun.id.desc())
-            .limit(1)
+            select(SynologySyncRun).order_by(SynologySyncRun.id.desc()).limit(1)
         )
         runs = list(
             self.db.scalars(
@@ -829,17 +1012,6 @@ class SynologyLifecycleService:
 
         account_rows: list[dict[str, object]] = []
         for row in states:
-            proposed_expiry = None
-            if row.desired_action == ACTION_SET_EXPIRY_EXTERNAL:
-                proposed_expiry = add_months(
-                    self.today,
-                    control.external_expiry_months,
-                )
-            elif row.desired_action == ACTION_SET_EXPIRY_INTERNAL:
-                proposed_expiry = add_months(
-                    self.today,
-                    control.internal_expiry_months,
-                )
             account_rows.append(
                 {
                     "row": row,
@@ -849,13 +1021,14 @@ class SynologyLifecycleService:
                     "action_label": ACTION_LABELS.get(
                         row.desired_action, row.desired_action
                     ),
-                    "proposed_expiry": proposed_expiry,
+                    "proposed_expiry": row.policy_expires_at,
                     "linked": bool(row.worker_key),
                 }
             )
 
+        hr_ready, hr_reason = self._hr_write_ready()
         return {
-            "connection": self.connection_view(),
+            "connection": self.connection_view(control),
             "control": control,
             "latest": latest,
             "runs": runs,
@@ -874,5 +1047,7 @@ class SynologyLifecycleService:
                     1 for row in states if row.desired_action != ACTION_NONE
                 ),
             },
-            "observe_only": True,
+            "observe_only": not control.write_enabled,
+            "hr_write_ready": hr_ready,
+            "hr_write_reason": hr_reason,
         }

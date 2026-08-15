@@ -69,6 +69,7 @@ def synology_policy_save(
     internal_expiry_months: int = Form(...),
     external_expiry_months: int = Form(...),
     delete_after_months: int = Form(...),
+    write_enabled: str = Form(""),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
@@ -82,6 +83,7 @@ def synology_policy_save(
             internal_expiry_months=internal_expiry_months,
             external_expiry_months=external_expiry_months,
             delete_after_months=delete_after_months,
+            write_enabled=write_enabled.strip().lower() in {"1", "true", "yes", "on"},
             actor=current.username,
         )
         return RedirectResponse("/settings/synology?saved=1", status_code=303)
@@ -138,7 +140,8 @@ def synology_sync(
             "ok": True,
             "message": (
                 f"Получено учеток: {run.users_count}; новых: {run.new_accounts}; "
-                f"требуют действий: {run.planned_actions}; ошибок карточек: {run.detail_errors}."
+                f"требуют действий: {run.planned_actions}; ошибок: {run.detail_errors}. "
+                f"{run.message}"
             ),
         }
     except Exception as exc:

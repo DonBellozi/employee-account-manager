@@ -44,11 +44,17 @@
     <dt>Режим</dt><dd><strong>{{ synology.connection.mode }}</strong></dd>
   </dl>
 
+  {% if synology.control.write_enabled %}
   <div class="alert warning">
-    <strong>Только чтение.</strong> Первый этап намеренно только читает DSM. Приложение уже классифицирует учетки,
-    рассчитывает требуемые действия и даты удаления, но пока не меняет срок,
-    не отключает и не удаляет пользователей Synology.
+    <strong>Блокировка включена.</strong> Приложение может только отключать локальные учетки DSM через
+    <code>Expired=1</code>. Автоматическое включение и удаление учетных записей на этом этапе отключены.
   </div>
+  {% else %}
+  <div class="alert warning">
+    <strong>Наблюдение.</strong> Классификация и сроки рассчитываются, но DSM не изменяется.
+    Для фактической блокировки включите режим в политике ниже.
+  </div>
+  {% endif %}
 
   <div class="integration-test-result" id="synology-result"></div>
   <details id="synology-diagnostics-result" hidden>
@@ -66,7 +72,9 @@
   <div class="integration-card-heading">
     <div>
       <h2>Политика</h2>
-      <span class="integration-badge active">Наблюдение</span>
+      <span class="integration-badge{% if synology.control.write_enabled %} active{% endif %}">
+        {{ 'Блокировка' if synology.control.write_enabled else 'Наблюдение' }}
+      </span>
     </div>
   </div>
 
@@ -98,10 +106,17 @@
         <input type="number" name="delete_after_months" min="1" max="60" value="{{ synology.control.delete_after_months }}" required>
       </label>
     </div>
+
+    <label style="display:flex;align-items:center;gap:.6rem;margin-top:1rem;">
+      <input type="checkbox" name="write_enabled" value="1"{% if synology.control.write_enabled %} checked{% endif %}>
+      <span><strong>Применять блокировки DSM</strong> – разрешить только установку <code>Expired=1</code></span>
+    </label>
+
     <p class="muted">
-      После включения write-этапа случайная выборка будет запускать по
-      {{ synology.control.migration_batch_size }} локальных учеток раз в
-      {{ synology.control.migration_interval_days }} дн. Текущий этап ничего в DSM не меняет.
+      Наш e-mail, отсутствующий среди действующих работников всех 1С, блокируется без льготного срока
+      после подтвержденной контрольной выгрузки. Действующие сотрудники получают 3-месячные циклы
+      пакетами по {{ synology.control.migration_batch_size }} раз в {{ synology.control.migration_interval_days }} дн.;
+      внешние учетки – 6-месячный цикл. Удаление пока не выполняется.
     </p>
     <div class="integration-card-actions">
       <button class="button" type="submit">Сохранить</button>
@@ -124,6 +139,13 @@
 
   <dl class="integration-details">
     <dt>Наши домены</dt><dd>{{ synology.managed_domains|join(', ') if synology.managed_domains else '–' }}</dd>
+    <dt>Контроль 1С для блокировок</dt>
+    <dd>
+      <span class="status {{ 'success' if synology.hr_write_ready else 'running' }}">
+        {{ 'Готов' if synology.hr_write_ready else 'Ожидание' }}
+      </span>
+      <div class="journal-object-meta">{{ synology.hr_write_reason }}</div>
+    </dd>
     <dt>Последняя синхронизация</dt>
     <dd>
       {% if synology.latest %}
@@ -140,7 +162,8 @@
       <h2>Локальные учетные записи</h2>
       <p class="muted">
         Учетка нашего домена, которой нет среди действующих работников ни одной организации,
-        считается уволенной. Для нее фиксируется дата увольнения из HR, а если ее нет – дата первого обнаружения.
+        блокируется сразу после безопасной кадровой проверки. Для действующих сотрудников и внешних
+        учеток дата в колонке «Контроль до» хранится приложением, а не DSM.
       </p>
     </div>
   </div>
@@ -151,11 +174,11 @@
         <th>Login</th>
         <th>Email / описание</th>
         <th>DSM</th>
-        <th>Срок DSM</th>
+        <th>Контроль до</th>
         <th>Классификация</th>
         <th>HR</th>
         <th>Требуется</th>
-        <th>Удалить после</th>
+        <th>Удалить после (план)</th>
       </tr>
     </thead>
     <tbody>
@@ -174,7 +197,13 @@
         <td>
           <span class="status {{ 'success' if row.is_active else 'failed' }}">{{ row.status }}</span>
         </td>
-        <td>{{ row.expires_at.strftime('%d.%m.%Y') if row.expires_at else 'бессрочно / не определено' }}</td>
+        <td>
+          {% if item.proposed_expiry %}
+            {{ item.proposed_expiry.strftime('%d.%m.%Y') }}
+          {% elif row.classification == 'internal_dismissed' and row.is_active %}
+            сразу
+          {% else %}–{% endif %}
+        </td>
         <td>
           <span class="status {{ 'success' if row.classification == 'internal_active' else 'failed' if row.classification == 'internal_dismissed' else 'running' }}">
             {{ item.classification_label }}
@@ -191,8 +220,8 @@
         </td>
         <td>
           <strong>{{ item.action_label }}</strong>
-          {% if item.proposed_expiry %}<div class="journal-object-meta">до {{ item.proposed_expiry.strftime('%d.%m.%Y') }}</div>{% endif %}
           {% if row.desired_reason %}<div class="journal-object-meta">{{ row.desired_reason }}</div>{% endif %}
+          {% if row.last_action_at %}<div class="journal-object-meta">последнее действие: {{ row.last_action or '–' }} {{ row.last_action_at|app_datetime('%d.%m.%Y %H:%M') }}</div>{% endif %}
         </td>
         <td>{{ row.delete_after.strftime('%d.%m.%Y') if row.delete_after else '–' }}</td>
       </tr>
@@ -264,7 +293,7 @@
         <td>{{ run.new_accounts }}</td>
         <td>{{ run.changed_accounts }}</td>
         <td>{{ run.planned_actions }}</td>
-        <td>{% if run.error_message %}<span class="registry-error">{{ run.error_message }}</span>{% elif run.detail_errors %}Ошибок карточек: {{ run.detail_errors }}{% else %}–{% endif %}</td>
+        <td>{% if run.error_message %}<span class="registry-error">{{ run.error_message }}</span>{% elif run.detail_errors %}Ошибок: {{ run.detail_errors }}{% else %}–{% endif %}</td>
       </tr>
     {% else %}
       <tr><td colspan="8" class="muted">Запусков пока нет.</td></tr>
@@ -297,7 +326,7 @@
     test.disabled = true;
     test.textContent = 'Проверяю...';
     result.className = 'integration-test-result checking';
-    result.textContent = 'Проверяю SSH и read-only synouser...';
+    result.textContent = 'Проверяю SSH и чтение synouser...';
     try {
       const payload = await post('/settings/synology/test');
       result.className = 'integration-test-result success';
@@ -319,7 +348,7 @@
     sync.disabled = true;
     sync.textContent = 'Синхронизирую...';
     result.className = 'integration-test-result checking';
-    result.textContent = 'Читаю локальные учетные записи DSM и сверяю с кадровыми источниками...';
+    result.textContent = 'Читаю локальные учетные записи DSM, сверяю сроки и применяю разрешенные блокировки...';
     try {
       const payload = await post('/settings/synology/sync');
       result.className = 'integration-test-result success';

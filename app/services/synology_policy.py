@@ -15,6 +15,9 @@ CLASS_PROTECTED = "protected_system"
 ACTION_NONE = "none"
 ACTION_CLASSIFY = "classify"
 ACTION_MIGRATION_CANDIDATE = "migration_candidate"
+# Имена сохранены для совместимости с существующей БД/UI. На этапе блокировки
+# даты 3/6 месяцев хранятся только в SQLite; DSM получает только Expired=true
+# после наступления policy_expires_at.
 ACTION_SET_EXPIRY_INTERNAL = "set_expiry_internal"
 ACTION_SET_EXPIRY_EXTERNAL = "set_expiry_external"
 ACTION_DISABLE = "disable"
@@ -77,9 +80,8 @@ def classify_account(
 
     normalized_domains = {normalize_domain(item) for item in managed_domains if item}
     if domain in normalized_domains:
-        # Согласованное правило проекта: учетная запись нашего домена считается
-        # уволенной, если ее email отсутствует среди действующих работников всех
-        # кадровых источников. Наличие worker_key для этого не обязательно.
+        # Учетка нашего домена считается уволенной/отсутствующей, если ее email
+        # нет среди действующих работников ни одного кадрового источника.
         return CLASS_INTERNAL_ACTIVE if active_employee else CLASS_INTERNAL_DISMISSED
     return CLASS_EXTERNAL
 
@@ -97,6 +99,10 @@ def desired_action(
     internal_months: int,
     external_months: int,
 ) -> PolicyDecision:
+    # observed_expires_at/delete_after оставлены в сигнатуре для совместимости.
+    # На текущем этапе DSM не хранит календарный срок и удаление не выполняется.
+    _ = observed_expires_at, delete_after, previous_active
+
     if classification in {CLASS_EXCEPTION, CLASS_PROTECTED}:
         return PolicyDecision(ACTION_NONE, "Автоматизация отключена для этой учетки.")
 
@@ -107,17 +113,12 @@ def desired_action(
         )
 
     if classification == CLASS_INTERNAL_DISMISSED:
-        if delete_after is not None and delete_after <= today:
-            return PolicyDecision(
-                ACTION_DELETE,
-                f"Срок хранения после увольнения истек {delete_after.isoformat()}.",
-            )
         if is_active:
             return PolicyDecision(
                 ACTION_DISABLE,
                 "Учетка нашего домена отсутствует среди действующих работников.",
             )
-        return PolicyDecision(ACTION_NONE, "Уволенная локальная учетка уже отключена.")
+        return PolicyDecision(ACTION_NONE, "Учетка уже отключена в DSM.")
 
     if classification == CLASS_EXTERNAL:
         if not is_active:
@@ -125,45 +126,40 @@ def desired_action(
                 ACTION_NONE,
                 "Внешняя учетка неактивна; автоматически не включаем ее.",
             )
-        limit = add_months(today, external_months)
-        if observed_expires_at is None:
+        if not enrolled or policy_expires_at is None:
             return PolicyDecision(
                 ACTION_SET_EXPIRY_EXTERNAL,
-                f"Внешняя учетка не должна быть бессрочной; максимум {external_months} мес.",
+                f"Требуется начать цикл контроля на {external_months} мес.",
             )
-        if observed_expires_at > limit:
+        if policy_expires_at <= today:
             return PolicyDecision(
-                ACTION_SET_EXPIRY_EXTERNAL,
-                f"Срок внешней учетки превышает максимум {external_months} мес.",
+                ACTION_DISABLE,
+                f"Истек {external_months}-месячный срок контроля ({policy_expires_at.isoformat()}).",
             )
-        return PolicyDecision(ACTION_NONE, "Срок внешней учетки находится в пределах политики.")
+        return PolicyDecision(
+            ACTION_NONE,
+            f"Цикл действует до {policy_expires_at.isoformat()}.",
+        )
 
     if classification == CLASS_INTERNAL_ACTIVE:
-        if not enrolled:
-            return PolicyDecision(
-                ACTION_MIGRATION_CANDIDATE,
-                f"Кандидат на постепенную миграцию локальной учетки: {internal_months} мес.",
-            )
         if not is_active:
             return PolicyDecision(
                 ACTION_NONE,
-                "Локальная учетка сотрудника отключена; ожидаем увольнение или ручную реактивацию.",
+                "Локальная учетка сотрудника уже отключена; автоматически не включаем ее.",
             )
-        if previous_active is False:
+        if not enrolled or policy_expires_at is None:
             return PolicyDecision(
-                ACTION_SET_EXPIRY_INTERNAL,
-                f"Обнаружена реактивация; требуется новый срок {internal_months} мес.",
+                ACTION_MIGRATION_CANDIDATE,
+                f"Кандидат на постепенный цикл блокировки: {internal_months} мес.",
             )
-        if observed_expires_at is None:
+        if policy_expires_at <= today:
             return PolicyDecision(
-                ACTION_SET_EXPIRY_INTERNAL,
-                f"Срок снят; требуется восстановить ограничение на {internal_months} мес.",
+                ACTION_DISABLE,
+                f"Истек {internal_months}-месячный срок контроля ({policy_expires_at.isoformat()}).",
             )
-        if policy_expires_at is not None and observed_expires_at > policy_expires_at:
-            return PolicyDecision(
-                ACTION_SET_EXPIRY_INTERNAL,
-                f"Срок продлен сверх текущего цикла; требуется новый цикл {internal_months} мес.",
-            )
-        return PolicyDecision(ACTION_NONE, "Текущий трехмесячный цикл не требует изменения.")
+        return PolicyDecision(
+            ACTION_NONE,
+            f"Цикл действует до {policy_expires_at.isoformat()}.",
+        )
 
     return PolicyDecision(ACTION_CLASSIFY, "Неизвестное lifecycle-состояние.")

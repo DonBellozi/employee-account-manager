@@ -34,12 +34,12 @@ class SynologyDiagnostic:
 
 
 class SynologyService:
-    """Read-only SSH-клиент локальных пользователей Synology DSM.
+    """SSH-клиент локальных пользователей Synology DSM.
 
-    Первый этап намеренно не содержит изменяющих команд. Мы читаем штатную
-    CLI-утилиту `synouser`, классифицируем учетные записи и строим lifecycle-
-    действия. Точные команды изменения срока/disable/delete будут подключены
-    только после проверки фактического CLI DSM на рабочем NAS.
+    Чтение выполняется через штатный ``synouser``. На текущем write-этапе
+    разрешено только безопасное отключение локальной учетки установкой
+    ``Expired=1``. Включение, удаление и изменение других атрибутов здесь
+    намеренно не реализованы.
     """
 
     SYSTEM_LOGINS = {
@@ -48,6 +48,10 @@ class SynologyService:
         "guest",
         "root",
     }
+
+    # DSM в конце `synouser --enum local` печатает, например,
+    # `294 User Listed:`. Это счетчик, а не логин.
+    ENUM_SUMMARY_RE = re.compile(r"^\s*\d+\s+users?\s+listed\s*:?\s*$", re.IGNORECASE)
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -176,6 +180,7 @@ class SynologyService:
                 "local user" in folded
                 or "domain user" in folded
                 or folded.startswith("total")
+                or cls.ENUM_SUMMARY_RE.fullmatch(line) is not None
                 or set(line) <= {"-", "=", " "}
             ):
                 continue
@@ -397,6 +402,63 @@ class SynologyService:
         finally:
             client.close()
 
+    def expire_account(self, account: SynologyLocalUser) -> SynologyLocalUser:
+        """Отключить локальную учетку установкой Expired=1 и перепроверить DSM.
+
+        `synouser --modify` требует передать также текущее полное имя и e-mail,
+        поэтому непосредственно перед изменением карточка перечитывается. UID и
+        e-mail должны совпасть с только что классифицированным снимком.
+        """
+        if not account.login.strip():
+            raise ValueError("DSM: пустой login")
+        if account.protected or account.login.casefold() in self.SYSTEM_LOGINS:
+            raise RuntimeError(f"DSM: защищенная учетка {account.login} не изменяется")
+        if not account.email.strip():
+            raise RuntimeError(f"DSM: у {account.login} нет e-mail; автоматическая блокировка запрещена")
+
+        client = self._client()
+        try:
+            before_raw = self._execute(client, ["--get", account.login])
+            before = self._parse_detail(account.login, before_raw)
+
+            if before.protected or before.login.casefold() in self.SYSTEM_LOGINS:
+                raise RuntimeError(f"DSM: защищенная учетка {before.login} не изменяется")
+            if before.stable_id != account.stable_id:
+                raise RuntimeError(
+                    f"DSM: stable_id изменился для {account.login}: "
+                    f"{account.stable_id} -> {before.stable_id}"
+                )
+            if before.email.strip().lower() != account.email.strip().lower():
+                raise RuntimeError(
+                    f"DSM: e-mail изменился для {account.login}: "
+                    f"{account.email} -> {before.email}"
+                )
+            if not before.is_active:
+                return before
+
+            # Фактическая сигнатура DSM 7.x, проверенная на рабочем NAS:
+            # synouser --modify username "full name" expired{0|1} mail
+            self._execute(
+                client,
+                [
+                    "--modify",
+                    before.login,
+                    before.description,
+                    "1",
+                    before.email,
+                ],
+            )
+
+            verify_raw = self._execute(client, ["--get", before.login])
+            after = self._parse_detail(before.login, verify_raw)
+            if after.stable_id != before.stable_id:
+                raise RuntimeError(f"DSM: после блокировки изменился stable_id {before.login}")
+            if after.is_active:
+                raise RuntimeError(f"DSM: {before.login} осталась активной после Expired=1")
+            return after
+        finally:
+            client.close()
+
     def test_connection(self) -> str:
         """Проверить SSH/synouser без ложного отказа на особой учетке DSM.
 
@@ -444,7 +506,7 @@ class SynologyService:
             client.close()
 
     def diagnostics(self) -> SynologyDiagnostic:
-        """Безопасная диагностика CLI для следующего этапа write-интеграции."""
+        """Безопасная диагностика CLI; изменяющие команды не выполняются."""
         client = self._client()
         try:
             help_output = self._execute(client, ["--help"], allow_nonzero=True)
