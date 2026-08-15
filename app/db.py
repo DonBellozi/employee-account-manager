@@ -55,6 +55,9 @@ def ensure_compatibility_schema() -> None:
                 "mass_disable_ack_at": "DATETIME",
                 "mass_disable_ack_count": "INTEGER NOT NULL DEFAULT 0",
                 "mass_disable_ack_by": "VARCHAR(256) NOT NULL DEFAULT ''",
+                "block_window_date": "DATE",
+                "block_attempts": "INTEGER NOT NULL DEFAULT 0",
+                "last_block_attempt_at": "DATETIME",
             },
         )
         add_missing_columns(

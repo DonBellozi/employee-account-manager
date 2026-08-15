@@ -36,9 +36,11 @@ class OneCImapPollingSafetyTests(unittest.TestCase):
     def test_control_export_is_required_before_blocking(self):
         freshness = (ROOT / "app/services/onec_freshness.py").read_text(encoding="utf-8")
         lifecycle = (ROOT / "app/services/final_dismissal_lifecycle.py").read_text(encoding="utf-8")
+        window = (ROOT / "app/services/blocking_window.py").read_text(encoding="utf-8")
         self.assertIn("CONTROL_EXPORT_TIME = time(19, 0)", freshness)
         self.assertIn("all_control_exports_ready", lifecycle)
-        self.assertIn("BLOCK_TIME = time(19, 10)", lifecycle)
+        self.assertIn("BLOCK_TIME = time(19, 10)", window)
+        self.assertIn("from app.services.blocking_window import", lifecycle)
 
     def test_suspicious_mass_drop_is_rejected_before_import(self):
         text = (ROOT / "app/services/onec_scheduler.py").read_text(encoding="utf-8")

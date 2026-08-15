@@ -83,9 +83,13 @@ def test_external_blocks_when_six_month_cycle_is_due():
     assert decision.action == ACTION_DISABLE
 
 
-def test_unknown_account_requires_classification():
+def test_unknown_account_is_disabled():
     decision = _decision(CLASS_UNKNOWN, active=True, enrolled=False, expires=None)
-    assert decision.action == ACTION_CLASSIFY
+    # Нераспознанная учетка (нет пригодного e-mail) больше не остается
+    # висеть в статусе «требует классификации»: под ней неизвестно кто
+    # заходит, поэтому она отключается.
+    assert decision.action == ACTION_DISABLE
+    assert decision.action != ACTION_CLASSIFY
 
 
 def test_expire_account_uses_verified_modify_signature(monkeypatch):
@@ -143,3 +147,77 @@ Member Of: [100] users
         "1",
         "baranov.gb@domain.ru",
     ] in calls
+
+
+def test_expire_account_blocks_entry_without_email(monkeypatch):
+    """Учетка без e-mail отключается: неизвестно, кто под ней заходит."""
+    service = SynologyService(SimpleNamespace())
+
+    class FakeClient:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "_client", lambda: FakeClient())
+
+    before = """
+User Name: [legacy.share]
+User uid: [1601]
+Fullname: []
+Expired: [false]
+User Mail: []
+""".strip()
+    after = before.replace("Expired: [false]", "Expired: [true]")
+
+    calls: list[list[str]] = []
+    get_count = 0
+
+    def fake_execute(_client, args, *, allow_nonzero=False):
+        nonlocal get_count
+        calls.append(list(args))
+        if args[:2] == ["--get", "legacy.share"]:
+            get_count += 1
+            return before if get_count == 1 else after
+        if args[0] == "--modify":
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(service, "_execute", fake_execute)
+
+    account = SynologyLocalUser(
+        login="legacy.share",
+        stable_id="uid:1601",
+        uid="1601",
+        email="",
+        status="active",
+        is_active=True,
+    )
+    result = service.expire_account(account)
+
+    assert result.is_active is False
+    # В DSM передается ровно то, что там уже было: пустой e-mail остается пустым.
+    assert ["--modify", "legacy.share", "", "1", ""] in calls
+
+
+def test_expire_account_still_refuses_system_entries(monkeypatch):
+    service = SynologyService(SimpleNamespace())
+    monkeypatch.setattr(
+        service,
+        "_client",
+        lambda: (_ for _ in ()).throw(AssertionError("SSH не нужен")),
+    )
+
+    account = SynologyLocalUser(
+        login="admin",
+        stable_id="uid:1024",
+        uid="1024",
+        email="admin@domain.ru",
+        status="active",
+        is_active=True,
+        protected=True,
+    )
+    try:
+        service.expire_account(account)
+    except RuntimeError as exc:
+        assert "защищенная" in str(exc)
+    else:
+        raise AssertionError("защищенная учетка не должна изменяться")

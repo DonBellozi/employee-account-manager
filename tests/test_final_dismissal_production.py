@@ -27,11 +27,19 @@ class FinalDismissalProductionTests(unittest.TestCase):
         self.assertIn("historical_backfill=false", text)
 
     def test_blocking_time_is_1910(self):
+        # Время окна теперь общее для AD, Zimbra и Synology DSM и живет в
+        # отдельном модуле, чтобы контуры не разъезжались по расписанию.
+        window = (ROOT / "app/services/blocking_window.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("BLOCK_TIME = time(19, 10)", window)
+        self.assertIn('BLOCK_TIME_LABEL = "19:10"', window)
+
         text = (
             ROOT / "app/services/final_dismissal_lifecycle.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("BLOCK_TIME = time(19, 10)", text)
-        self.assertIn('BLOCK_TIME_LABEL = "19:10"', text)
+        self.assertIn("from app.services.blocking_window import", text)
+        self.assertIn("BLOCK_TIME", text)
 
     def test_every_external_attempt_rechecks_hr_state(self):
         text = (

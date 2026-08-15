@@ -207,7 +207,10 @@ def test_internal_migration_and_reactivation_do_not_slide_each_sync():
     assert reactivated.action == ACTION_MIGRATION_CANDIDATE
 
 
-def test_unknown_requires_manual_classification():
+def test_account_without_email_is_disabled():
+    # Учетку без пригодного e-mail нельзя связать с работником, то есть
+    # неизвестно, кто под ней заходит. Такие записи блокируются; служебные
+    # выводятся из-под автоматики списком исключений.
     decision = desired_action(
         classification=CLASS_UNKNOWN,
         is_active=True,
@@ -220,4 +223,38 @@ def test_unknown_requires_manual_classification():
         internal_months=3,
         external_months=6,
     )
-    assert decision.action == ACTION_CLASSIFY
+    assert decision.action == ACTION_DISABLE
+    assert decision.action != ACTION_CLASSIFY
+
+
+def test_already_disabled_unknown_is_left_alone():
+    decision = desired_action(
+        classification=CLASS_UNKNOWN,
+        is_active=False,
+        observed_expires_at=None,
+        today=date(2026, 8, 11),
+        delete_after=None,
+        enrolled=False,
+        policy_expires_at=None,
+        previous_active=False,
+        internal_months=3,
+        external_months=6,
+    )
+    assert decision.action == ACTION_NONE
+
+
+def test_exception_and_system_accounts_are_the_only_ones_spared():
+    for classification in (CLASS_EXCEPTION, CLASS_PROTECTED):
+        decision = desired_action(
+            classification=classification,
+            is_active=True,
+            observed_expires_at=None,
+            today=date(2026, 8, 11),
+            delete_after=None,
+            enrolled=False,
+            policy_expires_at=None,
+            previous_active=None,
+            internal_months=3,
+            external_months=6,
+        )
+        assert decision.action == ACTION_NONE

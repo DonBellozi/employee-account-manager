@@ -85,6 +85,21 @@ def test_mass_disable_guard_is_wired_end_to_end():
     assert "synology_sync_runs" in db
 
 
+def test_only_system_and_exceptions_are_spared():
+    service = read("app/services/synology.py")
+    policy = read("app/services/synology_policy.py")
+    lifecycle = read("app/services/synology_lifecycle.py")
+
+    # Защита сузилась до реально системных записей.
+    assert "SYSTEM_LOGINS" in service
+    assert "uid_number < 1024" in service
+    assert '"administrators" in lowered_output' not in service
+
+    # Нераспознанные учетки блокируются, а не ждут ручной классификации.
+    assert "CLASS_UNKNOWN" in policy
+    assert "{CLASS_EXCEPTION, CLASS_PROTECTED}" in lifecycle
+
+
 def test_synouser_commands_have_a_hard_deadline():
     service = read("app/services/synology.py")
     # recv_exit_status() без таймаута вешал фоновый поток вместе с локом.

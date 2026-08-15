@@ -107,10 +107,17 @@ def desired_action(
         return PolicyDecision(ACTION_NONE, "Автоматизация отключена для этой учетки.")
 
     if classification == CLASS_UNKNOWN:
-        return PolicyDecision(
-            ACTION_CLASSIFY,
-            "Нет надежных данных для автоматической классификации.",
-        )
+        # Цель контура — увести людей с локальных учеток на доменную
+        # авторизацию. Учетка без пригодного e-mail не сопоставляется ни с
+        # одним работником, то есть непонятно, кто под ней заходит. Такие
+        # записи блокируются; служебные исключаются вручную через список
+        # исключений, а системные защищены отдельным классом.
+        if is_active:
+            return PolicyDecision(
+                ACTION_DISABLE,
+                "Учетку невозможно сопоставить с работником: нет пригодного e-mail.",
+            )
+        return PolicyDecision(ACTION_NONE, "Учетка уже отключена в DSM.")
 
     if classification == CLASS_INTERNAL_DISMISSED:
         if is_active:

@@ -8,6 +8,7 @@ from sqlalchemy import desc, select
 
 from app.config import Settings
 from app.models_synology import SynologySyncRun
+from app.services.blocking_window import BLOCK_RETRY_MINUTES
 from app.services.synology_lifecycle import SynologyLifecycleService
 
 
@@ -63,6 +64,23 @@ class SynologyLifecycleScheduler:
         elapsed = (datetime.now(timezone.utc) - completed).total_seconds() / 60.0
         return elapsed >= max(1, int(interval_minutes))
 
+    @staticmethod
+    def _effective_interval(service, control) -> int:
+        """Интервал до следующей сверки с учетом окна блокировок.
+
+        В обычное время достаточно настроенной периодичности. Но пока окно
+        плановых блокировок открыто и есть незакрытая работа, сверка должна
+        приходить не реже интервала повтора — иначе редкая сверка растянула бы
+        повторные попытки на весь вечер.
+        """
+        interval = int(control.sync_interval_minutes)
+        if not control.write_enabled:
+            return interval
+        window_open, _reason = service.block_window_state(control)
+        if window_open and service.pending_disable_count():
+            return min(interval, BLOCK_RETRY_MINUTES)
+        return interval
+
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -70,7 +88,10 @@ class SynologyLifecycleScheduler:
                     with self.session_factory() as db:
                         service = SynologyLifecycleService(self.settings, db)
                         control = service.control_settings()
-                        if self._due(db, control.sync_interval_minutes):
+                        if self._due(
+                            db,
+                            self._effective_interval(service, control),
+                        ):
                             result = service.sync(trigger="scheduled")
                             logger.info(
                                 "Synology DSM: status=%s users=%s planned=%s detail_errors=%s",

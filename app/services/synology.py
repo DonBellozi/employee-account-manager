@@ -414,12 +414,14 @@ class SynologyService:
         except (TypeError, ValueError):
             uid_number = None
 
-        lowered_output = str(output or "").casefold()
+        # Защищаются только действительно системные записи DSM: служебные
+        # логины и низкие UID. Раньше здесь дополнительно искалась подстрока
+        # "administrator" по всему выводу карточки — под нее попадали обычные
+        # сотрудники из-за описания должности, и они молча выпадали из
+        # блокировки. Служебные учетки закрываются списком исключений.
         protected = (
             parsed_login.casefold() in cls.SYSTEM_LOGINS
             or (uid_number is not None and uid_number < 1024)
-            or "administrators" in lowered_output
-            or "administrator" in lowered_output and "group" in lowered_output
         )
         stable_id = (
             f"uid:{uid_number}"
@@ -469,13 +471,16 @@ class SynologyService:
         `synouser --modify` требует передать также текущее полное имя и e-mail,
         поэтому непосредственно перед изменением карточка перечитывается. UID и
         e-mail должны совпасть с только что классифицированным снимком.
+
+        Пустой e-mail не является препятствием: такие учетки нельзя сопоставить
+        с работником, и по политике проекта они подлежат отключению. В DSM
+        передается ровно то значение, которое там уже записано, поэтому
+        блокировка не меняет карточку ничем, кроме признака Expired.
         """
         if not account.login.strip():
             raise ValueError("DSM: пустой login")
         if account.protected or account.login.casefold() in self.SYSTEM_LOGINS:
             raise RuntimeError(f"DSM: защищенная учетка {account.login} не изменяется")
-        if not account.email.strip():
-            raise RuntimeError(f"DSM: у {account.login} нет e-mail; автоматическая блокировка запрещена")
 
         client = self._client()
         try:

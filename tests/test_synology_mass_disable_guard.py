@@ -117,13 +117,19 @@ class SynologyMassDisableGuardTests(unittest.TestCase):
 
     def run_disables(self, accounts, control):
         service = self.service()
-        return service._execute_disables(
-            accounts=accounts,
-            control=control,
-            managed_domains={"corp.test"},
-            exception_by_login={},
-            exception_by_stable={},
-        )
+        # Окно блокировок проверяется отдельным набором тестов; здесь оно
+        # держится открытым, чтобы результат не зависел от времени прогона.
+        with patch(
+            "app.services.synology_lifecycle.is_block_window_open",
+            return_value=True,
+        ):
+            return service._execute_disables(
+                accounts=accounts,
+                control=control,
+                managed_domains={"corp.test"},
+                exception_by_login={},
+                exception_by_stable={},
+            )
 
     def audit_actions(self) -> list[str]:
         return list(self.db.scalars(select(AuditLog.action)).all())

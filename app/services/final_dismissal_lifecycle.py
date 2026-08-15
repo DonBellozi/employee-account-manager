@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -28,6 +28,11 @@ from app.services.hr_registry import (
     worker_requires_active_accounts,
     zimbra_registry_status,
 )
+from app.services.blocking_window import (
+    BLOCK_TIME,
+    BLOCK_TIME_LABEL,
+    is_block_window_open,
+)
 from app.services.onec_freshness import OneCSourceFreshnessService
 from app.services.upcoming_dismissals import UpcomingDismissalService
 from app.services.zimbra import ZimbraService
@@ -36,8 +41,9 @@ from app.services.zimbra import ZimbraService
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 60
-BLOCK_TIME = time(19, 10)
-BLOCK_TIME_LABEL = "19:10"
+# BLOCK_TIME/BLOCK_TIME_LABEL импортируются из blocking_window: окно плановых
+# блокировок общее для AD, Zimbra и Synology DSM. Имена сохранены здесь ради
+# уже существующих ссылок в коде и тестах.
 SUCCESS_TARGET_STATUSES = {"completed", "already_completed"}
 RETRY_DELAYS_MINUTES = (1, 2, 5, 10, 15, 30, 60)
 POST_RECONCILE_ACTION = "final_dismissal_post_reconcile"
@@ -199,7 +205,7 @@ class FinalDismissalLifecycleService:
             return True
         if effective_date > now.date():
             return False
-        return now.time().replace(tzinfo=None) >= BLOCK_TIME
+        return is_block_window_open(now)
 
     def _still_due(
         self,

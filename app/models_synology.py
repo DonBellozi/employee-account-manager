@@ -41,6 +41,14 @@ class SynologyControlSettings(Base):
     )
     mass_disable_ack_count: Mapped[int] = mapped_column(Integer, default=0)
     mass_disable_ack_by: Mapped[str] = mapped_column(String(256), default="")
+
+    # Состояние суточного окна блокировок. Счетчик попыток обнуляется вместе
+    # со сменой даты: незавершенная работа переносится на следующий вечер.
+    block_window_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    block_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_block_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_by: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow

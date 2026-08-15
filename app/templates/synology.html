@@ -148,9 +148,18 @@
 
     <p class="muted">
       Наш e-mail, отсутствующий среди действующих работников всех 1С, блокируется без льготного срока
-      после подтвержденной контрольной выгрузки. Действующие сотрудники получают 3-месячные циклы
+      после подтвержденной контрольной выгрузки. Учетки, которые не удается сопоставить с работником
+      (в первую очередь без e-mail), блокируются сразу: под ними неизвестно кто заходит.
+      Действующие сотрудники получают 3-месячные циклы
       пакетами по {{ synology.control.migration_batch_size }} раз в {{ synology.control.migration_interval_days }} дн.;
       внешние учетки – 6-месячный цикл. Удаление пока не выполняется.
+    </p>
+    <p class="muted">
+      Из-под автоматики выведены только системные записи DSM и список исключений ниже.
+      Служебные и интеграционные учетки заносите именно в исключения.
+      Блокировки выполняются в общем окне проекта: не ранее {{ synology.window_label }},
+      повтор каждые {{ synology.window_retry_minutes }} мин, не более
+      {{ synology.window_max_attempts }} попыток за сутки.
     </p>
     <p class="muted">
       Если за один прогон к отключению готово больше
@@ -179,12 +188,27 @@
 
   <dl class="integration-details">
     <dt>Наши домены</dt><dd>{{ synology.managed_domains|join(', ') if synology.managed_domains else '–' }}</dd>
+    <dt>Окно плановых блокировок</dt>
+    <dd>
+      <span class="status {{ 'success' if synology.window_open else 'running' }}">
+        {{ 'Открыто' if synology.window_open else 'Закрыто' }}
+      </span>
+      <div class="journal-object-meta">
+        {{ synology.window_reason }}.
+        Начало в {{ synology.window_label }}, повтор каждые
+        {{ synology.window_retry_minutes }} мин, попыток за сегодня
+        {{ synology.window_attempts }} из {{ synology.window_max_attempts }}.
+      </div>
+    </dd>
     <dt>Контроль 1С для блокировок</dt>
     <dd>
       <span class="status {{ 'success' if synology.hr_write_ready else 'running' }}">
         {{ 'Готов' if synology.hr_write_ready else 'Ожидание' }}
       </span>
-      <div class="journal-object-meta">{{ synology.hr_write_reason }}</div>
+      <div class="journal-object-meta">
+        {{ synology.hr_write_reason }}. Требуется только для учеток наших
+        доменов; внешние и нераспознанные блокируются независимо от выгрузок.
+      </div>
     </dd>
     <dt>Последняя синхронизация</dt>
     <dd>
@@ -274,7 +298,11 @@
 
 <section class="card">
   <h2>Исключения</h2>
-  <p class="muted">Исключения не будут ограничиваться по сроку, отключаться или удаляться.</p>
+  <p class="muted">
+    Исключения не будут ограничиваться по сроку, отключаться или удаляться.
+    Это единственный способ вывести служебную учетку из-под автоматики:
+    все остальные, включая записи без e-mail, подлежат блокировке.
+  </p>
   <form method="post" action="/settings/synology/exceptions">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="form-grid">

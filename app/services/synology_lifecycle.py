@@ -19,6 +19,12 @@ from app.models_synology import (
     SynologyException,
     SynologySyncRun,
 )
+from app.services.blocking_window import (
+    BLOCK_MAX_ATTEMPTS,
+    BLOCK_RETRY_MINUTES,
+    BLOCK_TIME_LABEL,
+    is_block_window_open,
+)
 from app.services.onec_freshness import OneCSourceFreshnessService
 from app.services.synology import SynologyLocalUser, SynologyService
 from app.services.synology_policy import (
@@ -62,6 +68,8 @@ CLASSIFICATION_LABELS = {
 ACTION_LABELS = {
     ACTION_NONE: "–",
     ACTION_CLASSIFY: "Требует классификации",
+    # Оставлено для старых значений в БД: политика больше не выдает это
+    # действие, нераспознанные учетки теперь отключаются.
     ACTION_MIGRATION_CANDIDATE: "Ожидает 3-месячный цикл",
     ACTION_SET_EXPIRY_INTERNAL: "Запустить 3-месячный цикл",
     ACTION_SET_EXPIRY_EXTERNAL: "Запустить 6-месячный цикл",
@@ -181,6 +189,68 @@ class SynologyLifecycleService:
             )
         self.db.commit()
         return row
+
+    def block_window_state(
+        self,
+        control: SynologyControlSettings,
+    ) -> tuple[bool, str]:
+        """Можно ли сейчас применять плановые блокировки DSM.
+
+        Окно общее для всего проекта: AD, Zimbra и DSM меняются в одно время
+        суток. Внутри окна попытки повторяются с ровным интервалом, пока не
+        исчерпан суточный лимит.
+        """
+        now = self.local_now
+        if not is_block_window_open(now):
+            return False, f"Плановые блокировки выполняются после {BLOCK_TIME_LABEL}"
+
+        attempts = (
+            int(control.block_attempts or 0)
+            if control.block_window_date == self.today
+            else 0
+        )
+        if attempts >= BLOCK_MAX_ATTEMPTS:
+            return False, (
+                f"Исчерпан суточный лимит попыток ({BLOCK_MAX_ATTEMPTS}); "
+                "остаток перенесен на следующий вечер"
+            )
+
+        last = control.last_block_attempt_at
+        if attempts and last is not None:
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            next_at = last + timedelta(minutes=BLOCK_RETRY_MINUTES)
+            if self.utcnow() < next_at:
+                return False, (
+                    f"Повтор после неудачной попытки через "
+                    f"{BLOCK_RETRY_MINUTES} мин"
+                )
+
+        return True, "Окно плановых блокировок открыто"
+
+    def _guard_already_logged_today(self) -> bool:
+        zone = ZoneInfo(self.settings.app_timezone)
+        rows = self.db.scalars(
+            select(AuditLog.created_at)
+            .where(AuditLog.action == "synology_mass_disable_blocked")
+            .order_by(AuditLog.id.desc())
+            .limit(1)
+        ).all()
+        for moment in rows:
+            if moment is None:
+                continue
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            if moment.astimezone(zone).date() == self.today:
+                return True
+        return False
+
+    def _register_block_attempt(self, control: SynologyControlSettings) -> None:
+        if control.block_window_date != self.today:
+            control.block_window_date = self.today
+            control.block_attempts = 0
+        control.block_attempts = int(control.block_attempts or 0) + 1
+        control.last_block_attempt_at = self.utcnow()
 
     @staticmethod
     def _clear_mass_disable_ack(row: SynologyControlSettings) -> None:
@@ -769,6 +839,12 @@ class SynologyLifecycleService:
         if not rows:
             return 0, 0, 0, ""
 
+        # Единое окно проекта. Работа никуда не девается: невыполненное
+        # останется в desired_action и уйдет в ближайшую разрешенную попытку.
+        window_open, _window_reason = self.block_window_state(control)
+        if not window_open:
+            return 0, 0, len(rows), ""
+
         # Предохранитель: единичная ошибка кадровой выгрузки не должна
         # превратиться в массовое отключение. Частичное исполнение здесь тоже
         # недопустимо, поэтому этап пропускается целиком.
@@ -781,13 +857,17 @@ class SynologyLifecycleService:
                     f"Блокировки не выполнялись. Проверьте кадровые данные и "
                     f"подтвердите операцию вручную."
                 )
-                self._audit(
-                    action="synology_mass_disable_blocked",
-                    target="Synology DSM",
-                    result="warning",
-                    details=f"candidates={len(rows)}; limit={limit}",
-                )
-                self.db.commit()
+                # Пока предохранитель не снят, ситуация повторяется на каждой
+                # сверке. В журнал она попадает один раз за сутки, иначе
+                # вечерний журнал заполнялся бы одной и той же записью.
+                if not self._guard_already_logged_today():
+                    self._audit(
+                        action="synology_mass_disable_blocked",
+                        target="Synology DSM",
+                        result="warning",
+                        details=f"candidates={len(rows)}; limit={limit}",
+                    )
+                    self.db.commit()
                 return 0, 0, len(rows), guard
             self._audit(
                 action="synology_mass_disable_confirmed",
@@ -802,6 +882,12 @@ class SynologyLifecycleService:
             # снова потребует разбора.
             self._clear_mass_disable_ack(control)
             self.db.commit()
+
+        # Попытка засчитывается до обращения к DSM: если сервер недоступен и
+        # упадут все учетки, следующий заход будет ровно через интервал
+        # повтора, а не на каждом тике планировщика.
+        self._register_block_attempt(control)
+        self.db.commit()
 
         dsm = SynologyService(self.settings)
         success = failed = deferred = 0
@@ -824,7 +910,10 @@ class SynologyLifecycleService:
             if row.desired_action != ACTION_DISABLE:
                 deferred += 1
                 continue
-            if classification in {CLASS_EXCEPTION, CLASS_PROTECTED, CLASS_UNKNOWN}:
+            # Исключения и системные учетки — единственные, кого автоматика
+            # не трогает. Нераспознанные (без e-mail) блокируются наравне с
+            # остальными: именно они и есть цель перевода на домен.
+            if classification in {CLASS_EXCEPTION, CLASS_PROTECTED}:
                 deferred += 1
                 continue
             if classification in {CLASS_INTERNAL_ACTIVE, CLASS_INTERNAL_DISMISSED}:
@@ -1157,6 +1246,7 @@ class SynologyLifecycleService:
             )
 
         hr_ready, hr_reason = self._hr_write_ready()
+        window_open, window_reason = self.block_window_state(control)
         pending_disables = sum(
             1 for row in states if row.desired_action == ACTION_DISABLE and row.is_active
         )
@@ -1191,6 +1281,16 @@ class SynologyLifecycleService:
             "hr_write_reason": hr_reason,
             "pending_disables": pending_disables,
             "disable_limit": limit,
+            "window_open": window_open,
+            "window_reason": window_reason,
+            "window_label": BLOCK_TIME_LABEL,
+            "window_attempts": (
+                int(control.block_attempts or 0)
+                if control.block_window_date == self.today
+                else 0
+            ),
+            "window_max_attempts": BLOCK_MAX_ATTEMPTS,
+            "window_retry_minutes": BLOCK_RETRY_MINUTES,
             "guard_triggered": guard_triggered,
             "guard_ack_valid": self._mass_disable_ack_valid_for(
                 control, pending_disables
