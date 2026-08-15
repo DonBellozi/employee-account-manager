@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi.templating import Jinja2Templates
@@ -42,6 +42,39 @@ def format_app_datetime(
     return local_value.strftime(fmt)
 
 
+def app_now() -> datetime:
+    """Текущее время сервера в часовом поясе приложения."""
+    return datetime.now(_zone())
+
+
+def app_timezone_name() -> str:
+    zone = _zone()
+    return str(getattr(zone, "key", MOSCOW_TIMEZONE))
+
+
+def server_clock() -> dict[str, object]:
+    """Снимок серверных часов для шапки интерфейса.
+
+    Показывается именно время сервера, а не браузера: по нему считаются
+    расписания воркеров и контрольное окно кадровых выгрузок после 19:00.
+    """
+    now = app_now()
+    offset = now.utcoffset() or timedelta(0)
+    offset_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if offset_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(offset_minutes), 60)
+    return {
+        "text": now.strftime("%d.%m.%Y %H:%M:%S"),
+        "date": now.strftime("%d.%m.%Y"),
+        "time": now.strftime("%H:%M:%S"),
+        "zone": app_timezone_name(),
+        "offset_minutes": offset_minutes,
+        "offset_label": f"UTC{sign}{hours:02d}:{minutes:02d}",
+        "epoch_ms": int(now.timestamp() * 1000),
+    }
+
+
 def register_datetime_filters(templates: Jinja2Templates) -> Jinja2Templates:
     templates.env.filters["app_datetime"] = format_app_datetime
+    templates.env.globals["server_clock"] = server_clock
     return templates

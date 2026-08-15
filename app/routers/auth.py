@@ -18,9 +18,10 @@ from app.security import (
     validate_csrf,
 )
 from app.services.ad import ActiveDirectoryService
+from app.time_utils import register_datetime_filters
 
 router = APIRouter()
-templates = Jinja2Templates(directory="app/templates")
+templates = register_datetime_filters(Jinja2Templates(directory="app/templates"))
 logger = logging.getLogger(__name__)
 
 

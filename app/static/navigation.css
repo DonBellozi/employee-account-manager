@@ -19,6 +19,39 @@
   gap: 18px;
 }
 
+/* Часы сервера: по ним считаются расписания и окно выгрузок после 19:00. */
+.server-clock {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 6px 11px;
+  border: 1px solid rgba(255,255,255,.22);
+  border-radius: 8px;
+  background: rgba(255,255,255,.08);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.server-clock-label {
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  opacity: .65;
+}
+
+.server-clock-value {
+  font-variant-numeric: tabular-nums;
+  /* Моноширинные цифры: строка не дергается на каждой секунде. */
+  font-feature-settings: "tnum" 1;
+  font-weight: 700;
+}
+
+.server-clock-zone {
+  font-size: .76rem;
+  opacity: .6;
+}
+
 .settings-link {
   display: inline-flex;
   align-items: center;
@@ -152,6 +185,10 @@
   .nav-main,
   .nav-tools {
     flex-wrap: wrap;
+  }
+
+  .server-clock-zone {
+    display: none;
   }
 
   .settings-grid {

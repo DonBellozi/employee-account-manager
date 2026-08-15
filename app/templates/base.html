@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/static/workspace_modal.css">
   <script src="/static/zimbra_observer.js" defer></script>
   <script src="/static/workspace_modal.js" defer></script>
+  <script src="/static/server_clock.js" defer></script>
   {% endif %}
   {% if user and user.role == 'admin' %}
   <link rel="stylesheet" href="/static/telegram_settings.css">
@@ -32,6 +33,18 @@
         </div>
 
         <div class="nav-tools">
+          {% if server_clock is defined %}
+          {% set clock = server_clock() %}
+          <span class="server-clock"
+                id="server-clock"
+                title="Время сервера, {{ clock.zone }} ({{ clock.offset_label }}). По нему работают расписания и контрольное окно кадровых выгрузок."
+                data-epoch-ms="{{ clock.epoch_ms }}"
+                data-offset-minutes="{{ clock.offset_minutes }}">
+            <span class="server-clock-label">сервер</span>
+            <span class="server-clock-value" data-server-clock-value>{{ clock.text }}</span>
+            <span class="server-clock-zone">{{ clock.zone }}</span>
+          </span>
+          {% endif %}
           {% if user.role == 'admin' %}
           <a class="settings-link" href="/settings">Настройки</a>
           {% endif %}

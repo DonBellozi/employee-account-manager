@@ -24,9 +24,10 @@ from app.services.mailer import (
     ensure_domain_mail_profiles,
     validate_mail_template,
 )
+from app.time_utils import register_datetime_filters
 
 router = APIRouter(prefix="/admin")
-templates = Jinja2Templates(directory="app/templates")
+templates = register_datetime_filters(Jinja2Templates(directory="app/templates"))
 
 ALLOWED_MANAGED_ROLES = {
     UserRole.OPERATOR.value: UserRole.OPERATOR,

@@ -24,10 +24,11 @@ from app.services.mailer import (
     render_mail_template,
     validate_mail_template,
 )
+from app.time_utils import register_datetime_filters
 
 
 router = APIRouter()
-templates = Jinja2Templates(directory="app/templates")
+templates = register_datetime_filters(Jinja2Templates(directory="app/templates"))
 
 TEMPLATE_DEFINITIONS = {
     "personal": {
