@@ -15,9 +15,6 @@ CLASS_PROTECTED = "protected_system"
 ACTION_NONE = "none"
 ACTION_CLASSIFY = "classify"
 ACTION_MIGRATION_CANDIDATE = "migration_candidate"
-# Имена сохранены для совместимости с существующей БД/UI. На этапе блокировки
-# даты 3/6 месяцев хранятся только в SQLite; DSM получает только Expired=true
-# после наступления policy_expires_at.
 ACTION_SET_EXPIRY_INTERNAL = "set_expiry_internal"
 ACTION_SET_EXPIRY_EXTERNAL = "set_expiry_external"
 ACTION_DISABLE = "disable"
@@ -70,47 +67,35 @@ def classify_account(
     active_employee: bool,
     matched_employee: bool = False,
 ) -> str:
-    """Определить класс локальной учетной записи DSM.
+    """Классификация DSM строго по домену e-mail учетной записи.
 
-    Порядок фильтров критичен и выстроен от самого безопасного к самому
-    решительному:
-
-    1. системная запись DSM — не трогаем никогда;
-    2. человек найден в кадровой выгрузке и работает — не трогаем как
-       уволенного (он попадет в обычный миграционный цикл);
-    3. список исключений — не трогаем;
-    4. только потом домен, увольнение и внешние доступы.
-
-    Пункт 2 стоит выше остальных намеренно. Раньше присутствие человека
-    проверялось лишь косвенно, через совпадение корпоративной почты, и
-    действующие работники с незаполненным или личным адресом в DSM
-    выглядели как уволенные. Это привело к их ошибочной блокировке.
+    Правила:
+    * system/protected – никогда не трогаем;
+    * exception – никогда не трогаем;
+    * пустой/битый e-mail – ручная классификация;
+    * внешний домен – внешний 6-месячный цикл независимо от того, узнали ли
+      человека по другим признакам;
+    * наш домен + адрес есть у действующего работника этой организации –
+      3-месячный цикл;
+    * наш домен + адреса нет среди действующих работников этой организации –
+      человек считается уволенным из этой организации, учетку блокируем.
     """
+    _ = matched_employee  # сохранено для совместимости с текущими вызовами
+
     if protected:
         return CLASS_PROTECTED
-
-    # Первый уровень фильтрации: человек есть в выгрузке и работает.
-    if active_employee:
-        return CLASS_INTERNAL_ACTIVE
-
     if exception:
         return CLASS_EXCEPTION
 
     domain = email_domain(email)
     if not domain:
-        # Ни одного признака связи с работником и нет домена: данных для
-        # автоматического решения недостаточно. Такая запись не блокируется.
         return CLASS_UNKNOWN
 
     normalized_domains = {normalize_domain(item) for item in managed_domains if item}
-    if domain in normalized_domains:
-        # Уволенным считается только тот, кого удалось однозначно сопоставить
-        # с кадровыми данными и он там уже не работает. Несопоставленная
-        # учетка нашего домена — это пробел в данных, а не увольнение.
-        if matched_employee:
-            return CLASS_INTERNAL_DISMISSED
-        return CLASS_UNKNOWN
-    return CLASS_EXTERNAL
+    if domain not in normalized_domains:
+        return CLASS_EXTERNAL
+
+    return CLASS_INTERNAL_ACTIVE if active_employee else CLASS_INTERNAL_DISMISSED
 
 
 def desired_action(
@@ -126,42 +111,30 @@ def desired_action(
     internal_months: int,
     external_months: int,
 ) -> PolicyDecision:
-    # observed_expires_at/delete_after оставлены в сигнатуре для совместимости.
-    # На текущем этапе DSM не хранит календарный срок и удаление не выполняется.
     _ = observed_expires_at, delete_after, previous_active
 
     if classification in {CLASS_EXCEPTION, CLASS_PROTECTED}:
         return PolicyDecision(ACTION_NONE, "Автоматизация отключена для этой учетки.")
 
     if classification == CLASS_UNKNOWN:
-        # НЕ БЛОКИРОВАТЬ. Попытка отключать нераспознанные учетки привела к
-        # инциденту: у действующих работников в DSM часто просто не заполнен
-        # e-mail, и они выглядели так же, как бесхозные записи. Отсутствие
-        # сопоставления означает недостаток данных, а не отсутствие человека,
-        # и трактуется в пользу работника.
         return PolicyDecision(
             ACTION_CLASSIFY,
-            "Учетка не сопоставлена с работником. Требуется ручное решение: "
-            "автоматическая блокировка по одному лишь отсутствию данных запрещена.",
+            "У учетной записи нет пригодного e-mail. Требуется ручная классификация.",
         )
 
     if classification == CLASS_INTERNAL_DISMISSED:
-        # Увольнение — не зона ответственности этого контура. Решение о том,
-        # что человек уволен окончательно, принимается один раз в общем
-        # контуре по кадровым данным, и он же блокирует AD, Zimbra и DSM
-        # одним прогоном. Дублирующая логика здесь приводила к тому, что
-        # Synology самостоятельно «догадывался» об увольнении по одному лишь
-        # несовпадению почты и отключал действующих работников.
-        return PolicyDecision(
-            ACTION_NONE,
-            "Увольнение обрабатывается общим контуром вместе с AD и Zimbra.",
-        )
+        if is_active:
+            return PolicyDecision(
+                ACTION_DISABLE,
+                "E-mail нашего домена отсутствует среди действующих работников этой организации.",
+            )
+        return PolicyDecision(ACTION_NONE, "Учетная запись уже заблокирована в DSM.")
 
     if classification == CLASS_EXTERNAL:
         if not is_active:
             return PolicyDecision(
                 ACTION_NONE,
-                "Внешняя учетка неактивна; автоматически не включаем ее.",
+                "Внешняя учетка уже заблокирована; автоматически не включаем ее.",
             )
         if not enrolled or policy_expires_at is None:
             return PolicyDecision(
@@ -182,7 +155,7 @@ def desired_action(
         if not is_active:
             return PolicyDecision(
                 ACTION_NONE,
-                "Локальная учетка сотрудника уже отключена; автоматически не включаем ее.",
+                "Локальная учетка сотрудника уже заблокирована; автоматически не включаем ее.",
             )
         if not enrolled or policy_expires_at is None:
             return PolicyDecision(

@@ -7,27 +7,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import EmailLoginMapping, HRSourceRecord
-from app.models_onec_sources import HREmploymentState
+from app.services.personnel_structure import PersonnelStructureService, email_domain
 
 
 """Единое правило «чей это объект».
 
-Каждая интеграция наблюдает свой мир: Zimbra видит адреса, Synology — логины
-и описания, AD — учетные записи. Кадровая выгрузка при этом остается
-единственным источником правды о людях. Связать одно с другим приходится
-всем, и раньше каждый контур делал это по-своему — по одному лишь совпадению
-корпоративной почты.
+Модуль отвечает только за идентификацию человека. Кадровое состояние живет в
+``PersonnelStructureService`` и не должно заново вычисляться каждой интеграцией.
 
-Это дважды привело к отключению действующих работников: у одних e-mail в
-системе не был заполнен, у других отличался от записанного в 1С. Поэтому
-правило вынесено сюда и должно использоваться всеми контурами без исключения.
-
-Главный принцип: отсутствие совпадения — это нехватка данных, а не
-доказательство того, что человека нет. Трактуется в пользу работника.
+Важно: если внешний объект уже содержит конкретный e-mail, отсутствие этого
+адреса в кадровых данных не разрешает затем «спасти» его совпадением ФИО или
+логина. Для DSM это означало бы, что ``user@domain2.ru`` продолжает работать
+только потому, что тот же человек найден в другой организации. Поэтому
+fallback на login/FIO выполняется только когда пригодного e-mail у объекта нет.
 """
-
-
-ACTIVE_EMPLOYMENT_STATUSES = {"active", "scheduled"}
 
 
 def normalize_email(value: str) -> str:
@@ -53,8 +46,6 @@ def email_local_part(value: str) -> str:
 
 @dataclass(frozen=True)
 class IdentityMatch:
-    """Результат сопоставления объекта с человеком из кадровой выгрузки."""
-
     worker_keys: frozenset[str] = field(default_factory=frozenset)
     method: str = ""
     active: bool = False
@@ -70,18 +61,19 @@ class IdentityMatch:
 
     @property
     def worker_key(self) -> str:
-        """Единственный ключ; при неоднозначности пусто."""
         if len(self.worker_keys) != 1:
             return ""
         return next(iter(self.worker_keys))
 
 
 class WorkerIdentityResolver:
-    """Сопоставляет объект внешней системы с работником по всем признакам.
+    """Сопоставляет объект внешней системы с кадровым человеком.
 
-    Индексы строятся один раз на экземпляр: резолвер рассчитан на прогон по
-    сотням учетных записей подряд, и запрос на каждый признак каждой записи
-    был бы неоправданно дорогим.
+    Адреса остаются наиболее надежным признаком. Если объект содержит хотя бы
+    один непустой e-mail и ни один адрес не найден, resolver не переходит к
+    логину/FIO. Если e-mail у объекта отсутствует, допускается поиск по логину,
+    затем по ФИО – он полезен для интерфейсного сопоставления, но не меняет
+    доменную политику DSM.
     """
 
     def __init__(self, db: Session):
@@ -89,10 +81,7 @@ class WorkerIdentityResolver:
         self._by_email: dict[str, set[str]] | None = None
         self._by_login: dict[str, set[str]] | None = None
         self._by_fio: dict[str, set[str]] | None = None
-        self._active: set[str] | None = None
-        self._dismissals: dict[str, date] | None = None
-
-    # --- построение индексов -------------------------------------------
+        self._personnel = PersonnelStructureService(db)
 
     def _build(self) -> None:
         if self._by_email is not None:
@@ -115,8 +104,6 @@ class WorkerIdentityResolver:
             add(by_email, normalize_email(record.corporate_email), worker_key)
             add(by_email, normalize_email(record.personal_email), worker_key)
             add(by_login, normalize_login(record.login), worker_key)
-            # Локальная часть корпоративного адреса — практически всегда и есть
-            # логин человека, поэтому она тоже участвует в поиске.
             add(
                 by_login,
                 normalize_login(email_local_part(record.corporate_email)),
@@ -133,34 +120,9 @@ class WorkerIdentityResolver:
             add(by_email, normalize_email(mapping.zimbra_email), worker_key)
             add(by_login, normalize_login(mapping.ad_login), worker_key)
 
-        active: set[str] = {
-            str(record.worker_key or "").strip()
-            for record in records
-            if record.is_present and str(record.worker_key or "").strip()
-        }
-        dismissals: dict[str, date] = {}
-        states = list(self.db.scalars(select(HREmploymentState)).all())
-        for state in states:
-            worker_key = str(state.worker_key or "").strip()
-            if not worker_key:
-                continue
-            # Продолжающаяся занятость хотя бы в одной организации защищает
-            # общие учетные записи человека — то же правило, что в контуре
-            # окончательного увольнения.
-            if state.status in ACTIVE_EMPLOYMENT_STATUSES:
-                active.add(worker_key)
-            if state.dismissal_date is not None:
-                current = dismissals.get(worker_key)
-                if current is None or state.dismissal_date > current:
-                    dismissals[worker_key] = state.dismissal_date
-
         self._by_email = by_email
         self._by_login = by_login
         self._by_fio = by_fio
-        self._active = active
-        self._dismissals = dismissals
-
-    # --- сопоставление ---------------------------------------------------
 
     def resolve(
         self,
@@ -170,11 +132,6 @@ class WorkerIdentityResolver:
         fio: str = "",
         include_email_local_parts: bool = True,
     ) -> IdentityMatch:
-        """Найти работника по любому из переданных признаков.
-
-        Признаки проверяются по убыванию надежности: адреса, затем логины,
-        затем ФИО. Первое непустое совпадение выигрывает.
-        """
         self._build()
         assert self._by_email is not None
         assert self._by_login is not None
@@ -188,6 +145,17 @@ class WorkerIdentityResolver:
         normalized_emails = [
             value for value in (normalize_email(item) for item in emails) if value
         ]
+
+        # Конкретный адрес – сильный организационный признак. Если он есть, мы
+        # не подменяем его совпавшим логином/FIO другой организации.
+        if normalized_emails:
+            keys: set[str] = set()
+            for candidate in normalized_emails:
+                keys.update(self._by_email.get(candidate, set()))
+            if keys:
+                return self._match_email(keys, normalized_emails)
+            return IdentityMatch()
+
         normalized_logins = [
             value for value in (normalize_login(item) for item in logins) if value
         ]
@@ -201,27 +169,56 @@ class WorkerIdentityResolver:
                 if value
             )
 
-        for candidates, index, method in (
-            (normalized_emails, self._by_email, "email"),
-            (normalized_logins, self._by_login, "login"),
-            ([normalize_fio(fio)], self._by_fio, "fio"),
-        ):
-            keys: set[str] = set()
-            for candidate in candidates:
-                if not candidate:
-                    continue
-                keys.update(index.get(candidate, set()))
+        keys: set[str] = set()
+        for candidate in normalized_logins:
+            keys.update(self._by_login.get(candidate, set()))
+        if keys:
+            return self._match(keys, "login")
+
+        fio_key = normalize_fio(fio)
+        if fio_key:
+            keys = set(self._by_fio.get(fio_key, set()))
             if keys:
-                return self._match(keys, method)
+                return self._match(keys, "fio")
 
         return IdentityMatch()
 
+
+    def _match_email(self, keys: set[str], emails: list[str]) -> IdentityMatch:
+        """Состояние e-mail оценивается в организации его домена.
+
+        Один и тот же worker_key может оставаться ACTIVE в domain1 и быть
+        DISMISSED в domain2. Это защищает общую AD-учетку, но не должно
+        защищать DSM/Zimbra-адрес domain2.
+        """
+        active = False
+        dates: list[date] = []
+        for key in keys:
+            worker = self._personnel.worker_state(key)
+            for email in emails:
+                domain = email_domain(email)
+                if not domain:
+                    continue
+                employment = worker.employment_for_domain(domain)
+                if employment is None:
+                    continue
+                if employment.active:
+                    active = True
+                if employment.dismissal_date is not None:
+                    dates.append(employment.dismissal_date)
+        return IdentityMatch(
+            worker_keys=frozenset(keys),
+            method="email_ambiguous" if len(keys) > 1 else "email",
+            active=active,
+            dismissal_date=max(dates) if dates else None,
+        )
+
     def _match(self, keys: set[str], method: str) -> IdentityMatch:
-        assert self._active is not None
-        assert self._dismissals is not None
-        active = any(key in self._active for key in keys)
+        active = any(self._personnel.active_anywhere(key) for key in keys)
         dates = [
-            self._dismissals[key] for key in keys if key in self._dismissals
+            state.final_dismissal_date
+            for state in (self._personnel.worker_state(key) for key in keys)
+            if state.final_dismissal_date is not None
         ]
         return IdentityMatch(
             worker_keys=frozenset(keys),
@@ -231,5 +228,4 @@ class WorkerIdentityResolver:
         )
 
     def is_active_worker(self, **kwargs) -> bool:
-        """Короткая форма для контуров, которым нужен только факт занятости."""
         return self.resolve(**kwargs).active
