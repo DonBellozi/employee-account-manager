@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -175,3 +176,18 @@ def test_active_again_creates_alert_without_enabling_ad():
     assert alert is not None
     assert alert.status == "open"
     assert "Автоматическое включение запрещено" in alert.details
+
+
+def test_reactivation_alert_is_visible_without_restore_action():
+    root = Path(__file__).resolve().parents[1]
+    router = (root / "app/routers/dashboard_dismissals.py").read_text(
+        encoding="utf-8"
+    )
+    template = (root / "app/templates/dashboard.html").read_text(
+        encoding="utf-8"
+    )
+    assert "ADReactivationAlert.status == \"open\"" in router
+    assert "Уволенный воскрес" in template
+    assert "Автоматическое восстановление запрещено" in template
+    assert "enable_user" not in router
+    assert "Восстановить" not in template

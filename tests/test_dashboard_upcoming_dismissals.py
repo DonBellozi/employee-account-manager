@@ -10,9 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 class DashboardUpcomingDismissalsTests(unittest.TestCase):
     def test_old_reconciliation_module_is_removed(self):
         text = (ROOT / "app/templates/dashboard.html").read_text(encoding="utf-8")
+        fragment = (
+            ROOT / "app/templates/upcoming_dismissals_fragment.html"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("Сверка 1С / AD / Zimbra", text)
         self.assertIn("Ближайшие увольнения", text)
-        self.assertIn("Отложить", text)
+        self.assertIn('include "upcoming_dismissals_fragment.html"', text)
+        self.assertIn("Отложить", fragment)
 
     def test_new_dashboard_router_wins_before_legacy_dashboard(self):
         text = (ROOT / "app/main.py").read_text(encoding="utf-8")

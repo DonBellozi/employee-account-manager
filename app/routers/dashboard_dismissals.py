@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.models_notifications import DismissalEquipmentNotice
 from app.models_dismissal_lifecycle import (
+    ADReactivationAlert,
     FinalDismissalBlockRun,
     FinalDismissalBlockTarget,
 )
@@ -244,16 +245,6 @@ def _final_dismissal_block_journal_item(
         ),
         "",
     )
-    zimbra_identifier = next(
-        (
-            item.target_identifier
-            for item in targets
-            if item.system == "zimbra"
-            and item.target_identifier
-        ),
-        "",
-    )
-
     details = [
         ("ФИО", run.fio),
         (
@@ -263,10 +254,10 @@ def _final_dismissal_block_journal_item(
         (
             "Дата автоматической блокировки",
             run.effective_block_date.strftime("%d.%m.%Y")
-            + " 18:30",
+            + " 19:10",
         ),
         (
-            "Целей AD/Zimbra",
+            "Целей AD",
             str(len(targets)),
         ),
     ]
@@ -278,7 +269,7 @@ def _final_dismissal_block_journal_item(
         "action": "Автоблокировка при увольнении",
         "subject": run.fio or "Работник",
         "login": ad_identifier,
-        "corporate_email": zimbra_identifier,
+        "corporate_email": "",
         "personal_email": "",
         "mail_domain": "",
         "operator": "Система",
@@ -432,12 +423,24 @@ def dashboard(
         upcoming = []
         dismissal_error = str(exc)
 
+    ad_reactivation_alerts = list(
+        db.scalars(
+            select(ADReactivationAlert)
+            .where(ADReactivationAlert.status == "open")
+            .order_by(
+                desc(ADReactivationAlert.updated_at),
+                desc(ADReactivationAlert.id),
+            )
+        ).all()
+    )
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         _context(
             request,
             journal_items=_journal_items(db),
+            ad_reactivation_alerts=ad_reactivation_alerts,
             upcoming_dismissals=upcoming,
             dismissal_message=request.query_params.get(
                 "dismissal_message",

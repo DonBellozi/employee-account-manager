@@ -18,6 +18,43 @@
 </div>
 {% endif %}
 
+{% if ad_reactivation_alerts %}
+<section class="card">
+  <div class="alert warning">
+    <strong>Требуется решение оператора: заблокированный работник снова активен</strong>
+    <div>
+      AD автоматически не включается. Проверьте кадровое состояние и связанные
+      учетные записи перед будущим ручным восстановлением.
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Работник</th>
+          <th>Логин AD</th>
+          <th>Обнаружено</th>
+          <th>Состояние</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for alert in ad_reactivation_alerts %}
+        <tr>
+          <td><strong>{{ alert.fio or alert.worker_key }}</strong></td>
+          <td>{{ alert.ad_login or '–' }}</td>
+          <td>{{ alert.updated_at|app_datetime('%d.%m.%Y %H:%M') }}</td>
+          <td>
+            <span class="status failed">Уволенный воскрес</span>
+            <div class="muted">Автоматическое восстановление запрещено</div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
 <section class="card upcoming-dismissals-card">
   <div class="upcoming-dismissals-heading">
     <div>
