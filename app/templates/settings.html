@@ -4,42 +4,62 @@
 <div class="heading-row">
   <div>
     <h1>Настройки</h1>
-    <p class="muted settings-lead">
-    </p>
+    <p class="muted settings-lead">Интеграции, доступы и служебные параметры.</p>
   </div>
 </div>
 
 <section class="settings-section settings-web-section">
   <div class="settings-section-heading">
     <div>
-      <h2>Настраивается в Web</h2>
-      <p class="muted">Параметры, которые можно менять непосредственно из интерфейса.</p>
+      <h2>Настройки приложения</h2>
+      <p class="muted">Параметры, которые можно изменить здесь.</p>
     </div>
   </div>
 
   <div class="settings-web-grid">
-    <article class="settings-web-panel settings-web-panel-wide">
-      <div class="settings-web-panel-heading">
-        <div>
-          <h3>Контроль оборудования IT Invent</h3>
-          <span class="integration-badge{% if integrations.itinvent.configured %} active{% endif %}">{{ integrations.itinvent.badge }}</span>
-        </div>
-      </div>
-      <div class="itinvent-control-panel">
-        <div class="itinvent-control-heading">
-          <div>
-            <strong>Контроль оборудования</strong>
-            <span class="muted">Учитывается оборудование, которое совпало хотя бы с одним правилом.</span>
-            {% if not integrations.itinvent.control_persisted %}
-            <span class="muted">До первого сохранения используется прежнее правило «Выданы в пользование».</span>
-            {% endif %}
-          </div>
-        </div>
+    <a class="settings-card-link" href="/admin/mail-templates">
+      <span class="settings-card-title">Шаблоны писем</span>
+      <span class="settings-card-description">Отправители и тексты служебных писем.</span>
+      <span class="settings-card-action">Открыть →</span>
+    </a>
 
+    <a class="settings-card-link" href="/admin/access">
+      <span class="settings-card-title">Доступ</span>
+      <span class="settings-card-description">Пользователи и роли.</span>
+      <span class="settings-card-action">Открыть →</span>
+    </a>
+
+    <a class="settings-card-link" href="/settings/email-login-mapping">
+      <span class="settings-card-title">Сопоставление e-mail и логина</span>
+      <span class="settings-card-description">Связи кадровых записей с AD и Zimbra.</span>
+      <span class="settings-card-action">Открыть →</span>
+    </a>
+  </div>
+
+  <details class="settings-disclosure settings-equipment-panel">
+    <summary>
+      <span class="settings-disclosure-copy">
+        <strong>Контроль оборудования IT Invent</strong>
+        <span>
+          Типов: <span id="itinvent-types-count">{{ integrations.itinvent.control_types_count }}</span>,
+          местоположений: <span id="itinvent-locations-count">{{ integrations.itinvent.control_locations_count }}</span>
+        </span>
+      </span>
+      <span class="integration-badge{% if integrations.itinvent.configured %} active{% endif %}">{{ integrations.itinvent.badge }}</span>
+    </summary>
+    <div class="settings-disclosure-body">
+      <p class="muted settings-compact-note">
+        В проверку попадет оборудование выбранного типа или местоположения.
+        {% if not integrations.itinvent.control_persisted %}
+        Пока используется прежнее правило «Выданы в пользование».
+        {% endif %}
+      </p>
+
+      <div class="itinvent-control-panel">
         <div class="itinvent-control-rule">
           <div class="itinvent-control-copy">
             <strong>Тип оборудования</strong>
-            <span class="muted">Выбранные типы учитываются независимо от местоположения.</span>
+            <span class="muted">Учитывается любой выбранный тип.</span>
             <div class="itinvent-chip-list" id="itinvent-types-summary">
               {% if integrations.itinvent.control_types %}
                 {% for item in integrations.itinvent.control_types[:4] %}<span class="itinvent-chip">{{ item }}</span>{% endfor %}
@@ -55,7 +75,7 @@
         <div class="itinvent-control-rule">
           <div class="itinvent-control-copy">
             <strong>Местоположение</strong>
-            <span class="muted">Оборудование в выбранных местоположениях учитывается независимо от типа.</span>
+            <span class="muted">Учитывается любое выбранное место.</span>
             <div class="itinvent-chip-list" id="itinvent-locations-summary">
               {% if integrations.itinvent.control_locations %}
                 {% for item in integrations.itinvent.control_locations[:4] %}<span class="itinvent-chip">{{ item }}</span>{% endfor %}
@@ -68,56 +88,36 @@
           <button class="button secondary" type="button" data-itinvent-picker="locations">Изменить</button>
         </div>
       </div>
-      <p class="muted integration-note">
-        Выбранные «Тип оборудования» и «Местоположение» объединяются условием ИЛИ.
-      </p>
-      <dialog class="itinvent-picker-dialog" id="itinvent-picker-dialog">
-        <div class="itinvent-picker-head">
-          <div>
-            <h3 id="itinvent-picker-title">Выбор</h3>
-            <p class="muted" id="itinvent-picker-description"></p>
-          </div>
-          <button type="button" class="itinvent-dialog-close" id="itinvent-picker-close" aria-label="Закрыть">×</button>
-        </div>
-        <input type="search" id="itinvent-picker-search" placeholder="Поиск..." autocomplete="off">
-        <div class="itinvent-picker-tools">
-          <span class="muted" id="itinvent-picker-selected-count"></span>
-          <button type="button" class="itinvent-picker-clear" id="itinvent-picker-clear">Снять все</button>
-        </div>
-        <div class="itinvent-picker-list" id="itinvent-picker-list"></div>
-        <div class="itinvent-picker-error" id="itinvent-picker-error"></div>
-        <div class="itinvent-picker-actions">
-          <button type="button" class="button secondary" id="itinvent-picker-cancel">Отмена</button>
-          <button type="button" class="button" id="itinvent-picker-save">Сохранить</button>
-        </div>
-      </dialog>
-    </article>
+    </div>
+  </details>
 
-    <a class="settings-card-link" href="/admin/mail-templates">
-      <span class="settings-card-title">Шаблоны писем</span>
-      <span class="settings-card-description">Отправители и тексты служебных писем.</span>
-      <span class="settings-card-action">Открыть →</span>
-    </a>
-
-    <a class="settings-card-link" href="/admin/access">
-      <span class="settings-card-title">Доступ</span>
-      <span class="settings-card-description">Доменные пользователи, роли операторов и администраторов.</span>
-      <span class="settings-card-action">Открыть →</span>
-    </a>
-
-    <a class="settings-card-link" href="/settings/email-login-mapping">
-      <span class="settings-card-title">Сопоставление e-mail и логина</span>
-      <span class="settings-card-description">Ручные сопоставления кадровой записи, AD и Zimbra.</span>
-      <span class="settings-card-action">Открыть →</span>
-    </a>
-  </div>
+  <dialog class="itinvent-picker-dialog" id="itinvent-picker-dialog">
+    <div class="itinvent-picker-head">
+      <div>
+        <h3 id="itinvent-picker-title">Выбор</h3>
+        <p class="muted" id="itinvent-picker-description"></p>
+      </div>
+      <button type="button" class="itinvent-dialog-close" id="itinvent-picker-close" aria-label="Закрыть">×</button>
+    </div>
+    <input type="search" id="itinvent-picker-search" placeholder="Поиск..." autocomplete="off">
+    <div class="itinvent-picker-tools">
+      <span class="muted" id="itinvent-picker-selected-count"></span>
+      <button type="button" class="itinvent-picker-clear" id="itinvent-picker-clear">Снять все</button>
+    </div>
+    <div class="itinvent-picker-list" id="itinvent-picker-list"></div>
+    <div class="itinvent-picker-error" id="itinvent-picker-error"></div>
+    <div class="itinvent-picker-actions">
+      <button type="button" class="button secondary" id="itinvent-picker-cancel">Отмена</button>
+      <button type="button" class="button" id="itinvent-picker-save">Сохранить</button>
+    </div>
+  </dialog>
 </section>
 
 <section class="settings-section settings-env-section">
   <div class="settings-section-heading">
     <div>
-      <h2>Подключения и параметры ENV</h2>
-      <p class="muted">Эти параметры отображаются для контроля. Изменяются в ENV / Portainer и не редактируются в Web.</p>
+      <h2>Подключения</h2>
+      <p class="muted">Параметры показаны для контроля и меняются в ENV / Portainer.</p>
     </div>
   </div>
 
@@ -134,21 +134,28 @@
         <button class="button secondary integration-test"
                 type="button"
                 data-integration="ad">
-          Проверить подключение
+          Проверить
         </button>
       </div>
-      <dl class="integration-details">
-        <dt>Сервер</dt><dd>{{ integrations.ad.server }}</dd>
-        <dt>Порт</dt><dd>{{ integrations.ad.port }}</dd>
-        <dt>LDAPS / SSL</dt><dd>{{ integrations.ad.ssl }}</dd>
-        <dt>Проверка TLS</dt><dd>{{ integrations.ad.verify_tls }}</dd>
-        <dt>Base DN</dt><dd><code>{{ integrations.ad.base_dn }}</code></dd>
-        <dt>OU работников</dt><dd><code>{{ integrations.ad.users_ou }}</code></dd>
-        <dt>Bind DN</dt><dd><code>{{ integrations.ad.bind_dn }}</code></dd>
-        <dt>Пароль</dt><dd>{{ integrations.ad.password }}</dd>
-        <dt>CA-файл</dt><dd>{{ integrations.ad.ca_file }}</dd>
-        <dt>Проверка логинов</dt><dd>{{ integrations.ad.check_enabled }}</dd>
-      </dl>
+      <div class="integration-endpoint">
+        <span>Сервер</span>
+        <strong>{{ integrations.ad.server }}:{{ integrations.ad.port }}</strong>
+      </div>
+      <details class="integration-technical">
+        <summary>Технические параметры</summary>
+        <dl class="integration-details">
+          <dt>Сервер</dt><dd>{{ integrations.ad.server }}</dd>
+          <dt>Порт</dt><dd>{{ integrations.ad.port }}</dd>
+          <dt>LDAPS / SSL</dt><dd>{{ integrations.ad.ssl }}</dd>
+          <dt>Проверка TLS</dt><dd>{{ integrations.ad.verify_tls }}</dd>
+          <dt>Base DN</dt><dd><code>{{ integrations.ad.base_dn }}</code></dd>
+          <dt>OU работников</dt><dd><code>{{ integrations.ad.users_ou }}</code></dd>
+          <dt>Bind DN</dt><dd><code>{{ integrations.ad.bind_dn }}</code></dd>
+          <dt>Пароль</dt><dd>{{ integrations.ad.password }}</dd>
+          <dt>CA-файл</dt><dd>{{ integrations.ad.ca_file }}</dd>
+          <dt>Проверка логинов</dt><dd>{{ integrations.ad.check_enabled }}</dd>
+        </dl>
+      </details>
       <div class="integration-test-result" id="integration-result-ad"></div>
     </article>
     <article class="integration-card integration-card-compact">
@@ -163,21 +170,28 @@
         <button class="button secondary integration-test"
                 type="button"
                 data-integration="zimbra">
-          Проверить подключение
+          Проверить
         </button>
       </div>
-      <dl class="integration-details">
-        <dt>Сервер</dt><dd>{{ integrations.zimbra.server }}</dd>
-        <dt>Порт</dt><dd>{{ integrations.zimbra.port }}</dd>
-        <dt>Пользователь SSH</dt><dd>{{ integrations.zimbra.user }}</dd>
-        <dt>Авторизация</dt><dd>{{ integrations.zimbra.auth }}</dd>
-        <dt>Пароль</dt><dd>{{ integrations.zimbra.password }}</dd>
-        <dt>SSH-ключ</dt><dd>{{ integrations.zimbra.private_key }}</dd>
-        <dt>known_hosts</dt><dd>{{ integrations.zimbra.known_hosts }}</dd>
-        <dt>Backend</dt><dd><code>{{ integrations.zimbra.backend }}</code></dd>
-        <dt>Домены</dt><dd>{{ integrations.zimbra.domains }}</dd>
-        <dt>Проверка логинов</dt><dd>{{ integrations.zimbra.check_enabled }}</dd>
-      </dl>
+      <div class="integration-endpoint">
+        <span>Сервер</span>
+        <strong>{{ integrations.zimbra.server }}:{{ integrations.zimbra.port }}</strong>
+      </div>
+      <details class="integration-technical">
+        <summary>Технические параметры</summary>
+        <dl class="integration-details">
+          <dt>Сервер</dt><dd>{{ integrations.zimbra.server }}</dd>
+          <dt>Порт</dt><dd>{{ integrations.zimbra.port }}</dd>
+          <dt>Пользователь SSH</dt><dd>{{ integrations.zimbra.user }}</dd>
+          <dt>Авторизация</dt><dd>{{ integrations.zimbra.auth }}</dd>
+          <dt>Пароль</dt><dd>{{ integrations.zimbra.password }}</dd>
+          <dt>SSH-ключ</dt><dd>{{ integrations.zimbra.private_key }}</dd>
+          <dt>known_hosts</dt><dd>{{ integrations.zimbra.known_hosts }}</dd>
+          <dt>Backend</dt><dd><code>{{ integrations.zimbra.backend }}</code></dd>
+          <dt>Домены</dt><dd>{{ integrations.zimbra.domains }}</dd>
+          <dt>Проверка логинов</dt><dd>{{ integrations.zimbra.check_enabled }}</dd>
+        </dl>
+      </details>
       <div class="integration-test-result" id="integration-result-zimbra"></div>
     </article>
     <article class="integration-card integration-card-compact">
@@ -192,22 +206,26 @@
         <button class="button secondary integration-test"
                 type="button"
                 data-integration="smtp">
-          Проверить подключение
+          Проверить
         </button>
       </div>
-      <dl class="integration-details">
-        <dt>Сервер</dt><dd>{{ integrations.smtp.server }}</dd>
-        <dt>Порт</dt><dd>{{ integrations.smtp.port }}</dd>
-        <dt>Шифрование</dt><dd>{{ integrations.smtp.mode }}</dd>
-        <dt>Пользователь</dt><dd>{{ integrations.smtp.username }}</dd>
-        <dt>Пароль</dt><dd>{{ integrations.smtp.password }}</dd>
-        <dt>Тайм-аут</dt><dd>{{ integrations.smtp.timeout }}</dd>
-        <dt>Повторных попыток</dt><dd>{{ integrations.smtp.retries }}</dd>
-      </dl>
-      <p class="muted integration-note">
-        Проверка устанавливает SMTP-соединение и выполняет аутентификацию.
-        Тестовое письмо не отправляется.
-      </p>
+      <div class="integration-endpoint">
+        <span>Сервер</span>
+        <strong>{{ integrations.smtp.server }}:{{ integrations.smtp.port }}</strong>
+      </div>
+      <details class="integration-technical">
+        <summary>Технические параметры</summary>
+        <dl class="integration-details">
+          <dt>Сервер</dt><dd>{{ integrations.smtp.server }}</dd>
+          <dt>Порт</dt><dd>{{ integrations.smtp.port }}</dd>
+          <dt>Шифрование</dt><dd>{{ integrations.smtp.mode }}</dd>
+          <dt>Пользователь</dt><dd>{{ integrations.smtp.username }}</dd>
+          <dt>Пароль</dt><dd>{{ integrations.smtp.password }}</dd>
+          <dt>Тайм-аут</dt><dd>{{ integrations.smtp.timeout }}</dd>
+          <dt>Повторных попыток</dt><dd>{{ integrations.smtp.retries }}</dd>
+        </dl>
+        <p class="muted integration-note">Проверяется подключение и авторизация; письмо не отправляется.</p>
+      </details>
       <div class="integration-test-result" id="integration-result-smtp"></div>
     </article>
     <article class="integration-card integration-card-compact">
@@ -215,49 +233,57 @@
         <div>
           <h3>IT Invent</h3>
           <span class="integration-badge{% if integrations.itinvent.configured %} active{% endif %}"
-                id="integration-badge-itinvent">
-            {{ integrations.itinvent.badge }}
-          </span>
+                id="integration-badge-itinvent">{{ integrations.itinvent.badge }}</span>
+          <span class="settings-readonly-badge">Только чтение</span>
         </div>
         <button class="button secondary integration-test"
                 type="button"
                 data-integration="itinvent">
-          Проверить подключение
+          Проверить
         </button>
       </div>
-      <dl class="integration-details">
-        <dt>Включено</dt><dd>{{ integrations.itinvent.enabled }}</dd>
-        <dt>MS SQL Server</dt><dd>{{ integrations.itinvent.server }}</dd>
-        <dt>Порт</dt><dd>{{ integrations.itinvent.port }}</dd>
-        <dt>База</dt><dd><code>{{ integrations.itinvent.database }}</code></dd>
-        <dt>Пользователь</dt><dd>{{ integrations.itinvent.username }}</dd>
-        <dt>Пароль</dt><dd>{{ integrations.itinvent.password }}</dd>
-        <dt>Режим</dt><dd>{{ integrations.itinvent.mode }}</dd>
-      </dl>
-      <p class="muted integration-note">
-        Подключение настраивается через ENV. Приложение выполняет только SELECT;
-        поиск владельца выполняется по OWNERS.OWNER_LOGIN.
-      </p>
+      <div class="integration-endpoint">
+        <span>Сервер</span>
+        <strong>{{ integrations.itinvent.server }}:{{ integrations.itinvent.port }}</strong>
+      </div>
+      <details class="integration-technical">
+        <summary>Технические параметры</summary>
+        <dl class="integration-details">
+          <dt>Включено</dt><dd>{{ integrations.itinvent.enabled }}</dd>
+          <dt>MS SQL Server</dt><dd>{{ integrations.itinvent.server }}</dd>
+          <dt>Порт</dt><dd>{{ integrations.itinvent.port }}</dd>
+          <dt>База</dt><dd><code>{{ integrations.itinvent.database }}</code></dd>
+          <dt>Пользователь</dt><dd>{{ integrations.itinvent.username }}</dd>
+          <dt>Пароль</dt><dd>{{ integrations.itinvent.password }}</dd>
+          <dt>Режим</dt><dd>{{ integrations.itinvent.mode }}</dd>
+        </dl>
+        <p class="muted integration-note">Выполняются только SELECT-запросы; данные IT Invent не изменяются.</p>
+      </details>
       <div class="integration-test-result" id="integration-result-itinvent"></div>
     </article>
+  </div>
+
+</section>
+
+<section class="settings-section settings-import-section">
+  <div class="settings-section-heading">
+    <div>
+      <h2>Кадровый импорт</h2>
+      <p class="muted">Получение и проверка кадровых выгрузок.</p>
+    </div>
   </div>
 
   <div class="integration-wide-row">
     <article class="integration-card integration-card-wide" id="onec-card">
       <div class="integration-card-heading">
         <div>
-          <h3>1С / кадровая выгрузка</h3>
+          <h3>Кадровая выгрузка 1С</h3>
           <span class="integration-badge{% if integrations.onec.configured %} active{% endif %}"
                 id="integration-badge-onec">
             {{ integrations.onec.badge }}
           </span>
         </div>
         <div class="integration-card-actions">
-          <button class="button secondary integration-test"
-                  type="button"
-                  data-integration="onec">
-            Проверить IMAP
-          </button>
           <button class="button secondary"
                   type="button"
                   id="onec-find-latest">
@@ -273,35 +299,38 @@
         </div>
       </div>
 
-      <dl class="integration-details">
-        <dt>IMAP-сервер</dt><dd>{{ integrations.onec.server }}</dd>
-        <dt>Порт</dt><dd>{{ integrations.onec.port }}</dd>
-        <dt>SSL</dt><dd>{{ integrations.onec.ssl }}</dd>
-        <dt>Пользователь</dt><dd>{{ integrations.onec.username }}</dd>
-        <dt>Пароль</dt><dd>{{ integrations.onec.password }}</dd>
-        <dt>Папка</dt><dd>{{ integrations.onec.folder }}</dd>
-        <dt>Фильтр отправителя</dt><dd>{{ integrations.onec.sender }}</dd>
-        <dt>Глубина поиска</dt><dd>{{ integrations.onec.lookback }}</dd>
-        <dt>Домен выгрузки 1С</dt><dd><code>{{ integrations.onec.source_domain }}</code></dd>
-        <dt>Автоматический импорт</dt><dd><strong>{{ integrations.onec.auto_import }}</strong></dd>
-        <dt>Время автоимпорта</dt><dd>{{ integrations.onec.auto_import_time }} ({{ integrations.onec.auto_import_timezone }})</dd>
-        <dt>Catch-up после запуска</dt><dd>{{ integrations.onec.startup_catchup }}</dd>
-        <dt>Следующий плановый запуск</dt><dd>{{ onec_schedule.next_run }}</dd>
-        <dt>Имя вложения</dt><dd>{{ integrations.onec.filename }}</dd>
-        <dt>Каталог данных</dt><dd><code>{{ integrations.onec.data_dir }}</code></dd>
-        <dt>HMAC-ключ идентификации</dt><dd>{{ integrations.onec.hash_secret }}</dd>
-      </dl>
+      <div class="settings-status-grid">
+        <div>
+          <span>Автоматический забор</span>
+          <strong>{{ integrations.onec.auto_import }}</strong>
+        </div>
+        <div>
+          <span>Следующая проверка</span>
+          <strong>{{ onec_schedule.next_run }}</strong>
+        </div>
+        <div>
+          <span>В кадровом реестре</span>
+          <strong>{{ onec_registry_summary.total }}</strong>
+        </div>
+        <div>
+          <span>Требуют проверки</span>
+          <strong>{{ onec_registry_summary.issues + onec_registry_summary.errors }}</strong>
+        </div>
+      </div>
 
       <div class="alert warning onec-safety-note">
-        Импорт читает почту через IMAP в режиме readonly и обновляет только
-        локальный кадровый реестр и историю. AD и Zimbra используются для
-        проверки; учетные записи, почта и IT Invent автоматически не изменяются.
-        Один и тот же XLSX повторно не обрабатывается по SHA-256.
+        IMAP работает только в режиме read-only. Выгрузка применяется после
+        проверок; блокировка запускается отдельно после контрольных выгрузок.
       </div>
 
       <div class="integration-test-result" id="integration-result-onec"></div>
-      {% if onec_registry_summary.total %}<div class="onec-registry-summary"><strong>Кадровый реестр</strong><div class="onec-diff-grid"><div><span>Работников</span><strong>{{ onec_registry_summary.total }}</strong></div><div><span>Соответствует</span><strong>{{ onec_registry_summary.ok }}</strong></div><div><span>Требует проверки</span><strong>{{ onec_registry_summary.issues + onec_registry_summary.errors }}</strong></div><div><span>Не проверено</span><strong>{{ onec_registry_summary.not_checked }}</strong></div><div><span>Сопоставлений</span><strong>{{ onec_registry_summary.mapping_count }}</strong></div></div></div>{% endif %}
-      <div class="onec-result" id="onec-result">
+
+      <details class="settings-detail-group" id="onec-analysis-details">
+        <summary>
+          <span>Последний анализ и сверка</span>
+          {% if onec_last_report %}<span class="muted">{{ onec_last_report.analyzed_at }}</span>{% endif %}
+        </summary>
+        <div class="onec-result" id="onec-result">
         {% if onec_last_report %}
         <div class="onec-report-heading">
           <strong>Последний анализ</strong>
@@ -314,14 +343,47 @@
           <div><span>Без email</span><strong>{{ onec_last_report.missing_email_count }}</strong></div>
         </div>
         <div class="onec-dismissal-note">{{ onec_last_report.dismissal_note }}</div>
+        {% else %}
+        <p class="muted">Данные появятся после первого анализа.</p>
         {% endif %}
-      </div>
-
-      <div class="onec-history">
-        <div class="onec-report-heading">
-          <strong>История импорта</strong>
-          <span class="muted">Последние {{ onec_import_history|length }} запусков</span>
         </div>
+      </details>
+
+      <details class="settings-detail-group">
+        <summary>
+          <span>Технические параметры</span>
+          <span class="muted">IMAP и расписание</span>
+        </summary>
+        <div class="settings-detail-body">
+          <button class="button secondary integration-test"
+                  type="button"
+                  data-integration="onec">Проверить IMAP</button>
+          <dl class="integration-details">
+            <dt>IMAP-сервер</dt><dd>{{ integrations.onec.server }}</dd>
+            <dt>Порт</dt><dd>{{ integrations.onec.port }}</dd>
+            <dt>SSL</dt><dd>{{ integrations.onec.ssl }}</dd>
+            <dt>Пользователь</dt><dd>{{ integrations.onec.username }}</dd>
+            <dt>Пароль</dt><dd>{{ integrations.onec.password }}</dd>
+            <dt>Папка</dt><dd>{{ integrations.onec.folder }}</dd>
+            <dt>Фильтр отправителя</dt><dd>{{ integrations.onec.sender }}</dd>
+            <dt>Глубина поиска</dt><dd>{{ integrations.onec.lookback }}</dd>
+            <dt>Домен выгрузки 1С</dt><dd><code>{{ integrations.onec.source_domain }}</code></dd>
+            <dt>Автоматический импорт</dt><dd><strong>{{ integrations.onec.auto_import }}</strong></dd>
+            <dt>Время автоимпорта</dt><dd>{{ integrations.onec.auto_import_time }} ({{ integrations.onec.auto_import_timezone }})</dd>
+            <dt>Catch-up после запуска</dt><dd>{{ integrations.onec.startup_catchup }}</dd>
+            <dt>Следующий плановый запуск</dt><dd>{{ onec_schedule.next_run }}</dd>
+            <dt>Имя вложения</dt><dd>{{ integrations.onec.filename }}</dd>
+            <dt>Каталог данных</dt><dd><code>{{ integrations.onec.data_dir }}</code></dd>
+            <dt>HMAC-ключ идентификации</dt><dd>{{ integrations.onec.hash_secret }}</dd>
+          </dl>
+        </div>
+      </details>
+
+      <details class="settings-detail-group onec-history">
+        <summary>
+          <span>История импорта</span>
+          <span class="muted">Запусков: {{ onec_import_history|length }}</span>
+        </summary>
         {% if onec_import_history %}
         <div class="table-wrap onec-history-table-wrap">
           <table class="journal-table onec-history-table">
@@ -378,9 +440,9 @@
           </table>
         </div>
         {% else %}
-        <p class="muted">История появится после первого ручного или автоматического запуска.</p>
+        <p class="muted settings-detail-empty">История появится после первого запуска.</p>
         {% endif %}
-      </div>
+      </details>
     </article>
   </div>
 </section>
@@ -615,6 +677,10 @@
       itinventCatalog.selected_types = types;
       renderItinventSummary('itinvent-locations-summary', payload.locations || []);
       renderItinventSummary('itinvent-types-summary', payload.types || []);
+      const locationsCount = document.getElementById('itinvent-locations-count');
+      const typesCount = document.getElementById('itinvent-types-count');
+      if (locationsCount) locationsCount.textContent = payload.locations_count ?? 0;
+      if (typesCount) typesCount.textContent = payload.types_count ?? 0;
       itinventDialog.close();
     } catch (error) {
       itinventPickerError.className = 'itinvent-picker-error error';
@@ -718,6 +784,7 @@
 
   async function postOnec(url, button, loadingText) {
     const target = document.getElementById('onec-result');
+    document.getElementById('onec-analysis-details')?.setAttribute('open', '');
     const originalText = button.textContent;
     button.disabled = true;
     button.textContent = loadingText;

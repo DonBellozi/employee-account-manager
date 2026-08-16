@@ -32,14 +32,14 @@
     key: 'telegram',
     href: '/settings/telegram',
     titleText: 'Telegram',
-    descriptionText: 'Служебные отчеты, бот, чат и очередь доставки.',
+    descriptionText: 'Бот, чат и доставка отчетов.',
   });
 
   addCard({
     key: 'synology',
     href: '/settings/synology',
     titleText: 'Synology DSM',
-    descriptionText: 'Локальные учетки, миграция на домен, внешние доступы и исключения.',
+    descriptionText: 'Учетные записи, доступы и исключения.',
   });
 
   addCard({
@@ -53,7 +53,7 @@
     key: 'onec-sources',
     href: '/settings/onec-sources',
     titleText: 'Источники 1С',
-    descriptionText: 'Организации, папки, отправители, домены и имена вложений.',
+    descriptionText: 'Организации и правила получения выгрузок.',
   });
 
   const onecCard = document.getElementById('onec-card');
@@ -91,10 +91,8 @@
   const safetyNote = onecCard.querySelector('.onec-safety-note');
   if (safetyNote) {
     safetyNote.textContent =
-      'Почта читается через IMAP только в режиме read-only. Новый XLSX применяется ' +
-      'только после проверки структуры и защитных проверок. Автоблокировка AD/Zimbra ' +
-      'выполняется отдельным контуром не ранее 19:10 и только после контрольной ' +
-      'выгрузки всех включенных источников после 19:00.';
+      'IMAP только в режиме read-only. XLSX применяется после проверок. ' +
+      'Контрольные выгрузки — после 19:00; автоблокировка не ранее 19:10.';
   }
 
   const moved = new Set([

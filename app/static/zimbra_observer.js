@@ -31,13 +31,13 @@
       '/settings/zimbra-observer',
       'data-settings-zimbra-observer',
       'Наблюдение Zimbra',
-      'Неактивность, сроки хранения и защита действующих работников по 1С. Только наблюдение.'
+      'Неактивность и сроки хранения. Без изменений учетных записей.'
     );
     makeSettingsCard(
       '/settings/zimbra-lifecycle',
       'data-settings-zimbra-lifecycle',
       'Жизненный цикл Zimbra',
-      'DRY RUN-план и поэтапное разрешение закрытия, backup и удаления.'
+      'План и этапы закрытия, backup и удаления.'
     );
   }
 })();
