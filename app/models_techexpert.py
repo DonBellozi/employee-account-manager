@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Date, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -10,6 +10,31 @@ from app.db import Base
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class TechExpertSettings(Base):
+    """Настройки уведомительного контура, управляемые из Web."""
+
+    __tablename__ = "techexpert_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    source_domain: Mapped[str] = mapped_column(String(255), default="")
+    ad_group_dn: Mapped[str] = mapped_column(String(1024), default="")
+    recipient_email: Mapped[str] = mapped_column(String(320), default="")
+    notification_time: Mapped[str] = mapped_column(String(5), default="08:45")
+    subject: Mapped[str] = mapped_column(String(512))
+    body_html: Mapped[str] = mapped_column(Text)
+    updated_by: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
 
 
 class TechExpertNotification(Base):

@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}Техэксперт{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="/static/mail_templates.css">
+{% set ready = techexpert.enabled and techexpert.source_domain and techexpert.ad_group_dn and techexpert.recipient_email and sender_profile and smtp_configured %}
+
+<div class="heading-row">
+  <div>
+    <h1>Техэксперт</h1>
+    <p class="muted">
+      Уведомление внешней организации после увольнения из выбранной организации.
+    </p>
+  </div>
+  <a class="button secondary" href="/settings">Назад к настройкам</a>
+</div>
+
+{% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+<section class="card integration-card integration-card-wide">
+  <div class="integration-card-heading">
+    <div>
+      <h2>Состояние модуля</h2>
+      <span class="integration-badge{% if ready %} active{% endif %}">
+        {% if ready %}Используется{% elif techexpert.enabled %}Не настроено{% else %}Отключено{% endif %}
+      </span>
+    </div>
+    <div class="integration-card-actions">
+      <a class="button secondary" href="/admin/mail-templates">Настроить отправителя</a>
+      <form method="post" action="/settings/techexpert/check">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="button secondary" type="submit">Проверить AD и SMTP</button>
+      </form>
+    </div>
+  </div>
+
+  <p class="muted">
+    Модуль читает состав маркерной группы AD и отправляет письмо. Он не меняет
+    группу и не выполняет действий в самом Техэксперте.
+  </p>
+
+  <dl class="integration-details">
+    <dt>Организация</dt><dd>{{ techexpert.source_domain or '–' }}</dd>
+    <dt>Получатель</dt><dd>{{ techexpert.recipient_email or '–' }}</dd>
+    <dt>Время</dt><dd>{{ techexpert.notification_time }} ({{ app_timezone|default('часовой пояс приложения') }})</dd>
+    <dt>Отправитель</dt>
+    <dd>
+      {% if sender_profile %}
+        {{ sender_profile.sender_name }} &lt;{{ sender_profile.sender_email }}&gt;
+      {% else %}
+        Не настроен почтовый профиль выбранного домена
+      {% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="card">
+  <div class="integration-card-heading">
+    <div>
+      <h2>Правило и письмо</h2>
+      <p class="muted">Все параметры этого модуля сохраняются в приложении.</p>
+    </div>
+  </div>
+
+  {% if not source_domains %}
+  <div class="alert warning">
+    Сначала настройте кадровые источники и почтовые домены организаций.
+  </div>
+  {% endif %}
+
+  <form method="post" action="/settings/techexpert" class="mail-template-editor-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+
+    <label class="techexpert-enable-toggle">
+      <input type="checkbox" name="enabled" value="1"{% if techexpert.enabled %} checked{% endif %}>
+      <span><strong>Включить автоматические уведомления Техэксперта</strong></span>
+    </label>
+
+    <section class="mail-template-section">
+      <div class="form-grid">
+        <label>
+          <span>Организация, к которой относится доступ</span>
+          <select name="source_domain" required>
+            <option value="">Выберите организацию</option>
+            {% for domain in source_domains %}
+            <option value="{{ domain }}"{% if techexpert.source_domain == domain %} selected{% endif %}>{{ domain }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>Получатель уведомлений</span>
+          <input type="email"
+                 name="recipient_email"
+                 value="{{ techexpert.recipient_email }}"
+                 maxlength="320"
+                 placeholder="access@example.ru"
+                 required>
+        </label>
+        <label>
+          <span>Время отправки</span>
+          <input type="time"
+                 name="notification_time"
+                 value="{{ techexpert.notification_time }}"
+                 required>
+        </label>
+      </div>
+
+      <label>
+        <span>DN маркерной группы AD</span>
+        <input type="text"
+               name="ad_group_dn"
+               value="{{ techexpert.ad_group_dn }}"
+               maxlength="1024"
+               placeholder="CN=TECH-EXPERT-USERS,OU=Groups,DC=example,DC=local"
+               required>
+      </label>
+      <p class="muted mail-template-hint">
+        Членство используется только как признак выданного доступа. Состав группы не изменяется.
+      </p>
+    </section>
+
+    <section class="mail-template-section">
+      <label>
+        <span>Тема письма</span>
+        <input type="text"
+               name="subject"
+               value="{{ techexpert.subject }}"
+               maxlength="512"
+               required>
+      </label>
+      <label>
+        <span>HTML-шаблон письма</span>
+        <textarea name="body_html"
+                  rows="14"
+                  required
+                  spellcheck="false">{{ techexpert.body_html }}</textarea>
+      </label>
+      <div class="template-variables">
+        <span>Доступные переменные:</span>
+        {% for variable in template_variables|sort %}
+        <code>{{ "{{ " }}{{ variable }}{{ " }}" }}</code>
+        {% endfor %}
+      </div>
+    </section>
+
+    <div class="alert warning">
+      Письмо планируется после подтвержденного увольнения из выбранной организации.
+      Отсрочка на 7 дней останавливает отправку; перед SMTP кадровые данные и группа AD проверяются повторно.
+    </div>
+
+    <div class="mail-template-actions">
+      <div class="muted">
+        {% if techexpert.updated_by %}
+          Последнее изменение: {{ techexpert.updated_by }}
+        {% else %}
+          Используется начальный шаблон
+        {% endif %}
+      </div>
+      <button class="button" type="submit"{% if not source_domains %} disabled{% endif %}>Сохранить</button>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Тестовое письмо</h2>
+  <p class="muted">
+    Отправляется сохранённый шаблон с тестовыми данными. Реальные сведения работников не используются.
+  </p>
+  <form method="post" action="/settings/techexpert/test-email">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="mail-template-test-row">
+      <label>
+        <span>Тестовый адрес</span>
+        <input type="email" name="test_recipient" placeholder="user@example.ru" required>
+      </label>
+      <button class="button secondary" type="submit">Отправить тест</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

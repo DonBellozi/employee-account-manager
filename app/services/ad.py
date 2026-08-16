@@ -435,6 +435,23 @@ class ActiveDirectoryService:
             )
             return bool(conn.entries)
 
+    def test_group(self, group_dn: str) -> str:
+        """Проверить существование маркерной группы без изменения AD."""
+        normalized_group = str(group_dn or "").strip()
+        if not normalized_group:
+            raise ValueError("Не передан DN группы AD")
+        with self._service_connection() as conn:
+            conn.search(
+                normalized_group,
+                "(objectClass=group)",
+                search_scope=BASE,
+                attributes=["distinguishedName"],
+                size_limit=1,
+            )
+            if not conn.entries:
+                raise RuntimeError("Маркерная группа Техэксперта не найдена в AD")
+        return "Группа AD найдена; SMTP-подключение также доступно"
+
 
     def create_disabled_user(
         self,

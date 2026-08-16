@@ -34,6 +34,14 @@
       <span class="settings-card-description">Связи кадровых записей с AD и Zimbra.</span>
       <span class="settings-card-action">Открыть →</span>
     </a>
+
+    <a class="settings-card-link"
+       href="/settings/techexpert"
+       data-settings-techexpert="true">
+      <span class="settings-card-title">Техэксперт</span>
+      <span class="settings-card-description">Правило, группа AD, получатель и шаблон письма.</span>
+      <span class="settings-card-action">Открыть →</span>
+    </a>
   </div>
 
   <details class="settings-disclosure settings-equipment-panel">
@@ -227,34 +235,6 @@
         <p class="muted integration-note">Проверяется подключение и авторизация; письмо не отправляется.</p>
       </details>
       <div class="integration-test-result" id="integration-result-smtp"></div>
-    </article>
-    <article class="integration-card integration-card-compact">
-      <div class="integration-card-heading">
-        <div>
-          <h3>Техэксперт</h3>
-          <span class="integration-badge{% if integrations.techexpert.configured %} active{% endif %}">
-            {{ integrations.techexpert.badge }}
-          </span>
-        </div>
-      </div>
-      <div class="integration-endpoint">
-        <span>Получатель</span>
-        <strong>{{ integrations.techexpert.recipient }}</strong>
-      </div>
-      <details class="integration-technical">
-        <summary>Правило уведомления</summary>
-        <dl class="integration-details">
-          <dt>Включено</dt><dd>{{ integrations.techexpert.enabled }}</dd>
-          <dt>Организация</dt><dd><code>{{ integrations.techexpert.source_domain }}</code></dd>
-          <dt>Маркерная группа AD</dt><dd><code>{{ integrations.techexpert.group_dn }}</code></dd>
-          <dt>Получатель</dt><dd>{{ integrations.techexpert.recipient }}</dd>
-          <dt>Расписание</dt><dd>{{ integrations.techexpert.schedule }}</dd>
-          <dt>Режим</dt><dd>{{ integrations.techexpert.mode }}</dd>
-        </dl>
-        <p class="muted integration-note">
-          Состав группы AD и учетные записи Техэксперта не изменяются автоматически.
-        </p>
-      </details>
     </article>
     <article class="integration-card integration-card-compact">
       <div class="integration-card-heading">

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import html
 import json
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -18,12 +17,19 @@ from app.models_notifications import HREmploymentDismissalEvent
 from app.models_onec_sources import HREmploymentState
 from app.models_techexpert import TechExpertNotification
 from app.services.ad import ActiveDirectoryService
-from app.services.mailer import CredentialMailer, get_domain_mail_profile
+from app.services.mailer import (
+    CredentialMailer,
+    get_domain_mail_profile,
+    render_mail_template,
+)
+from app.services.techexpert_settings import (
+    ensure_techexpert_settings,
+    parse_notification_time,
+)
 
 
 logger = logging.getLogger(__name__)
 POLL_SECONDS = 60
-NOTIFICATION_TIME = time(8, 45)
 RETRY_MINUTES = 15
 ACTIVE_STATUSES = {"active"}
 OPEN_STATUSES = {"pending", "deferred", "failed", "intervention"}
@@ -65,6 +71,7 @@ class TechExpertLifecycleService:
     def __init__(self, settings: Settings, db: Session):
         self.settings = settings
         self.db = db
+        self.config = ensure_techexpert_settings(db)
 
     @property
     def local_now(self) -> datetime:
@@ -72,24 +79,32 @@ class TechExpertLifecycleService:
 
     @property
     def source_domain(self) -> str:
-        return normalize(self.settings.techexpert_source_domain)
+        return normalize(self.config.source_domain)
 
     def _configuration_error(self) -> str:
         missing = []
         if not self.source_domain:
-            missing.append("TECHEXPERT_SOURCE_DOMAIN")
+            missing.append("организация")
         elif self.source_domain not in {
             normalize(domain) for domain in self.settings.zimbra_domains
         }:
             missing.append(
-                "TECHEXPERT_SOURCE_DOMAIN (нет почтового профиля домена)"
+                "почтовый профиль выбранной организации"
             )
-        if not str(self.settings.techexpert_ad_group_dn or "").strip():
-            missing.append("TECHEXPERT_AD_GROUP_DN")
-        if not email_domain(self.settings.techexpert_recipient_email):
-            missing.append("TECHEXPERT_RECIPIENT_EMAIL")
+        if not str(self.config.ad_group_dn or "").strip():
+            missing.append("маркерная группа AD")
+        if not email_domain(self.config.recipient_email):
+            missing.append("получатель уведомлений")
         if not str(self.settings.smtp_host or "").strip():
             missing.append("SMTP_HOST")
+        try:
+            parse_notification_time(self.config.notification_time)
+        except ValueError:
+            missing.append("время отправки")
+        if not str(self.config.subject or "").strip():
+            missing.append("тема письма")
+        if not str(self.config.body_html or "").strip():
+            missing.append("шаблон письма")
         return ", ".join(missing)
 
     def _local(self, value: datetime) -> datetime:
@@ -98,7 +113,7 @@ class TechExpertLifecycleService:
     def _at_notification_time(self, value: date) -> datetime:
         local = datetime.combine(
             value,
-            NOTIFICATION_TIME,
+            parse_notification_time(self.config.notification_time),
             tzinfo=ZoneInfo(self.settings.app_timezone),
         )
         return local.astimezone(timezone.utc)
@@ -107,7 +122,7 @@ class TechExpertLifecycleService:
         local_confirmation = self._local(confirmed_at)
         candidate = datetime.combine(
             local_confirmation.date(),
-            NOTIFICATION_TIME,
+            parse_notification_time(self.config.notification_time),
             tzinfo=local_confirmation.tzinfo,
         )
         if candidate < local_confirmation:
@@ -302,7 +317,7 @@ class TechExpertLifecycleService:
                 hr_reason=hr_reason,
                 event_updated_at=event_updated_at,
                 recipient_email=normalize(
-                    self.settings.techexpert_recipient_email
+                    self.config.recipient_email
                 ),
                 scheduled_for=scheduled_for,
                 status=(
@@ -323,6 +338,7 @@ class TechExpertLifecycleService:
                 ),
                 normalize(row.hr_reason) != hr_reason,
                 aware_utc(row.event_updated_at) != event_updated_at,
+                aware_utc(row.scheduled_for) != scheduled_for,
             )
         )
         row.source_name = event.source_name
@@ -330,7 +346,7 @@ class TechExpertLifecycleService:
         if row.status != "sent":
             row.corporate_email = corporate_email
             row.recipient_email = normalize(
-                self.settings.techexpert_recipient_email
+                self.config.recipient_email
             )
         if material_change and row.status not in {"sent", "skipped"}:
             row.dismissal_date = event.current_dismissal_date
@@ -479,7 +495,7 @@ class TechExpertLifecycleService:
             try:
                 is_member = ad.is_user_member_of_group(
                     identity.ad_login,
-                    self.settings.techexpert_ad_group_dn,
+                    self.config.ad_group_dn,
                     object_guid=identity.ad_object_guid,
                 )
             except Exception:
@@ -528,21 +544,24 @@ class TechExpertLifecycleService:
                 self.settings,
                 self.source_domain,
             )
-            fio = html.escape(row.fio or row.worker_key)
-            corporate_email = html.escape(row.corporate_email)
-            body = (
-                "<p>Здравствуйте!</p>"
-                "<p>Просим прекратить доступ к системе «Техэксперт» "
-                "для следующего работника:</p>"
-                f"<p><strong>ФИО:</strong> {fio}<br>"
-                f"<strong>Корпоративный email:</strong> {corporate_email}</p>"
-                "<p>Это автоматическое уведомление по подтвержденному "
-                "кадровому событию.</p>"
-            )
+            context = {
+                "full_name": row.fio or row.worker_key,
+                "corporate_email": row.corporate_email,
+                "organization": row.source_name or row.source_id,
+                "dismissal_date": row.dismissal_date.strftime("%d.%m.%Y"),
+            }
             CredentialMailer(self.settings).send_html(
                 recipient=row.recipient_email,
-                subject="Прекращение доступа к системе «Техэксперт»",
-                body_html=body,
+                subject=render_mail_template(
+                    self.config.subject,
+                    context,
+                    autoescape=False,
+                ),
+                body_html=render_mail_template(
+                    self.config.body_html,
+                    context,
+                    autoescape=True,
+                ),
                 sender_email=profile.sender_email,
                 sender_name=profile.sender_name,
             )
@@ -582,7 +601,7 @@ class TechExpertLifecycleService:
         return aware_utc(value) <= now
 
     def process(self) -> dict[str, int | str]:
-        if not self.settings.techexpert_enabled:
+        if not self.config.enabled:
             return {"status": "disabled", "planned": 0, "sent": 0}
         configuration_error = self._configuration_error()
         if configuration_error:
@@ -592,6 +611,20 @@ class TechExpertLifecycleService:
                 "planned": 0,
                 "sent": 0,
             }
+
+        stale_rows = list(
+            self.db.scalars(
+                select(TechExpertNotification).where(
+                    TechExpertNotification.status.in_(OPEN_STATUSES),
+                    TechExpertNotification.source_id != self.source_domain,
+                )
+            ).all()
+        )
+        for row in stale_rows:
+            self._mark_cancelled(
+                row,
+                "Организация Техэксперта изменена в настройках",
+            )
 
         events = list(
             self.db.scalars(

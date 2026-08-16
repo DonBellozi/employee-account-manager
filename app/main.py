@@ -22,6 +22,7 @@ from app.routers import (
     onec_sources,
     settings_ui,
     synology,
+    techexpert,
     telegram_settings,
     zimbra_lifecycle,
     zimbra_observer,
@@ -122,6 +123,7 @@ app.include_router(hr_reconcile_multisource.router)
 app.include_router(settings_ui.router)
 app.include_router(onec_sources.router)
 app.include_router(synology.router)
+app.include_router(techexpert.router)
 app.include_router(telegram_settings.router)
 app.include_router(zimbra_observer.router)
 app.include_router(zimbra_protection.router)
