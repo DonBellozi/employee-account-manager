@@ -21,6 +21,7 @@ from app.models_zimbra_observer import (
     ZimbraObservationRun,
     ZimbraObserverSettings,
 )
+from app.services.worker_identity import WorkerIdentityResolver
 from app.services.zimbra import ZimbraService
 
 
@@ -149,6 +150,11 @@ class HRProtectionSnapshot:
     records_count: int
     source_count: int = 0
     stale_sources: tuple[str, ...] = ()
+    # Общий резолвер идентичности. Поле необязательное: при его отсутствии
+    # защита действующего работника опускается до старого поведения — точного
+    # совпадения корпоративного адреса. Так проверка остается работоспособной
+    # в изолированных тестах, которые собирают снимок вручную.
+    identity: object | None = None
 
 
 @dataclass(frozen=True)
@@ -833,6 +839,7 @@ class ZimbraObserverService:
             records_count=len(present_rows),
             source_count=len(source_ids),
             stale_sources=tuple(stale_sources),
+            identity=WorkerIdentityResolver(self.db),
         )
 
     def _dismissal_schedule_map(self) -> dict[str, date]:
@@ -859,8 +866,25 @@ class ZimbraObserverService:
         local_today: date,
     ) -> Evaluation:
         addresses = tuple(address.strip().lower() for address in account.addresses)
+
+        # Действующий работник определяется общим для проекта правилом, а не
+        # точным совпадением одного поля. Раньше защита держалась только на
+        # corporate_email из выгрузки: у работника с алиасом, незаполненным
+        # или отличающимся адресом ее не было, и ящик закрывался по
+        # неактивности. Совпадение адреса по-прежнему проверяется первым,
+        # потому что оно самое надежное и дает читаемую причину.
         matched_hr = next((address for address in addresses if address in hr.emails), "")
         hr_active = bool(matched_hr)
+
+        if not hr_active and hr.identity is not None:
+            match = hr.identity.resolve(emails=list(addresses))
+            if match.active:
+                hr_active = True
+                matched_hr = (
+                    f"{addresses[0]} (по {match.method})"
+                    if addresses
+                    else f"сопоставление по {match.method}"
+                )
 
         scheduled_dismissal = next(
             (dismissal_map[address] for address in addresses if address in dismissal_map),

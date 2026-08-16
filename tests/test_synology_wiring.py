@@ -103,9 +103,11 @@ def test_presence_in_export_is_the_first_filter():
 
     # Уволенным считается только сопоставленный человек.
     assert "matched_employee" in policy
-    # Учетка связывается с работником не одной лишь корпоративной почтой.
-    for marker in ("personal_email", "hr_login", "ad_login", "fio"):
-        assert marker in lifecycle
+    # Правило сопоставления общее для проекта и живет в отдельном сервисе.
+    assert "self._identity.resolve(" in lifecycle
+    identity = read("app/services/worker_identity.py")
+    for marker in ("personal_email", "ad_login", "zimbra_email", "fio"):
+        assert marker in identity
 
 
 def test_unmatched_accounts_are_never_disabled_by_automation():

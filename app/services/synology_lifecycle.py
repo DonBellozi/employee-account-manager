@@ -53,6 +53,7 @@ from app.services.synology_policy import (
     normalize_email,
     normalize_login,
 )
+from app.services.worker_identity import WorkerIdentityResolver
 
 
 _SYNC_LOCK = threading.Lock()
@@ -96,7 +97,7 @@ class SynologyLifecycleService:
     def __init__(self, settings: Settings, db: Session):
         self.settings = settings
         self.db = db
-        self._fio_cache: dict[str, set[str]] | None = None
+        self._identity = WorkerIdentityResolver(db)
 
     @property
     def local_now(self) -> datetime:
@@ -359,140 +360,24 @@ class SynologyLifecycleService:
         }
         return by_login, by_stable
 
-    @staticmethod
-    def _normalize_fio(value: str) -> str:
-        text = " ".join(str(value or "").split()).casefold()
-        return text.replace("ё", "е")
-
-    def _match_worker_keys(
-        self,
-        account: SynologyLocalUser,
-    ) -> tuple[set[str], str]:
-        """Найти человека в кадровых данных по всем доступным признакам.
-
-        Учетка DSM связывается с работником не только корпоративной почтой:
-        поле e-mail в DSM часто пустое или заполнено личным адресом. Поэтому
-        проверяются также логин и ФИО. Инцидент с блокировкой действующих
-        работников произошел именно из-за того, что признак был один.
-        """
-        email = normalize_email(account.email)
-        login = normalize_login(account.login)
-        fio = self._normalize_fio(account.description)
-
-        if email:
-            records = list(
-                self.db.scalars(
-                    select(HRSourceRecord).where(
-                        or_(
-                            func.lower(HRSourceRecord.corporate_email) == email,
-                            func.lower(HRSourceRecord.personal_email) == email,
-                        )
-                    )
-                ).all()
-            )
-            keys = {r.worker_key for r in records if str(r.worker_key or "").strip()}
-            if keys:
-                return keys, "email"
-
-        if login:
-            records = list(
-                self.db.scalars(
-                    select(HRSourceRecord).where(
-                        func.lower(HRSourceRecord.login) == login
-                    )
-                ).all()
-            )
-            keys = {r.worker_key for r in records if str(r.worker_key or "").strip()}
-            if keys:
-                return keys, "hr_login"
-
-            conditions = [func.lower(EmailLoginMapping.ad_login) == login]
-            if email:
-                conditions.append(
-                    func.lower(EmailLoginMapping.source_email) == email
-                )
-            mappings = list(
-                self.db.scalars(
-                    select(EmailLoginMapping).where(or_(*conditions))
-                ).all()
-            )
-            keys = {
-                m.worker_key for m in mappings if str(m.worker_key or "").strip()
-            }
-            if keys:
-                return keys, "ad_login"
-
-        if fio:
-            keys = self._fio_index().get(fio, set())
-            if keys:
-                return set(keys), "fio"
-
-        return set(), ""
-
-    def _fio_index(self) -> dict[str, set[str]]:
-        """Индекс ФИО -> worker_key, построенный один раз на прогон.
-
-        Нормализация (регистр, лишние пробелы, ё/е) невыполнима средствами SQL,
-        поэтому индекс строится в памяти. Без кеша это был бы полный проход по
-        кадровым записям на каждую учетку DSM.
-        """
-        if self._fio_cache is None:
-            index: dict[str, set[str]] = {}
-            for worker_key, fio in self.db.execute(
-                select(HRSourceRecord.worker_key, HRSourceRecord.fio)
-            ).all():
-                key = self._normalize_fio(fio)
-                if not key or not str(worker_key or "").strip():
-                    continue
-                index.setdefault(key, set()).add(worker_key)
-            self._fio_cache = index
-        return self._fio_cache
-
     def _hr_snapshot(self, account: SynologyLocalUser) -> dict[str, object]:
-        worker_keys, match_method = self._match_worker_keys(account)
-        if not worker_keys:
-            return {
-                "matched": False,
-                "active": False,
-                "worker_key": "",
-                "match_method": "",
-                "dismissal_date": None,
-            }
+        """Связать локальную учетку DSM с работником кадровой выгрузки.
 
-        records = list(
-            self.db.scalars(
-                select(HRSourceRecord).where(
-                    HRSourceRecord.worker_key.in_(worker_keys)
-                )
-            ).all()
+        Правило сопоставления общее для всего проекта и живет в
+        WorkerIdentityResolver: e-mail в DSM часто пустой или личный, поэтому
+        одного признака недостаточно.
+        """
+        match = self._identity.resolve(
+            emails=[account.email],
+            logins=[account.login],
+            fio=account.description,
         )
-        active = any(record.is_present for record in records)
-
-        states = list(
-            self.db.scalars(
-                select(HREmploymentState).where(
-                    HREmploymentState.worker_key.in_(worker_keys)
-                )
-            ).all()
-        )
-        # Любая продолжающаяся занятость в любой организации защищает учетку,
-        # как и в контуре AD/Zimbra.
-        if any(state.status in {"active", "scheduled"} for state in states):
-            active = True
-
-        dates = [
-            state.dismissal_date
-            for state in states
-            if state.dismissal_date is not None
-        ]
-        if len(worker_keys) > 1:
-            match_method = f"{match_method}_ambiguous"
         return {
-            "matched": True,
-            "active": active,
-            "worker_key": next(iter(worker_keys)) if len(worker_keys) == 1 else "",
-            "match_method": match_method,
-            "dismissal_date": max(dates) if dates else None,
+            "matched": match.matched,
+            "active": match.active,
+            "worker_key": match.worker_key,
+            "match_method": match.method,
+            "dismissal_date": match.dismissal_date,
         }
 
     def _hr_write_ready(self) -> tuple[bool, str]:
