@@ -25,6 +25,7 @@ def _context(
     saved: bool = False,
     exception_saved: bool = False,
     guard_acknowledged: bool = False,
+    restored: bool = False,
     error: str = "",
 ):
     current = require_admin(request)
@@ -36,6 +37,7 @@ def _context(
         "saved": saved,
         "exception_saved": exception_saved,
         "guard_acknowledged": guard_acknowledged,
+        "restored": restored,
         "error": error,
     }
 
@@ -46,6 +48,7 @@ def synology_page(
     saved: int = 0,
     exception_saved: int = 0,
     guard_acknowledged: int = 0,
+    restored: int = 0,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
@@ -59,6 +62,7 @@ def synology_page(
             saved=bool(saved),
             exception_saved=bool(exception_saved),
             guard_acknowledged=bool(guard_acknowledged),
+            restored=bool(restored),
         ),
     )
 
@@ -93,6 +97,41 @@ def synology_policy_save(
             actor=current.username,
         )
         return RedirectResponse("/settings/synology?saved=1", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return templates.TemplateResponse(
+            request,
+            "synology.html",
+            _context(
+                request,
+                settings=settings,
+                db=db,
+                error=str(exc),
+            ),
+            status_code=400,
+        )
+
+
+@router.post("/settings/synology/accounts/{state_id}/restore")
+def synology_account_restore(
+    state_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Вернуть ошибочно заблокированную учетку DSM по решению администратора."""
+    validate_csrf(request, csrf)
+    current = require_admin(request)
+    try:
+        SynologyLifecycleService(settings, db).restore_account(
+            state_id,
+            actor=current.username,
+        )
+        return RedirectResponse(
+            "/settings/synology?restored=1",
+            status_code=303,
+        )
     except Exception as exc:
         db.rollback()
         return templates.TemplateResponse(

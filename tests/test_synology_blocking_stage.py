@@ -48,9 +48,11 @@ def test_enum_footer_plural_is_not_a_login():
     assert SynologyService._parse_enum_output(output) == ["baranov.gb"]
 
 
-def test_internal_missing_from_hr_is_disabled_not_deleted():
+def test_internal_missing_from_hr_is_handed_to_the_shared_contour():
+    # Блокировкой уволенного занимается общий контур вместе с AD и Zimbra.
     decision = _decision(CLASS_INTERNAL_DISMISSED, active=True)
-    assert decision.action == ACTION_DISABLE
+    assert decision.action == ACTION_NONE
+    assert decision.action != ACTION_DISABLE
 
 
 def test_internal_active_waits_for_three_month_cycle():
@@ -83,13 +85,12 @@ def test_external_blocks_when_six_month_cycle_is_due():
     assert decision.action == ACTION_DISABLE
 
 
-def test_unknown_account_is_disabled():
+def test_unknown_account_requires_classification():
     decision = _decision(CLASS_UNKNOWN, active=True, enrolled=False, expires=None)
-    # Нераспознанная учетка (нет пригодного e-mail) больше не остается
-    # висеть в статусе «требует классификации»: под ней неизвестно кто
-    # заходит, поэтому она отключается.
-    assert decision.action == ACTION_DISABLE
-    assert decision.action != ACTION_CLASSIFY
+    # Нераспознанная учетка не блокируется автоматически: за ней может стоять
+    # действующий работник, у которого в DSM не заполнен e-mail.
+    assert decision.action == ACTION_CLASSIFY
+    assert decision.action != ACTION_DISABLE
 
 
 def test_expire_account_uses_verified_modify_signature(monkeypatch):

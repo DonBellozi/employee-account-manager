@@ -11,7 +11,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import AuditLog, HRSourceRecord, OneCImportRun
+from app.models import (
+    AuditLog,
+    EmailLoginMapping,
+    HRSourceRecord,
+    OneCImportRun,
+)
 from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
 from app.models_synology import (
     SynologyAccountState,
@@ -58,7 +63,7 @@ MASS_DISABLE_ACK_TTL_MINUTES = 60
 
 CLASSIFICATION_LABELS = {
     CLASS_INTERNAL_ACTIVE: "Наш сотрудник",
-    CLASS_INTERNAL_DISMISSED: "Уволен / нет среди действующих",
+    CLASS_INTERNAL_DISMISSED: "Уволен (блокирует общий контур)",
     CLASS_EXTERNAL: "Внешняя",
     CLASS_UNKNOWN: "Требует классификации",
     CLASS_EXCEPTION: "Исключение",
@@ -91,6 +96,7 @@ class SynologyLifecycleService:
     def __init__(self, settings: Settings, db: Session):
         self.settings = settings
         self.db = db
+        self._fio_cache: dict[str, set[str]] | None = None
 
     @property
     def local_now(self) -> datetime:
@@ -353,10 +359,100 @@ class SynologyLifecycleService:
         }
         return by_login, by_stable
 
-    def _hr_snapshot(self, email: str) -> dict[str, object]:
-        normalized = normalize_email(email)
-        if not normalized:
+    @staticmethod
+    def _normalize_fio(value: str) -> str:
+        text = " ".join(str(value or "").split()).casefold()
+        return text.replace("ё", "е")
+
+    def _match_worker_keys(
+        self,
+        account: SynologyLocalUser,
+    ) -> tuple[set[str], str]:
+        """Найти человека в кадровых данных по всем доступным признакам.
+
+        Учетка DSM связывается с работником не только корпоративной почтой:
+        поле e-mail в DSM часто пустое или заполнено личным адресом. Поэтому
+        проверяются также логин и ФИО. Инцидент с блокировкой действующих
+        работников произошел именно из-за того, что признак был один.
+        """
+        email = normalize_email(account.email)
+        login = normalize_login(account.login)
+        fio = self._normalize_fio(account.description)
+
+        if email:
+            records = list(
+                self.db.scalars(
+                    select(HRSourceRecord).where(
+                        or_(
+                            func.lower(HRSourceRecord.corporate_email) == email,
+                            func.lower(HRSourceRecord.personal_email) == email,
+                        )
+                    )
+                ).all()
+            )
+            keys = {r.worker_key for r in records if str(r.worker_key or "").strip()}
+            if keys:
+                return keys, "email"
+
+        if login:
+            records = list(
+                self.db.scalars(
+                    select(HRSourceRecord).where(
+                        func.lower(HRSourceRecord.login) == login
+                    )
+                ).all()
+            )
+            keys = {r.worker_key for r in records if str(r.worker_key or "").strip()}
+            if keys:
+                return keys, "hr_login"
+
+            conditions = [func.lower(EmailLoginMapping.ad_login) == login]
+            if email:
+                conditions.append(
+                    func.lower(EmailLoginMapping.source_email) == email
+                )
+            mappings = list(
+                self.db.scalars(
+                    select(EmailLoginMapping).where(or_(*conditions))
+                ).all()
+            )
+            keys = {
+                m.worker_key for m in mappings if str(m.worker_key or "").strip()
+            }
+            if keys:
+                return keys, "ad_login"
+
+        if fio:
+            keys = self._fio_index().get(fio, set())
+            if keys:
+                return set(keys), "fio"
+
+        return set(), ""
+
+    def _fio_index(self) -> dict[str, set[str]]:
+        """Индекс ФИО -> worker_key, построенный один раз на прогон.
+
+        Нормализация (регистр, лишние пробелы, ё/е) невыполнима средствами SQL,
+        поэтому индекс строится в памяти. Без кеша это был бы полный проход по
+        кадровым записям на каждую учетку DSM.
+        """
+        if self._fio_cache is None:
+            index: dict[str, set[str]] = {}
+            for worker_key, fio in self.db.execute(
+                select(HRSourceRecord.worker_key, HRSourceRecord.fio)
+            ).all():
+                key = self._normalize_fio(fio)
+                if not key or not str(worker_key or "").strip():
+                    continue
+                index.setdefault(key, set()).add(worker_key)
+            self._fio_cache = index
+        return self._fio_cache
+
+    def _hr_snapshot(self, account: SynologyLocalUser) -> dict[str, object]:
+        worker_keys, match_method = self._match_worker_keys(account)
+        if not worker_keys:
             return {
+                "matched": False,
                 "active": False,
                 "worker_key": "",
                 "match_method": "",
@@ -366,42 +462,33 @@ class SynologyLifecycleService:
         records = list(
             self.db.scalars(
                 select(HRSourceRecord).where(
-                    func.lower(HRSourceRecord.corporate_email) == normalized
+                    HRSourceRecord.worker_key.in_(worker_keys)
                 )
             ).all()
         )
-        worker_keys = {
-            record.worker_key
-            for record in records
-            if str(record.worker_key or "").strip()
-        }
         active = any(record.is_present for record in records)
 
-        states: list[HREmploymentState] = []
-        if worker_keys:
-            states = list(
-                self.db.scalars(
-                    select(HREmploymentState).where(
-                        HREmploymentState.worker_key.in_(worker_keys)
-                    )
-                ).all()
-            )
-            if any(state.status in {"active", "scheduled"} for state in states):
-                active = True
+        states = list(
+            self.db.scalars(
+                select(HREmploymentState).where(
+                    HREmploymentState.worker_key.in_(worker_keys)
+                )
+            ).all()
+        )
+        # Любая продолжающаяся занятость в любой организации защищает учетку,
+        # как и в контуре AD/Zimbra.
+        if any(state.status in {"active", "scheduled"} for state in states):
+            active = True
 
         dates = [
             state.dismissal_date
             for state in states
             if state.dismissal_date is not None
         ]
-        match_method = (
-            "email"
-            if len(worker_keys) == 1
-            else "email_ambiguous"
-            if len(worker_keys) > 1
-            else "managed_domain_only"
-        )
+        if len(worker_keys) > 1:
+            match_method = f"{match_method}_ambiguous"
         return {
+            "matched": True,
             "active": active,
             "worker_key": next(iter(worker_keys)) if len(worker_keys) == 1 else "",
             "match_method": match_method,
@@ -560,23 +647,21 @@ class SynologyLifecycleService:
             exception_by_stable.get(account.stable_id)
             or exception_by_login.get(normalize_login(account.login))
         )
-        hr = self._hr_snapshot(account.email)
+        hr = self._hr_snapshot(account)
         classification = classify_account(
             email=account.email,
             managed_domains=managed_domains,
             protected=account.protected,
             exception=exception is not None,
             active_employee=bool(hr["active"]),
+            matched_employee=bool(hr["matched"]),
         )
 
-        worker_key = str(hr["worker_key"] or "") if classification in {
-            CLASS_INTERNAL_ACTIVE,
-            CLASS_INTERNAL_DISMISSED,
-        } else ""
-        match_method = str(hr["match_method"] or "") if classification in {
-            CLASS_INTERNAL_ACTIVE,
-            CLASS_INTERNAL_DISMISSED,
-        } else ""
+        # worker_key сохраняется при любом успешном сопоставлении, а не только
+        # для внутренних классов: по нему общий контур увольнения находит
+        # DSM-учетки работника и блокирует их вместе с AD и Zimbra.
+        worker_key = str(hr["worker_key"] or "")
+        match_method = str(hr["match_method"] or "")
 
         row.login = account.login
         row.uid = account.uid
@@ -774,13 +859,14 @@ class SynologyLifecycleService:
             exception_by_stable.get(account.stable_id)
             or exception_by_login.get(normalize_login(account.login))
         )
-        hr = self._hr_snapshot(account.email)
+        hr = self._hr_snapshot(account)
         classification = classify_account(
             email=account.email,
             managed_domains=managed_domains,
             protected=account.protected,
             exception=exception is not None,
             active_employee=bool(hr["active"]),
+            matched_employee=bool(hr["matched"]),
         )
         if classification != row.classification:
             row.classification = classification
@@ -910,10 +996,14 @@ class SynologyLifecycleService:
             if row.desired_action != ACTION_DISABLE:
                 deferred += 1
                 continue
-            # Исключения и системные учетки — единственные, кого автоматика
-            # не трогает. Нераспознанные (без e-mail) блокируются наравне с
-            # остальными: именно они и есть цель перевода на домен.
-            if classification in {CLASS_EXCEPTION, CLASS_PROTECTED}:
+            # Последний рубеж перед изменением DSM. CLASS_UNKNOWN здесь
+            # обязателен: нераспознанная учетка может принадлежать
+            # действующему работнику, у которого просто не заполнен e-mail.
+            if classification in {
+                CLASS_EXCEPTION,
+                CLASS_PROTECTED,
+                CLASS_UNKNOWN,
+            }:
                 deferred += 1
                 continue
             if classification in {CLASS_INTERNAL_ACTIVE, CLASS_INTERNAL_DISMISSED}:
@@ -1081,6 +1171,67 @@ class SynologyLifecycleService:
             raise
         finally:
             _SYNC_LOCK.release()
+
+    def recent_disabled(self, *, limit: int = 200) -> list[dict[str, object]]:
+        """Учетки, отключенные автоматикой, для разбора и отката."""
+        rows = list(
+            self.db.scalars(
+                select(SynologyAccountState)
+                .where(
+                    SynologyAccountState.last_action == "disable",
+                    SynologyAccountState.is_active.is_(False),
+                )
+                .order_by(SynologyAccountState.last_action_at.desc())
+                .limit(max(1, min(int(limit), 2000)))
+            ).all()
+        )
+        return [
+            {
+                "row": row,
+                "classification_label": CLASSIFICATION_LABELS.get(
+                    row.classification, row.classification
+                ),
+            }
+            for row in rows
+        ]
+
+    def restore_account(self, state_id: int, *, actor: str) -> SynologyAccountState:
+        """Вернуть ошибочно заблокированную учетку и вывести ее из-под цикла.
+
+        Одного Expired=0 мало: если оставить прежнюю классификацию, ближайшая
+        сверка отключит учетку снова. Поэтому запись переводится в состояние,
+        требующее ручного решения, и цикл сбрасывается.
+        """
+        row = self.db.get(SynologyAccountState, int(state_id))
+        if row is None:
+            raise ValueError("Учетная запись не найдена")
+
+        after = SynologyService(self.settings).restore_account(row.login)
+
+        row.status = after.status
+        row.is_active = after.is_active
+        row.expires_at = after.expires_at
+        row.last_observed_active = True
+        row.last_action = "restore"
+        row.last_action_at = self.utcnow()
+        row.last_error = ""
+        self._clear_cycle(row)
+        row.classification = CLASS_UNKNOWN
+        row.desired_action = ACTION_CLASSIFY
+        row.desired_reason = (
+            f"Восстановлена вручную ({actor}). Автоматические действия "
+            "приостановлены до явного решения администратора."
+        )
+        self._audit(
+            action="synology_account_restored",
+            target=row.login,
+            result="warning",
+            details=f"stable_id={row.stable_id}; email={row.email or '-'}",
+            actor=actor,
+        )
+        self.db.commit()
+        self.db.refresh(row)
+        return row
 
     def add_exception(
         self,
@@ -1262,6 +1413,7 @@ class SynologyLifecycleService:
             "latest": latest,
             "runs": runs,
             "accounts": account_rows,
+            "disabled_recent": self.recent_disabled(),
             "exceptions": exceptions,
             "managed_domains": sorted(self.managed_domains()),
             "counts": {

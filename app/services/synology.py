@@ -525,6 +525,49 @@ class SynologyService:
         finally:
             client.close()
 
+    def restore_account(self, login: str) -> SynologyLocalUser:
+        """Снять Expired с локальной учетки DSM по решению администратора.
+
+        Автоматика этого не делает никогда: включение — всегда явное действие
+        человека. Метод существует, чтобы ошибочную блокировку можно было
+        отменить из приложения, с записью в журнал, а не руками в DSM.
+        """
+        if not str(login or "").strip():
+            raise ValueError("DSM: пустой login")
+
+        client = self._client()
+        try:
+            before_raw = self._execute(client, ["--get", login])
+            before = self._parse_detail(login, before_raw)
+
+            if before.protected or before.login.casefold() in self.SYSTEM_LOGINS:
+                raise RuntimeError(
+                    f"DSM: защищенная учетка {before.login} не изменяется"
+                )
+            if before.is_active:
+                return before
+
+            self._execute(
+                client,
+                [
+                    "--modify",
+                    before.login,
+                    before.description,
+                    "0",
+                    before.email,
+                ],
+            )
+
+            verify_raw = self._execute(client, ["--get", before.login])
+            after = self._parse_detail(before.login, verify_raw)
+            if not after.is_active:
+                raise RuntimeError(
+                    f"DSM: {before.login} осталась отключенной после Expired=0"
+                )
+            return after
+        finally:
+            client.close()
+
     def test_connection(self) -> str:
         """Проверить SSH/synouser без ложного отказа на особой учетке DSM.
 

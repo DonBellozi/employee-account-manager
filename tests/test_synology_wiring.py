@@ -43,7 +43,7 @@ def test_settings_has_synology_card_and_page():
     page = read("app/templates/synology.html")
     assert "href: '/settings/synology'" in js
     assert "Synology DSM" in js
-    assert "которой нет среди действующих работников" in page
+    assert "которого нет среди действующих работников" in page
 
 
 def test_write_scope_is_limited_to_expired_flag():
@@ -85,19 +85,54 @@ def test_mass_disable_guard_is_wired_end_to_end():
     assert "synology_sync_runs" in db
 
 
-def test_only_system_and_exceptions_are_spared():
+def test_system_protection_is_narrow_but_present():
     service = read("app/services/synology.py")
-    policy = read("app/services/synology_policy.py")
-    lifecycle = read("app/services/synology_lifecycle.py")
-
-    # Защита сузилась до реально системных записей.
     assert "SYSTEM_LOGINS" in service
     assert "uid_number < 1024" in service
     assert '"administrators" in lowered_output' not in service
 
-    # Нераспознанные учетки блокируются, а не ждут ручной классификации.
-    assert "CLASS_UNKNOWN" in policy
-    assert "{CLASS_EXCEPTION, CLASS_PROTECTED}" in lifecycle
+
+def test_presence_in_export_is_the_first_filter():
+    policy = read("app/services/synology_policy.py")
+    lifecycle = read("app/services/synology_lifecycle.py")
+
+    # Действующий работник классифицируется до проверок домена и увольнения.
+    active_at = policy.index("if active_employee:")
+    domain_at = policy.index("domain = email_domain(email)")
+    assert active_at < domain_at
+
+    # Уволенным считается только сопоставленный человек.
+    assert "matched_employee" in policy
+    # Учетка связывается с работником не одной лишь корпоративной почтой.
+    for marker in ("personal_email", "hr_login", "ad_login", "fio"):
+        assert marker in lifecycle
+
+
+def test_unmatched_accounts_are_never_disabled_by_automation():
+    policy = read("app/services/synology_policy.py")
+    lifecycle = read("app/services/synology_lifecycle.py")
+
+    unknown_block = policy[policy.index("if classification == CLASS_UNKNOWN:"):]
+    unknown_block = unknown_block[: unknown_block.index("if classification == CLASS_INTERNAL_DISMISSED:")]
+    assert "ACTION_CLASSIFY" in unknown_block
+    assert "ACTION_DISABLE" not in unknown_block
+
+    # Последний рубеж перед изменением DSM тоже пропускает нераспознанные.
+    assert "CLASS_UNKNOWN," in lifecycle
+
+
+def test_restore_is_available_but_never_automatic():
+    service = read("app/services/synology.py")
+    lifecycle = read("app/services/synology_lifecycle.py")
+    router = read("app/routers/synology.py")
+    page = read("app/templates/synology.html")
+
+    assert "def restore_account" in service
+    assert "synology_account_restored" in lifecycle
+    assert "/restore" in router
+    assert "Включить" in page
+    # Автоматика включением не занимается: только явное действие человека.
+    assert "restore_account" not in read("app/services/synology_scheduler.py")
 
 
 def test_synouser_commands_have_a_hard_deadline():
