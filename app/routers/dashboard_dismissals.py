@@ -22,7 +22,11 @@ from app.models import (
 )
 from app.models_notifications import DismissalEquipmentNotice
 from app.models_synology import SynologyAccountState
-from app.models_techexpert import TechExpertNotification
+from app.models_techexpert import (
+    TechExpertNotification,
+    TechExpertNotificationBatch,
+    TechExpertNotificationBatchItem,
+)
 from app.models_zimbra_lifecycle import ZimbraEmploymentAction
 from app.models_dismissal_lifecycle import (
     ADReactivationAlert,
@@ -251,6 +255,99 @@ def _techexpert_journal_item(
     }
 
 
+def _techexpert_batch_journal_item(
+    batch: TechExpertNotificationBatch,
+    items: list[TechExpertNotificationBatchItem],
+) -> dict[str, object]:
+    labels = {
+        "processing": ("running", "Обрабатывается"),
+        "sent": ("success", "Отправлено"),
+        "sent_with_exclusions": ("partial", "Отправлено с исключениями"),
+        "failed": ("failed", "Ошибка отправки"),
+        "no_send": ("partial", "Без отправки"),
+    }
+    status_key, status_label = labels.get(
+        batch.status,
+        ("running", batch.status),
+    )
+    membership_labels = {
+        "not_checked": "Не проверено",
+        "member": "Состоит в группе",
+        "not_member": "Не состоит в группе",
+        "error": "Ошибка проверки",
+    }
+    result_labels = {
+        "pending": ("running", "Ожидает проверки"),
+        "ready": ("running", "Подготовлен к отправке"),
+        "sent": ("success", "Включён и отправлен"),
+        "skipped": ("partial", "Исключён: нет в группе"),
+        "cancelled": ("partial", "Исключён: HR отменил"),
+        "deferred": ("partial", "Исключён: отсрочка"),
+        "failed": ("failed", "Ошибка"),
+        "intervention": ("failed", "Требует проверки"),
+    }
+    batch_people = []
+    for item in sorted(
+        items,
+        key=lambda value: (
+            not value.included,
+            str(value.fio or "").lower(),
+            value.id,
+        ),
+    ):
+        result_key, result_label = result_labels.get(
+            item.result,
+            ("running", item.result),
+        )
+        if item.included and item.result == "failed":
+            result_label = "Включён, отправка не удалась"
+        batch_people.append(
+            {
+                "fio": item.fio or item.worker_key,
+                "corporate_email": item.corporate_email,
+                "ad_login": item.ad_login,
+                "dismissal_date": item.dismissal_date,
+                "membership": membership_labels.get(
+                    item.membership_state,
+                    item.membership_state,
+                ),
+                "included": item.included,
+                "result_key": result_key,
+                "result_label": result_label,
+                "reason": item.reason,
+            }
+        )
+
+    details = [
+        ("Организация", batch.source_name or batch.source_id),
+        ("Получатель", batch.recipient_email),
+        ("Тема письма", batch.subject),
+        ("Проверено сотрудников", str(int(batch.total_count or 0))),
+        ("Включено в письмо", str(int(batch.included_count or 0))),
+        ("Исключено", str(int(batch.excluded_count or 0))),
+    ]
+    return {
+        "kind": "dismissal",
+        "record_id": f"ТЭ-{batch.id}",
+        "created_at": batch.created_at,
+        "action": "Пакетное письмо Техэксперта",
+        "subject": (
+            f"Сотрудников в письме: {int(batch.included_count or 0)}"
+        ),
+        "login": "",
+        "corporate_email": batch.recipient_email,
+        "personal_email": "",
+        "mail_domain": batch.source_id,
+        "operator": "Система",
+        "status_key": status_key,
+        "status_label": status_label,
+        "details": details,
+        "techexpert_batch_items": batch_people,
+        "error_message": batch.last_error,
+        "completed_at": batch.sent_at or batch.completed_at,
+    }
+
+
 
 def _final_dismissal_block_journal_item(
     run: FinalDismissalBlockRun,
@@ -396,6 +493,35 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
         )
         .limit(50)
     ).all()
+    techexpert_batches = db.scalars(
+        select(TechExpertNotificationBatch)
+        .order_by(
+            desc(TechExpertNotificationBatch.created_at),
+            desc(TechExpertNotificationBatch.id),
+        )
+        .limit(50)
+    ).all()
+    techexpert_batch_ids = [item.id for item in techexpert_batches]
+    techexpert_batch_items = (
+        db.scalars(
+            select(TechExpertNotificationBatchItem).where(
+                TechExpertNotificationBatchItem.batch_id.in_(
+                    techexpert_batch_ids
+                )
+            )
+        ).all()
+        if techexpert_batch_ids
+        else []
+    )
+    techexpert_items_by_batch: dict[
+        int,
+        list[TechExpertNotificationBatchItem],
+    ] = {}
+    for item in techexpert_batch_items:
+        techexpert_items_by_batch.setdefault(item.batch_id, []).append(item)
+    batched_notification_ids = {
+        item.notification_id for item in techexpert_batch_items
+    }
     techexpert_notifications = db.scalars(
         select(TechExpertNotification)
         .order_by(
@@ -464,8 +590,16 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
             for item in dismissal_notices
         ),
         *(
+            _techexpert_batch_journal_item(
+                item,
+                techexpert_items_by_batch.get(item.id, []),
+            )
+            for item in techexpert_batches
+        ),
+        *(
             _techexpert_journal_item(item)
             for item in techexpert_notifications
+            if item.id not in batched_notification_ids
         ),
         *(
             _final_dismissal_block_journal_item(

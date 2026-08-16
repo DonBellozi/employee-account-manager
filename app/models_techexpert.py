@@ -109,3 +109,74 @@ class TechExpertNotification(Base):
         default=utcnow,
         onupdate=utcnow,
     )
+
+
+class TechExpertNotificationBatch(Base):
+    """Одна пакетная попытка отправки письма в Техэксперт."""
+
+    __tablename__ = "techexpert_notification_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(128), index=True)
+    source_name: Mapped[str] = mapped_column(String(256), default="")
+    recipient_email: Mapped[str] = mapped_column(String(320), default="")
+    subject: Mapped[str] = mapped_column(String(512), default="")
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="processing",
+        index=True,
+    )
+    total_count: Mapped[int] = mapped_column(Integer, default=0)
+    included_count: Mapped[int] = mapped_column(Integer, default=0)
+    excluded_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+
+
+class TechExpertNotificationBatchItem(Base):
+    """Снимок решения по одному работнику внутри пакетной попытки."""
+
+    __tablename__ = "techexpert_notification_batch_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_id",
+            "notification_id",
+            name="uq_techexpert_batch_notification",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_id: Mapped[int] = mapped_column(Integer, index=True)
+    notification_id: Mapped[int] = mapped_column(Integer, index=True)
+    worker_key: Mapped[str] = mapped_column(String(64), index=True)
+    fio: Mapped[str] = mapped_column(String(512), default="")
+    corporate_email: Mapped[str] = mapped_column(String(320), default="")
+    ad_login: Mapped[str] = mapped_column(String(128), default="")
+    dismissal_date: Mapped[date] = mapped_column(Date)
+    membership_state: Mapped[str] = mapped_column(
+        String(32),
+        default="not_checked",
+    )
+    included: Mapped[bool] = mapped_column(Boolean, default=False)
+    result: Mapped[str] = mapped_column(
+        String(32),
+        default="pending",
+        index=True,
+    )
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+    )

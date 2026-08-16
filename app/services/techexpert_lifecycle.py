@@ -15,7 +15,11 @@ from app.models import AuditLog, EmailLoginMapping, HRSourceRecord
 from app.models_dismissals import DismissalDeferral
 from app.models_notifications import HREmploymentDismissalEvent
 from app.models_onec_sources import HREmploymentState
-from app.models_techexpert import TechExpertNotification
+from app.models_techexpert import (
+    TechExpertNotification,
+    TechExpertNotificationBatch,
+    TechExpertNotificationBatchItem,
+)
 from app.services.ad import ActiveDirectoryService
 from app.services.mailer import (
     CredentialMailer,
@@ -564,21 +568,155 @@ class TechExpertLifecycleService:
             "dismissal_date": row.dismissal_date.strftime("%d.%m.%Y"),
         }
 
-    def _send_batch(self, rows: list[TechExpertNotification]) -> int:
-        candidates = [
-            row for row in rows if self._prepare_batch_candidate(row)
+    def _create_batch(
+        self,
+        rows: list[TechExpertNotification],
+    ) -> tuple[
+        TechExpertNotificationBatch,
+        dict[int, TechExpertNotificationBatchItem],
+    ]:
+        batch = TechExpertNotificationBatch(
+            source_id=self.source_domain,
+            source_name=next(
+                (
+                    row.source_name
+                    for row in rows
+                    if str(row.source_name or "").strip()
+                ),
+                self.source_domain,
+            ),
+            recipient_email=normalize(self.config.recipient_email),
+            status="processing",
+            total_count=len(rows),
+        )
+        self.db.add(batch)
+        self.db.flush()
+
+        items: dict[int, TechExpertNotificationBatchItem] = {}
+        for row in rows:
+            item = TechExpertNotificationBatchItem(
+                batch_id=batch.id,
+                notification_id=row.id,
+                worker_key=row.worker_key,
+                fio=row.fio,
+                corporate_email=row.corporate_email,
+                ad_login=row.ad_login,
+                dismissal_date=row.dismissal_date,
+                membership_state=row.membership_state,
+            )
+            self.db.add(item)
+            items[row.id] = item
+        self.db.flush()
+        return batch, items
+
+    @staticmethod
+    def _batch_item_reason(row: TechExpertNotification) -> str:
+        if row.status == "skipped":
+            return "Работник не состоит в маркерной группе AD"
+        if row.status == "deferred" and row.deferred_until is not None:
+            return (
+                "Действует глобальная отсрочка до "
+                + row.deferred_until.strftime("%d.%m.%Y")
+            )
+        if row.status == "cancelled":
+            return row.last_error or "Кадровое событие больше не актуально"
+        if row.status in {"failed", "intervention"}:
+            return row.last_error or "Проверка завершилась ошибкой"
+        return row.last_error
+
+    def _record_batch_item(
+        self,
+        item: TechExpertNotificationBatchItem,
+        row: TechExpertNotification,
+        *,
+        included: bool,
+        result: str | None = None,
+        reason: str = "",
+    ) -> None:
+        item.fio = row.fio
+        item.corporate_email = row.corporate_email
+        item.ad_login = row.ad_login
+        item.dismissal_date = row.dismissal_date
+        item.membership_state = row.membership_state
+        item.included = included
+        item.result = result or row.status
+        item.reason = reason or self._batch_item_reason(row)
+
+    def _finalize_batch(
+        self,
+        batch: TechExpertNotificationBatch,
+        items: list[TechExpertNotificationBatchItem],
+    ) -> None:
+        batch.total_count = len(items)
+        batch.included_count = sum(bool(item.included) for item in items)
+        batch.excluded_count = batch.total_count - batch.included_count
+        sent_count = sum(item.result == "sent" for item in items)
+        failed = [
+            item
+            for item in items
+            if item.result in {"failed", "intervention"}
         ]
+        if sent_count:
+            batch.status = (
+                "sent_with_exclusions"
+                if batch.excluded_count
+                else "sent"
+            )
+        elif failed:
+            batch.status = "failed"
+        else:
+            batch.status = "no_send"
+        errors = list(
+            dict.fromkeys(item.reason for item in failed if item.reason)
+        )
+        batch.last_error = "\n".join(errors)
+        batch.completed_at = utcnow()
+
+    def _send_batch(
+        self,
+        rows: list[TechExpertNotification],
+        batch: TechExpertNotificationBatch,
+        batch_items: dict[int, TechExpertNotificationBatchItem],
+    ) -> int:
+        candidates: list[TechExpertNotification] = []
+        for row in rows:
+            if self._prepare_batch_candidate(row):
+                candidates.append(row)
+                self._record_batch_item(
+                    batch_items[row.id],
+                    row,
+                    included=True,
+                    result="ready",
+                    reason=(
+                        "HR подтверждён, работник состоит в маркерной группе AD"
+                    ),
+                )
+            else:
+                self._record_batch_item(
+                    batch_items[row.id],
+                    row,
+                    included=False,
+                )
         if not candidates:
+            self._finalize_batch(batch, list(batch_items.values()))
             return 0
 
         # Кадровые данные перечитываются для всего списка непосредственно
         # после проверки группы AD и перед единственной SMTP-отправкой.
         self.db.flush()
         self.db.expire_all()
-        final_rows = [
-            row for row in candidates if self._recheck_batch_candidate(row)
-        ]
+        final_rows: list[TechExpertNotification] = []
+        for row in candidates:
+            if self._recheck_batch_candidate(row):
+                final_rows.append(row)
+            else:
+                self._record_batch_item(
+                    batch_items[row.id],
+                    row,
+                    included=False,
+                )
         if not final_rows:
+            self._finalize_batch(batch, list(batch_items.values()))
             return 0
 
         final_rows.sort(
@@ -597,13 +735,15 @@ class TechExpertLifecycleService:
                 self.settings,
                 self.source_domain,
             )
+            subject = render_mail_template(
+                self.config.subject,
+                context,
+                autoescape=False,
+            )
+            batch.subject = subject
             CredentialMailer(self.settings).send_html(
                 recipient=normalize(self.config.recipient_email),
-                subject=render_mail_template(
-                    self.config.subject,
-                    context,
-                    autoescape=False,
-                ),
+                subject=subject,
                 body_html=render_mail_template(
                     self.config.body_html,
                     context,
@@ -615,6 +755,13 @@ class TechExpertLifecycleService:
         except Exception as exc:
             for row in final_rows:
                 self._mark_send_failure(row, exc)
+                self._record_batch_item(
+                    batch_items[row.id],
+                    row,
+                    included=True,
+                    result="failed",
+                )
+            self._finalize_batch(batch, list(batch_items.values()))
             return 0
 
         sent_at = utcnow()
@@ -633,6 +780,15 @@ class TechExpertLifecycleService:
                     f"сотрудников в письме: {len(final_rows)}"
                 ),
             )
+            self._record_batch_item(
+                batch_items[row.id],
+                row,
+                included=True,
+                result="sent",
+                reason="Включён в отправленное письмо",
+            )
+        batch.sent_at = sent_at
+        self._finalize_batch(batch, list(batch_items.values()))
         return len(final_rows)
 
     @staticmethod
@@ -692,7 +848,11 @@ class TechExpertLifecycleService:
             and self._datetime_due(row.scheduled_for, now)
             and self._datetime_due(row.next_attempt_at, now)
         ]
-        sent = self._send_batch(due_rows) if due_rows else 0
+        if due_rows:
+            batch, batch_items = self._create_batch(due_rows)
+            sent = self._send_batch(due_rows, batch, batch_items)
+        else:
+            sent = 0
         self.db.commit()
         return {
             "status": "ok",

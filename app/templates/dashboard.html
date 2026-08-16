@@ -183,6 +183,46 @@
                 {% endif %}
               </dl>
 
+              {% if item.techexpert_batch_items %}
+              <div class="table-wrap">
+                <table class="blocking-equipment-table">
+                  <thead>
+                    <tr>
+                      <th>Работник</th>
+                      <th>Дата увольнения</th>
+                      <th>Группа AD</th>
+                      <th>Результат</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for person in item.techexpert_batch_items %}
+                    <tr>
+                      <td>
+                        <strong>{{ person.fio }}</strong>
+                        {% if person.corporate_email %}
+                        <div class="muted">{{ person.corporate_email }}</div>
+                        {% endif %}
+                        {% if person.ad_login %}
+                        <div><code>{{ person.ad_login }}</code></div>
+                        {% endif %}
+                      </td>
+                      <td>{{ person.dismissal_date.strftime('%d.%m.%Y') }}</td>
+                      <td>{{ person.membership }}</td>
+                      <td>
+                        <span class="status {{ person.result_key }}">
+                          {{ person.result_label }}
+                        </span>
+                        {% if person.reason %}
+                        <div class="muted">{{ person.reason }}</div>
+                        {% endif %}
+                      </td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+              {% endif %}
+
               {% if item.kind == 'blocking' and item.equipment_snapshot %}
               <div class="table-wrap">
                 <table class="blocking-equipment-table">
