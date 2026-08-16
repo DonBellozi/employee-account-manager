@@ -7,12 +7,56 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import HRSourceRecord
+from app.models_notifications import HREmploymentDismissalEvent
 from app.models_onec_sources import HREmploymentState
 from app.services.onec_xlsx import OneCWorkbook
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def capture_dismissal_event(
+    db: Session,
+    *,
+    employment: HREmploymentState,
+    dismissal_date,
+    is_present: bool,
+) -> None:
+    """Зафиксировать кадровое событие в транзакции кадрового импорта."""
+    event = db.scalar(
+        select(HREmploymentDismissalEvent)
+        .where(
+            HREmploymentDismissalEvent.worker_key == employment.worker_key,
+            HREmploymentDismissalEvent.source_id == employment.source_id,
+        )
+        .order_by(HREmploymentDismissalEvent.sequence.desc())
+        .limit(1)
+    )
+    now = utcnow()
+    if dismissal_date is not None:
+        if event is None or event.status == "closed":
+            event = HREmploymentDismissalEvent(
+                worker_key=employment.worker_key,
+                source_id=employment.source_id,
+                source_name=employment.source_name,
+                sequence=1 if event is None else event.sequence + 1,
+                fio=employment.fio,
+                first_dismissal_date=dismissal_date,
+            )
+            db.add(event)
+        event.current_dismissal_date = dismissal_date
+        event.status = "open" if is_present else "absent"
+        event.source_name = employment.source_name
+        event.fio = employment.fio
+        event.updated_at = now
+        return
+
+    if event is None or event.status == "closed":
+        return
+    event.current_dismissal_date = None
+    event.status = "closed" if is_present and event.status == "absent" else "cleared"
+    event.updated_at = now
 
 
 def sync_workbook_employment(
@@ -91,6 +135,12 @@ def sync_workbook_employment(
 
         employment.source_name = source_name
         employment.fio = worker.fio
+        capture_dismissal_event(
+            db,
+            employment=employment,
+            dismissal_date=dismissal_date,
+            is_present=True,
+        )
         employment.status = status
         employment.is_present = True
         employment.dismissal_date = dismissal_date
@@ -119,6 +169,13 @@ def sync_workbook_employment(
             or employment.dismissal_date > today
         ):
             employment.dismissal_date = today
+
+        capture_dismissal_event(
+            db,
+            employment=employment,
+            dismissal_date=employment.dismissal_date,
+            is_present=False,
+        )
 
         employment.status_reason = "absent_from_export"
         employment.updated_at = now

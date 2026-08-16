@@ -32,12 +32,13 @@ class DismissalNotificationWiringTests(unittest.TestCase):
         self.assertIn('notice.status == "sent"', text)
         self.assertIn("continue", text)
 
-    def test_only_final_current_or_future_candidates_are_mailed(self):
+    def test_mail_is_driven_by_organization_events_not_final_dismissal(self):
         text = (
             ROOT / "app/services/dismissal_notifications.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("UpcomingDismissalService", text)
-        self.assertIn('item["dismissal_date"] >= self.today', text)
+        self.assertIn("HREmploymentDismissalEvent", text)
+        self.assertIn("_event_recipient_plan", text)
+        self.assertNotIn('item["dismissal_date"] >= self.today', text)
 
     def test_aliases_can_be_deduplicated_by_zimbra_id_without_zimbra_query(self):
         text = (

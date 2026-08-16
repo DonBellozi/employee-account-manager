@@ -18,6 +18,7 @@ from app.models import (
 )
 from app.models_onec_sources import HREmploymentState
 from app.models_dismissal_lifecycle import (
+    ADReactivationAlert,
     FinalDismissalAutomationState,
     FinalDismissalBlockRun,
     FinalDismissalBlockTarget,
@@ -29,6 +30,7 @@ from app.services.hr_registry import (
     worker_requires_active_accounts,
     zimbra_registry_status,
 )
+from app.services.personnel_structure import PersonnelStructureService
 from app.services.blocking_window import (
     BLOCK_TIME,
     BLOCK_TIME_LABEL,
@@ -48,11 +50,9 @@ POLL_SECONDS = 60
 # блокировок общее для AD, Zimbra и Synology DSM. Имена сохранены здесь ради
 # уже существующих ссылок в коде и тестах.
 SUCCESS_TARGET_STATUSES = {"completed", "already_completed"}
-# Все системы, которые блокируются одним решением об увольнении.
+# На текущем этапе кадровое решение управляет только общей учеткой AD.
 SYSTEM_LABELS = {
     "ad": "AD",
-    "zimbra": "Zimbra",
-    "synology": "Synology",
 }
 RETRY_DELAYS_MINUTES = (1, 2, 5, 10, 15, 30, 60)
 POST_RECONCILE_ACTION = "final_dismissal_post_reconcile"
@@ -697,8 +697,6 @@ class FinalDismissalLifecycleService:
         ad = self._ad_plan(records, mappings)
         if ad is not None:
             plans.append(ad)
-        plans.extend(self._zimbra_plan(records, mappings))
-        plans.extend(self._synology_plan(candidate["worker_key"]))
 
         for plan in plans:
             existing = self.db.scalar(
@@ -735,7 +733,7 @@ class FinalDismissalLifecycleService:
         if not plans:
             run.status = "intervention"
             run.last_error = (
-                "Не найден ни один связанный объект AD/Zimbra/Synology"
+                "Не найдена связанная учетная запись AD"
             )
 
         self.db.commit()
@@ -961,7 +959,7 @@ class FinalDismissalLifecycleService:
             run.status = "intervention"
             run.last_error = (
                 run.last_error
-                or "Для увольнения не найдены объекты AD/Zimbra/Synology"
+                or "Для увольнения не найдена учетная запись AD"
             )
             run.completed_at = None
             return
@@ -1089,6 +1087,8 @@ class FinalDismissalLifecycleService:
                 "targets": 0,
             }
 
+        self._create_reactivation_alerts()
+
         candidate_map = self._candidate_map()
 
         # Если человек снова стал активным либо дата изменилась до
@@ -1182,6 +1182,44 @@ class FinalDismissalLifecycleService:
             "runs": runs_touched,
             "targets": targets_processed,
         }
+
+    def _create_reactivation_alerts(self) -> None:
+        """Не включать AD обратно, а зафиксировать «уволенный воскрес»."""
+        personnel = PersonnelStructureService(self.db)
+        completed_ad_targets = list(
+            self.db.execute(
+                select(FinalDismissalBlockRun, FinalDismissalBlockTarget)
+                .join(
+                    FinalDismissalBlockTarget,
+                    FinalDismissalBlockTarget.run_id == FinalDismissalBlockRun.id,
+                )
+                .where(
+                    FinalDismissalBlockTarget.system == "ad",
+                    FinalDismissalBlockTarget.status.in_(SUCCESS_TARGET_STATUSES),
+                )
+            ).all()
+        )
+        for run, target in completed_ad_targets:
+            if not personnel.active_anywhere(run.worker_key):
+                continue
+            alert = self.db.scalar(
+                select(ADReactivationAlert).where(
+                    ADReactivationAlert.worker_key == run.worker_key
+                )
+            )
+            if alert is None:
+                alert = ADReactivationAlert(worker_key=run.worker_key)
+                self.db.add(alert)
+            alert.fio = run.fio
+            alert.ad_login = target.target_identifier
+            alert.ad_object_guid = target.stable_id
+            alert.status = "open"
+            alert.details = (
+                "Работник снова активен хотя бы в одной организации после "
+                "автоматической блокировки AD. Автоматическое включение запрещено."
+            )
+            alert.updated_at = utcnow()
+        self.db.commit()
 
 
 class FinalDismissalLifecycleWorker:

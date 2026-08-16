@@ -12,7 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import EmailLoginMapping, HRSourceRecord, OneCImportRun
-from app.models_notifications import DismissalEquipmentNotice
+from app.models_notifications import (
+    DismissalEquipmentNotice,
+    HREmploymentDismissalEvent,
+)
+from app.models_onec_sources import HREmploymentState
 from app.models_onec_sources import OneCAdditionalSource
 from app.services.dismissal_mailer import (
     DismissalMailer,
@@ -20,7 +24,6 @@ from app.services.dismissal_mailer import (
     get_dismissal_mail_template,
 )
 from app.services.mailer import ensure_domain_mail_profiles
-from app.services.upcoming_dismissals import UpcomingDismissalService
 
 
 logger = logging.getLogger(__name__)
@@ -401,6 +404,149 @@ class DismissalNotificationService:
             notice.next_attempt_at = self._retry_at(notice.attempts)
         self.db.commit()
 
+    def _sync_employment_events(self) -> None:
+        """Перенести текущее HR-состояние в устойчивые события организаций."""
+        states = list(self.db.scalars(select(HREmploymentState)).all())
+        events = list(
+            self.db.scalars(
+                select(HREmploymentDismissalEvent).order_by(
+                    HREmploymentDismissalEvent.sequence
+                )
+            ).all()
+        )
+        latest: dict[tuple[str, str], HREmploymentDismissalEvent] = {}
+        for event in events:
+            latest[(event.worker_key, event.source_id)] = event
+
+        now = utcnow()
+        for state in states:
+            source_id = str(state.source_id or "").strip().lower()
+            key = (state.worker_key, source_id)
+            event = latest.get(key)
+            dismissal_date = state.dismissal_date
+
+            if dismissal_date is not None:
+                if event is None or event.status == "closed":
+                    event = HREmploymentDismissalEvent(
+                        worker_key=state.worker_key,
+                        source_id=source_id,
+                        source_name=state.source_name,
+                        sequence=(1 if event is None else event.sequence + 1),
+                        fio=state.fio,
+                        first_dismissal_date=dismissal_date,
+                        current_dismissal_date=dismissal_date,
+                        status="open",
+                    )
+                    self.db.add(event)
+                    latest[key] = event
+                else:
+                    # Перенос даты относится к тому же событию.
+                    event.current_dismissal_date = dismissal_date
+                    event.status = "open"
+                    event.source_name = state.source_name
+                    event.fio = state.fio
+                    event.updated_at = now
+                continue
+
+            if event is None or event.status == "closed":
+                continue
+            if state.is_present:
+                # Исчезновение даты не открывает новое событие при ее возврате.
+                event.current_dismissal_date = None
+                event.status = "cleared"
+            else:
+                event.status = "absent"
+            event.updated_at = now
+
+        self.db.commit()
+
+    @staticmethod
+    def _event_ids(notice: DismissalEquipmentNotice) -> list[int]:
+        try:
+            values = json.loads(notice.event_ids_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return [int(value) for value in values if str(value).isdigit()]
+
+    def _event_candidate(
+        self,
+        events: list[HREmploymentDismissalEvent],
+    ) -> dict:
+        dismissal_date = max(
+            event.current_dismissal_date or event.first_dismissal_date
+            for event in events
+        )
+        return {
+            "worker_key": events[0].worker_key,
+            "fio": next((event.fio for event in events if event.fio), ""),
+            "dismissal_date": dismissal_date,
+            "organizations": [
+                {
+                    "source_id": event.source_id,
+                    "source_name": event.source_name,
+                    "dismissal_date": (
+                        event.current_dismissal_date or event.first_dismissal_date
+                    ),
+                }
+                for event in events
+            ],
+        }
+
+    def _event_recipient_plan(self, candidate: dict, profiles: dict) -> tuple[str, list[dict]]:
+        """По одному корпоративному адресу каждой затронутой организации."""
+        source_ids = {
+            str(item.get("source_id") or "").strip().lower()
+            for item in candidate.get("organizations") or []
+        }
+        records = list(
+            self.db.scalars(
+                select(HRSourceRecord).where(
+                    HRSourceRecord.worker_key == candidate["worker_key"]
+                )
+            ).all()
+        )
+        mappings = list(
+            self.db.scalars(
+                select(EmailLoginMapping).where(
+                    EmailLoginMapping.worker_key == candidate["worker_key"]
+                )
+            ).all()
+        )
+        addresses_by_source: dict[str, str] = {}
+        for record in records:
+            source_id = str(record.source_id or "").strip().lower()
+            address = normalize_email(record.corporate_email)
+            if source_id in source_ids and address:
+                addresses_by_source[source_id] = address
+        for mapping in mappings:
+            source_id = str(mapping.source_domain or "").strip().lower()
+            address = normalize_email(mapping.source_email)
+            if source_id in source_ids and address and source_id not in addresses_by_source:
+                addresses_by_source[source_id] = address
+
+        recipients: list[dict] = []
+        for source_id in sorted(source_ids):
+            address = addresses_by_source.get(source_id, "")
+            if not address:
+                continue
+            sender_domain = source_id if source_id in profiles else ""
+            if not sender_domain and profiles:
+                sender_domain = sorted(profiles)[0]
+            if sender_domain:
+                recipients.append(
+                    {
+                        "email": address,
+                        "kind": "corporate",
+                        "source_id": source_id,
+                        "sender_domain": sender_domain,
+                        "sent": False,
+                        "sent_at": "",
+                        "error": "",
+                    }
+                )
+        default_domain = recipients[0]["sender_domain"] if recipients else ""
+        return default_domain, recipients
+
     def process(self) -> dict[str, int | str]:
         if self.settings.dry_run:
             return {"status": "dry_run", "created": 0, "sent": 0}
@@ -409,40 +555,7 @@ class DismissalNotificationService:
         if not self._sources_synchronized():
             return {"status": "sources_not_synchronized", "created": 0, "sent": 0}
 
-        upcoming_service = UpcomingDismissalService(self.settings, self.db)
-        candidates = [
-            item
-            for item in upcoming_service.list_upcoming(limit=10000)
-            if item["dismissal_date"] >= self.today
-        ]
-        candidate_by_key = {
-            (item["worker_key"], item["dismissal_date"]): item
-            for item in candidates
-        }
-
-        open_notices = list(
-            self.db.scalars(
-                select(DismissalEquipmentNotice).where(
-                    DismissalEquipmentNotice.status.in_(
-                        ["pending", "partial", "failed", "cancelled"]
-                    )
-                )
-            ).all()
-        )
-        notice_by_key = {
-            (item.worker_key, item.dismissal_date): item
-            for item in open_notices
-        }
-
-        # Если человек снова стал активным до отправки, письмо отменяется.
-        for key, notice in notice_by_key.items():
-            if key in candidate_by_key or notice.status == "cancelled":
-                continue
-            notice.status = "cancelled"
-            notice.cancelled_at = utcnow()
-            notice.next_attempt_at = None
-            notice.last_error = "Кадровая ситуация изменилась до отправки"
-        self.db.commit()
+        self._sync_employment_events()
 
         profiles = self._profiles()
         dismissal_templates = ensure_dismissal_mail_templates(
@@ -452,24 +565,28 @@ class DismissalNotificationService:
         created = 0
         sent_now = 0
 
-        for key, candidate in candidate_by_key.items():
-            notice = self.db.scalar(
-                select(DismissalEquipmentNotice).where(
-                    DismissalEquipmentNotice.worker_key == key[0],
-                    DismissalEquipmentNotice.dismissal_date == key[1],
+        unnotified = list(
+            self.db.scalars(
+                select(HREmploymentDismissalEvent).where(
+                    HREmploymentDismissalEvent.noticed_at.is_(None),
+                    HREmploymentDismissalEvent.current_dismissal_date.is_not(None),
                 )
-            )
-            if notice is not None and notice.status == "sent":
-                continue
+            ).all()
+        )
+        by_worker: dict[str, list[HREmploymentDismissalEvent]] = defaultdict(list)
+        for event in unnotified:
+            by_worker[event.worker_key].append(event)
 
-            if notice is None:
-                sender_domain, recipients = self._recipient_plan(
+        notices: list[tuple[DismissalEquipmentNotice, dict]] = []
+        for events in by_worker.values():
+            candidate = self._event_candidate(events)
+            notice = None
+            if events:
+                sender_domain, recipients = self._event_recipient_plan(
                     candidate,
                     profiles,
                 )
                 if not recipients:
-                    # Не фиксируем пустую рассылку: если адрес появится позже,
-                    # следующий цикл сможет сформировать письмо.
                     continue
 
                 # Новый тип автоматического письма сначала должен быть явно
@@ -491,10 +608,11 @@ class DismissalNotificationService:
                     continue
 
                 notice = DismissalEquipmentNotice(
-                    worker_key=key[0],
-                    dismissal_date=key[1],
+                    worker_key=candidate["worker_key"],
+                    dismissal_date=candidate["dismissal_date"],
                     fio=str(candidate.get("fio") or ""),
                     sender_domain=sender_domain,
+                    event_ids_json=json.dumps([event.id for event in events]),
                     recipients_json=json.dumps(
                         recipients,
                         ensure_ascii=False,
@@ -503,17 +621,36 @@ class DismissalNotificationService:
                     status="pending",
                 )
                 self.db.add(notice)
+                for event in events:
+                    event.noticed_at = utcnow()
                 self.db.commit()
                 self.db.refresh(notice)
                 created += 1
-            elif notice.status == "cancelled":
-                # Та же дата снова стала актуальной до фактической отправки.
-                notice.status = "pending"
-                notice.cancelled_at = None
-                notice.last_error = ""
-                notice.next_attempt_at = None
-                self.db.commit()
+                notices.append((notice, candidate))
 
+        retry_notices = list(
+            self.db.scalars(
+                select(DismissalEquipmentNotice).where(
+                    DismissalEquipmentNotice.status.in_(["pending", "partial", "failed"])
+                )
+            ).all()
+        )
+        queued_ids = {notice.id for notice, _ in notices}
+        for notice in retry_notices:
+            if notice.id in queued_ids:
+                continue
+            ids = self._event_ids(notice)
+            events = list(
+                self.db.scalars(
+                    select(HREmploymentDismissalEvent).where(
+                        HREmploymentDismissalEvent.id.in_(ids)
+                    )
+                ).all()
+            ) if ids else []
+            if events:
+                notices.append((notice, self._event_candidate(events)))
+
+        for notice, candidate in notices:
             now = utcnow()
             next_attempt_at = notice.next_attempt_at
             if next_attempt_at is not None:
@@ -531,7 +668,7 @@ class DismissalNotificationService:
             "status": "ok",
             "created": created,
             "sent": sent_now,
-            "candidates": len(candidates),
+            "candidates": len(unnotified),
         }
 
 

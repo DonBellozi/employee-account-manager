@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import HRPerson, HRSourceRecord, OneCImportRun
 from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
+from app.services.hr_employment import capture_dismissal_event
 from app.services.hr_registry_multisource import MultiSourceHRRegistryViewService
 from app.services.onec_imap import OneCAttachment, OneCImapService
 from app.services.onec_xlsx import (
@@ -529,6 +530,12 @@ class OneCAdditionalImportService:
 
             employment.source_name = self.source.name
             employment.fio = worker.fio
+            capture_dismissal_event(
+                self.db,
+                employment=employment,
+                dismissal_date=dismissal_date,
+                is_present=True,
+            )
             employment.status = status
             employment.is_present = True
             employment.dismissal_date = dismissal_date
@@ -566,6 +573,13 @@ class OneCAdditionalImportService:
                 or employment.dismissal_date > today
             ):
                 employment.dismissal_date = today
+
+            capture_dismissal_event(
+                self.db,
+                employment=employment,
+                dismissal_date=employment.dismissal_date,
+                is_present=False,
+            )
 
             employment.status_reason = "absent_from_export"
             employment.updated_at = now

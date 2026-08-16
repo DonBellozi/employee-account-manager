@@ -68,6 +68,11 @@ def ensure_compatibility_schema() -> None:
                 "guard_message": "TEXT NOT NULL DEFAULT ''",
             },
         )
+        add_missing_columns(
+            connection,
+            "dismissal_equipment_notices",
+            {"event_ids_json": "TEXT NOT NULL DEFAULT '[]'"},
+        )
 
         if "hr_source_records" in tables:
             columns = {

@@ -116,3 +116,22 @@ class FinalDismissalBlockTarget(Base):
         default=utcnow,
         onupdate=utcnow,
     )
+
+
+class ADReactivationAlert(Base):
+    """Операторское состояние: заблокированный в AD снова активен в HR."""
+
+    __tablename__ = "ad_reactivation_alerts"
+    __table_args__ = (
+        UniqueConstraint("worker_key", name="uq_ad_reactivation_alert_worker"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    worker_key: Mapped[str] = mapped_column(String(64), index=True)
+    fio: Mapped[str] = mapped_column(String(512), default="")
+    ad_login: Mapped[str] = mapped_column(String(320), default="")
+    ad_object_guid: Mapped[str] = mapped_column(String(128), default="")
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    details: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
