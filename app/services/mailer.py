@@ -361,6 +361,24 @@ class CredentialMailer:
             f"SMTP не отправил письмо после {attempts} попыток: {last_error}"
         )
 
+    def send_html(
+        self,
+        *,
+        recipient: str,
+        subject: str,
+        body_html: str,
+        sender_email: str,
+        sender_name: str,
+    ) -> None:
+        """Отправить готовое служебное HTML-письмо через общий SMTP."""
+        self._send(
+            recipient,
+            subject,
+            body_html,
+            sender_email=sender_email,
+            sender_name=sender_name,
+        )
+
     def send_mail_credentials(
         self,
         profile: DomainMailProfile,

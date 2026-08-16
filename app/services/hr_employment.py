@@ -35,6 +35,7 @@ def capture_dismissal_event(
     )
     now = utcnow()
     if dismissal_date is not None:
+        created = event is None or event.status == "closed"
         if event is None or event.status == "closed":
             event = HREmploymentDismissalEvent(
                 worker_key=employment.worker_key,
@@ -45,18 +46,27 @@ def capture_dismissal_event(
                 first_dismissal_date=dismissal_date,
             )
             db.add(event)
+        changed = created or any(
+            (
+                event.current_dismissal_date != dismissal_date,
+                event.status != ("open" if is_present else "absent"),
+            )
+        )
         event.current_dismissal_date = dismissal_date
         event.status = "open" if is_present else "absent"
         event.source_name = employment.source_name
         event.fio = employment.fio
-        event.updated_at = now
+        if changed:
+            event.updated_at = now
         return
 
     if event is None or event.status == "closed":
         return
-    event.current_dismissal_date = None
-    event.status = "closed" if is_present and event.status == "absent" else "cleared"
-    event.updated_at = now
+    next_status = "closed" if is_present and event.status == "absent" else "cleared"
+    if event.current_dismissal_date is not None or event.status != next_status:
+        event.current_dismissal_date = None
+        event.status = next_status
+        event.updated_at = now
 
 
 def sync_workbook_employment(

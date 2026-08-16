@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     smtp_retry_attempts: int = 3
     smtp_retry_delay_seconds: float = 2.0
 
+    # Техэксперт: приложение только проверяет маркерную группу AD и отправляет
+    # письмо внешней организации. Состав группы и сам Техэксперт не изменяются.
+    techexpert_enabled: bool = False
+    techexpert_source_domain: str = ""
+    techexpert_ad_group_dn: str = ""
+    techexpert_recipient_email: str = ""
+
     # IT Invent / MS SQL Server. Интеграция намеренно read-only:
     # приложение выполняет только SELECT, а учетной записи SQL следует
     # предоставить только права чтения на БД ITInvent.

@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.models_notifications import DismissalEquipmentNotice
 from app.models_synology import SynologyAccountState
+from app.models_techexpert import TechExpertNotification
 from app.models_zimbra_lifecycle import ZimbraEmploymentAction
 from app.models_dismissal_lifecycle import (
     ADReactivationAlert,
@@ -191,6 +192,65 @@ def _dismissal_notice_journal_item(
     }
 
 
+def _techexpert_journal_item(
+    row: TechExpertNotification,
+) -> dict[str, object]:
+    labels = {
+        "pending": ("running", "Запланировано"),
+        "deferred": ("partial", "Отложено"),
+        "failed": ("failed", "Ошибка отправки"),
+        "intervention": ("failed", "Требует проверки"),
+        "sent": ("success", "Отправлено"),
+        "skipped": ("success", "Не требуется"),
+        "cancelled": ("partial", "Отменено"),
+    }
+    status_key, status_label = labels.get(
+        row.status,
+        ("running", row.status),
+    )
+    membership_labels = {
+        "not_checked": "Не проверено",
+        "member": "Состоит в группе",
+        "not_member": "Не состоит в группе",
+        "error": "Ошибка проверки",
+    }
+    details = [
+        ("ФИО", row.fio),
+        ("Организация", row.source_name or row.source_id),
+        ("Корпоративная почта", row.corporate_email),
+        ("Получатель", row.recipient_email),
+        ("Логин AD", row.ad_login),
+        (
+            "Маркер доступа",
+            membership_labels.get(row.membership_state, row.membership_state),
+        ),
+        ("Дата увольнения", row.dismissal_date.strftime("%d.%m.%Y")),
+        ("Попыток", str(int(row.attempts or 0))),
+    ]
+    if row.deferred_until is not None:
+        details.append(
+            ("Отсрочка до", row.deferred_until.strftime("%d.%m.%Y"))
+        )
+
+    return {
+        "kind": "dismissal",
+        "record_id": row.id,
+        "created_at": row.created_at,
+        "action": "Уведомление Техэксперта",
+        "subject": row.fio or "Работник",
+        "login": row.ad_login,
+        "corporate_email": row.corporate_email,
+        "personal_email": "",
+        "mail_domain": row.source_id,
+        "operator": "Система",
+        "status_key": status_key,
+        "status_label": status_label,
+        "details": details,
+        "error_message": row.last_error,
+        "completed_at": row.sent_at or row.cancelled_at,
+    }
+
+
 
 def _final_dismissal_block_journal_item(
     run: FinalDismissalBlockRun,
@@ -336,6 +396,14 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
         )
         .limit(50)
     ).all()
+    techexpert_notifications = db.scalars(
+        select(TechExpertNotification)
+        .order_by(
+            desc(TechExpertNotification.created_at),
+            desc(TechExpertNotification.id),
+        )
+        .limit(50)
+    ).all()
 
     final_block_runs = db.scalars(
         select(FinalDismissalBlockRun)
@@ -394,6 +462,10 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
         *(
             _dismissal_notice_journal_item(item)
             for item in dismissal_notices
+        ),
+        *(
+            _techexpert_journal_item(item)
+            for item in techexpert_notifications
         ),
         *(
             _final_dismissal_block_journal_item(
@@ -460,6 +532,23 @@ def dashboard(
             )
         ).all()
     )
+    techexpert_attention_notifications = list(
+        db.scalars(
+            select(TechExpertNotification)
+            .where(
+                (
+                    TechExpertNotification.status.in_(
+                        ["failed", "intervention"]
+                    )
+                )
+                | (TechExpertNotification.attention_state != "")
+            )
+            .order_by(
+                desc(TechExpertNotification.updated_at),
+                desc(TechExpertNotification.id),
+            )
+        ).all()
+    )
 
     return templates.TemplateResponse(
         request,
@@ -470,6 +559,9 @@ def dashboard(
             ad_reactivation_alerts=ad_reactivation_alerts,
             zimbra_attention_actions=zimbra_attention_actions,
             synology_attention_accounts=synology_attention_accounts,
+            techexpert_attention_notifications=(
+                techexpert_attention_notifications
+            ),
             upcoming_dismissals=upcoming,
             dismissal_message=request.query_params.get(
                 "dismissal_message",

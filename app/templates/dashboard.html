@@ -37,7 +37,7 @@
 
 </section>
 
-{% if ad_reactivation_alerts or zimbra_attention_actions or synology_attention_accounts %}
+{% if ad_reactivation_alerts or zimbra_attention_actions or synology_attention_accounts or techexpert_attention_notifications %}
 <section class="card">
   <div class="alert warning">
     <strong>Требуют внимания оператора</strong>
@@ -93,6 +93,21 @@
             <span class="status failed">Сотрудник снова активен</span>
             <div class="muted">{{ row.attention_details }}</div>
             <a href="/settings/synology">Открыть управление DSM</a>
+          </td>
+        </tr>
+        {% endfor %}
+        {% for row in techexpert_attention_notifications %}
+        <tr>
+          <td><strong>{{ row.fio or row.worker_key }}</strong></td>
+          <td>Техэксперт</td>
+          <td>{{ row.corporate_email or row.ad_login or '–' }}</td>
+          <td>
+            <span class="status failed">
+              {{ 'Сотрудник снова активен' if row.attention_state else 'Ошибка уведомления' }}
+            </span>
+            <div class="muted">
+              {{ row.attention_details or row.last_error or 'Нужна проверка оператора' }}
+            </div>
           </td>
         </tr>
         {% endfor %}

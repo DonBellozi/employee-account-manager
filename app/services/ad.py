@@ -6,7 +6,17 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from ldap3 import ALL, NTLM, SIMPLE, Connection, MODIFY_ADD, MODIFY_REPLACE, Server, Tls
+from ldap3 import (
+    ALL,
+    BASE,
+    NTLM,
+    SIMPLE,
+    Connection,
+    MODIFY_ADD,
+    MODIFY_REPLACE,
+    Server,
+    Tls,
+)
 from ldap3.core.exceptions import LDAPException
 from ldap3.utils.conv import escape_bytes, escape_filter_chars
 from ldap3.utils.dn import escape_rdn
@@ -391,6 +401,39 @@ class ActiveDirectoryService:
         if not normalized:
             return None
         return self.users_by_object_guids([normalized]).get(normalized)
+
+    def is_user_member_of_group(
+        self,
+        username: str,
+        group_dn: str,
+        *,
+        object_guid: str = "",
+    ) -> bool:
+        """Проверить прямое членство пользователя в группе, ничего не меняя."""
+        normalized_group = str(group_dn or "").strip()
+        if not normalized_group:
+            raise ValueError("Не передан DN группы AD")
+
+        user = None
+        if str(object_guid or "").strip():
+            user = self.get_user_by_object_guid(object_guid)
+        if user is None and str(username or "").strip():
+            user = self.get_user(username)
+        if user is None:
+            raise RuntimeError(
+                "Учетная запись AD не найдена перед проверкой группы"
+            )
+
+        safe_dn = escape_filter_chars(user.distinguished_name)
+        with self._service_connection() as conn:
+            conn.search(
+                normalized_group,
+                f"(&(objectClass=group)(member={safe_dn}))",
+                search_scope=BASE,
+                attributes=["distinguishedName"],
+                size_limit=1,
+            )
+            return bool(conn.entries)
 
 
     def create_disabled_user(
