@@ -14,17 +14,19 @@ from app.services.mailer import validate_mail_template
 
 
 TECHEXPERT_TEMPLATE_VARIABLES = {
+    "employees",
+    "employee_count",
     "full_name",
     "corporate_email",
     "organization",
     "dismissal_date",
 }
 
-DEFAULT_TECHEXPERT_SUBJECT = (
+LEGACY_TECHEXPERT_SUBJECT = (
     "Прекращение доступа к системе «Техэксперт»: {{ full_name }}"
 )
 
-DEFAULT_TECHEXPERT_BODY_HTML = """\
+LEGACY_TECHEXPERT_BODY_HTML = """\
 <p>Здравствуйте!</p>
 <p>Просим прекратить доступ к системе «Техэксперт» для работника:</p>
 <p>
@@ -34,6 +36,60 @@ DEFAULT_TECHEXPERT_BODY_HTML = """\
 </p>
 <p>Это автоматическое уведомление по подтвержденному кадровому событию.</p>
 """
+
+DEFAULT_TECHEXPERT_SUBJECT = (
+    "Список на прекращение доступа к системе «Техэксперт» "
+    "({{ employee_count }})"
+)
+
+DEFAULT_TECHEXPERT_BODY_HTML = """\
+<p>Здравствуйте!</p>
+<p>Просим прекратить доступ к системе «Техэксперт» для следующих работников:</p>
+<table border="1" cellpadding="6" cellspacing="0">
+  <thead>
+    <tr>
+      <th>ФИО</th>
+      <th>Корпоративный e-mail</th>
+      <th>Организация</th>
+      <th>Дата увольнения</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for employee in employees %}
+    <tr>
+      <td>{{ employee.full_name }}</td>
+      <td>{{ employee.corporate_email }}</td>
+      <td>{{ employee.organization }}</td>
+      <td>{{ employee.dismissal_date }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p>Это автоматическое уведомление по подтвержденным кадровым событиям.</p>
+"""
+
+
+def build_techexpert_template_context(
+    employees: list[dict[str, str]],
+) -> dict[str, object]:
+    """Контекст списка и совместимости со старыми одиночными шаблонами."""
+
+    organizations = list(
+        dict.fromkeys(item["organization"] for item in employees)
+    )
+    dismissal_dates = list(
+        dict.fromkeys(item["dismissal_date"] for item in employees)
+    )
+    return {
+        "employees": employees,
+        "employee_count": len(employees),
+        "full_name": ", ".join(item["full_name"] for item in employees),
+        "corporate_email": ", ".join(
+            item["corporate_email"] for item in employees
+        ),
+        "organization": ", ".join(organizations),
+        "dismissal_date": ", ".join(dismissal_dates),
+    }
 
 
 def normalize(value: str) -> str:
@@ -64,6 +120,14 @@ def normalize_email(value: str, *, field_name: str) -> str:
 def ensure_techexpert_settings(db: Session) -> TechExpertSettings:
     row = db.get(TechExpertSettings, 1)
     if row is not None:
+        if (
+            row.subject.strip() == LEGACY_TECHEXPERT_SUBJECT.strip()
+            and row.body_html.strip() == LEGACY_TECHEXPERT_BODY_HTML.strip()
+        ):
+            row.subject = DEFAULT_TECHEXPERT_SUBJECT
+            row.body_html = DEFAULT_TECHEXPERT_BODY_HTML
+            db.commit()
+            db.refresh(row)
         return row
     row = TechExpertSettings(
         id=1,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import smtplib
 import ssl
 import time
+from collections.abc import Mapping
 from email.message import EmailMessage
 from email.utils import formataddr
 from html.parser import HTMLParser
@@ -139,7 +140,7 @@ def validate_mail_template(
 
 def render_mail_template(
     value: str,
-    context: dict[str, str],
+    context: Mapping[str, object],
     *,
     autoescape: bool,
 ) -> str:

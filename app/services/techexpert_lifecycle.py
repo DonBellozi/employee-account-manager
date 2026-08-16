@@ -23,6 +23,7 @@ from app.services.mailer import (
     render_mail_template,
 )
 from app.services.techexpert_settings import (
+    build_techexpert_template_context,
     ensure_techexpert_settings,
     parse_notification_time,
 )
@@ -463,23 +464,49 @@ class TechExpertLifecycleService:
             and normalize(state.status) not in ACTIVE_STATUSES
         )
 
-    def _send(self, row: TechExpertNotification) -> bool:
+    def _mark_send_failure(
+        self,
+        row: TechExpertNotification,
+        exc: Exception,
+    ) -> None:
+        row.status = (
+            "intervention"
+            if isinstance(exc, TechExpertDataError)
+            else "failed"
+        )
+        row.last_error = str(exc)[:4000]
+        row.next_attempt_at = utcnow() + timedelta(minutes=RETRY_MINUTES)
+        row.updated_at = utcnow()
+        self._audit(
+            row,
+            action="techexpert_notification_failed",
+            result=row.status,
+            details=row.last_error,
+        )
+
+    def _defer_if_needed(self, row: TechExpertNotification) -> bool:
+        deferral = self._deferral(row.worker_key, row.dismissal_date)
+        if deferral is None:
+            return False
+        deferral_time = self._at_notification_time(deferral.deferred_until)
+        if deferral_time <= utcnow():
+            return False
+        row.status = "deferred"
+        row.deferred_until = deferral.deferred_until
+        row.scheduled_for = max(
+            aware_utc(row.scheduled_for),
+            deferral_time,
+        )
+        return True
+
+    def _prepare_batch_candidate(self, row: TechExpertNotification) -> bool:
         event, state = self._current_event_and_state(row)
         if not self._still_due(row, event, state):
             self._mark_cancelled(row, "Повторная HR-проверка отменила письмо")
             return False
 
-        deferral = self._deferral(row.worker_key, row.dismissal_date)
-        if deferral is not None:
-            deferral_time = self._at_notification_time(deferral.deferred_until)
-            if deferral_time > utcnow():
-                row.status = "deferred"
-                row.deferred_until = deferral.deferred_until
-                row.scheduled_for = max(
-                    aware_utc(row.scheduled_for),
-                    deferral_time,
-                )
-                return False
+        if self._defer_if_needed(row):
+            return False
 
         row.attempts = int(row.attempts or 0) + 1
         row.next_attempt_at = None
@@ -513,45 +540,65 @@ class TechExpertLifecycleService:
                     details="Работник не входит в маркерную группу AD",
                 )
                 return False
+            return True
+        except Exception as exc:
+            self._mark_send_failure(row, exc)
+            return False
 
-            # Вторая кадровая проверка выполняется непосредственно после AD и
-            # перед SMTP. Письмо нельзя отправлять по уже отмененному событию.
-            self.db.flush()
-            self.db.expire_all()
-            event, state = self._current_event_and_state(row)
-            if not self._still_due(row, event, state):
-                self._mark_cancelled(
-                    row,
-                    "Повторная HR-проверка перед SMTP отменила письмо",
-                )
-                return False
-            latest_deferral = self._deferral(
-                row.worker_key,
-                row.dismissal_date,
+    def _recheck_batch_candidate(self, row: TechExpertNotification) -> bool:
+        event, state = self._current_event_and_state(row)
+        if not self._still_due(row, event, state):
+            self._mark_cancelled(
+                row,
+                "Повторная HR-проверка перед SMTP отменила письмо",
             )
-            if latest_deferral is not None:
-                deferral_time = self._at_notification_time(
-                    latest_deferral.deferred_until
-                )
-                if deferral_time > utcnow():
-                    row.status = "deferred"
-                    row.deferred_until = latest_deferral.deferred_until
-                    row.scheduled_for = deferral_time
-                    return False
+            return False
+        return not self._defer_if_needed(row)
 
+    @staticmethod
+    def _template_employee(row: TechExpertNotification) -> dict[str, str]:
+        return {
+            "full_name": row.fio or row.worker_key,
+            "corporate_email": row.corporate_email,
+            "organization": row.source_name or row.source_id,
+            "dismissal_date": row.dismissal_date.strftime("%d.%m.%Y"),
+        }
+
+    def _send_batch(self, rows: list[TechExpertNotification]) -> int:
+        candidates = [
+            row for row in rows if self._prepare_batch_candidate(row)
+        ]
+        if not candidates:
+            return 0
+
+        # Кадровые данные перечитываются для всего списка непосредственно
+        # после проверки группы AD и перед единственной SMTP-отправкой.
+        self.db.flush()
+        self.db.expire_all()
+        final_rows = [
+            row for row in candidates if self._recheck_batch_candidate(row)
+        ]
+        if not final_rows:
+            return 0
+
+        final_rows.sort(
+            key=lambda item: (
+                normalize(item.fio),
+                normalize(item.corporate_email),
+                item.id or 0,
+            )
+        )
+        context = build_techexpert_template_context(
+            [self._template_employee(row) for row in final_rows]
+        )
+        try:
             profile = get_domain_mail_profile(
                 self.db,
                 self.settings,
                 self.source_domain,
             )
-            context = {
-                "full_name": row.fio or row.worker_key,
-                "corporate_email": row.corporate_email,
-                "organization": row.source_name or row.source_id,
-                "dismissal_date": row.dismissal_date.strftime("%d.%m.%Y"),
-            }
             CredentialMailer(self.settings).send_html(
-                recipient=row.recipient_email,
+                recipient=normalize(self.config.recipient_email),
                 subject=render_mail_template(
                     self.config.subject,
                     context,
@@ -565,34 +612,28 @@ class TechExpertLifecycleService:
                 sender_email=profile.sender_email,
                 sender_name=profile.sender_name,
             )
+        except Exception as exc:
+            for row in final_rows:
+                self._mark_send_failure(row, exc)
+            return 0
+
+        sent_at = utcnow()
+        for row in final_rows:
             row.status = "sent"
-            row.sent_at = utcnow()
+            row.sent_at = sent_at
             row.last_error = ""
             row.next_attempt_at = None
-            row.updated_at = utcnow()
+            row.updated_at = sent_at
             self._audit(
                 row,
                 action="techexpert_notification_sent",
                 result="success",
-                details="Запрос на прекращение доступа отправлен",
+                details=(
+                    "Пакетный запрос на прекращение доступа отправлен; "
+                    f"сотрудников в письме: {len(final_rows)}"
+                ),
             )
-            return True
-        except TechExpertDataError as exc:
-            row.status = "intervention"
-            row.last_error = str(exc)[:4000]
-            row.next_attempt_at = utcnow() + timedelta(minutes=RETRY_MINUTES)
-        except Exception as exc:
-            row.status = "failed"
-            row.last_error = str(exc)[:4000]
-            row.next_attempt_at = utcnow() + timedelta(minutes=RETRY_MINUTES)
-        row.updated_at = utcnow()
-        self._audit(
-            row,
-            action="techexpert_notification_failed",
-            result=row.status,
-            details=row.last_error,
-        )
-        return False
+        return len(final_rows)
 
     @staticmethod
     def _datetime_due(value: datetime | None, now: datetime) -> bool:
@@ -644,18 +685,21 @@ class TechExpertLifecycleService:
         self.db.commit()
 
         now = utcnow()
-        sent = 0
-        for row in rows:
-            if row.status not in OPEN_STATUSES:
-                continue
-            if not self._datetime_due(row.scheduled_for, now):
-                continue
-            if not self._datetime_due(row.next_attempt_at, now):
-                continue
-            if self._send(row):
-                sent += 1
-            self.db.commit()
-        return {"status": "ok", "planned": len(rows), "sent": sent}
+        due_rows = [
+            row
+            for row in rows
+            if row.status in OPEN_STATUSES
+            and self._datetime_due(row.scheduled_for, now)
+            and self._datetime_due(row.next_attempt_at, now)
+        ]
+        sent = self._send_batch(due_rows) if due_rows else 0
+        self.db.commit()
+        return {
+            "status": "ok",
+            "planned": len(rows),
+            "sent": sent,
+            "emails": 1 if sent else 0,
+        }
 
 
 class TechExpertLifecycleWorker:

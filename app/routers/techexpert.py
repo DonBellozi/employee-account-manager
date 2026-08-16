@@ -20,6 +20,7 @@ from app.services.mailer import (
 from app.services.techexpert_settings import (
     TECHEXPERT_TEMPLATE_VARIABLES,
     TechExpertSettingsService,
+    build_techexpert_template_context,
     normalize_email,
 )
 from app.time_utils import register_datetime_filters
@@ -166,12 +167,22 @@ def techexpert_test_email(
             settings,
             config.source_domain,
         )
-        context = {
-            "full_name": "Иванов Иван Иванович",
-            "corporate_email": f"ivanov@{config.source_domain}",
-            "organization": "Тестовая организация",
-            "dismissal_date": "20.08.2026",
-        }
+        context = build_techexpert_template_context(
+            [
+                {
+                    "full_name": "Иванов Иван Иванович",
+                    "corporate_email": f"ivanov@{config.source_domain}",
+                    "organization": "Тестовая организация",
+                    "dismissal_date": "20.08.2026",
+                },
+                {
+                    "full_name": "Петрова Анна Сергеевна",
+                    "corporate_email": f"petrova@{config.source_domain}",
+                    "organization": "Тестовая организация",
+                    "dismissal_date": "20.08.2026",
+                },
+            ]
+        )
         CredentialMailer(settings).send_html(
             recipient=recipient,
             subject=render_mail_template(
