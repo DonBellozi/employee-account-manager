@@ -36,6 +36,9 @@ from app.services.onec_sources import OneCSourceRegistryService
 from app.services.synology_scheduler import SynologyLifecycleScheduler
 from app.services.telegram_worker import TelegramNotificationWorker
 from app.services.zimbra_observer_scheduler import ZimbraObserverScheduler
+from app.services.zimbra_employment_lifecycle import (
+    ZimbraEmploymentLifecycleWorker,
+)
 
 settings = get_settings()
 
@@ -70,6 +73,10 @@ async def lifespan(_: FastAPI):
         SessionLocal,
     )
     zimbra_observer_scheduler = ZimbraObserverScheduler(settings, SessionLocal)
+    zimbra_employment_worker = ZimbraEmploymentLifecycleWorker(
+        settings,
+        SessionLocal,
+    )
     onec_scheduler.start()
     blocking_worker.start()
     dismissal_notification_worker.start()
@@ -77,9 +84,11 @@ async def lifespan(_: FastAPI):
     synology_scheduler.start()
     telegram_worker.start()
     zimbra_observer_scheduler.start()
+    zimbra_employment_worker.start()
     try:
         yield
     finally:
+        zimbra_employment_worker.stop()
         zimbra_observer_scheduler.stop()
         telegram_worker.stop()
         synology_scheduler.stop()

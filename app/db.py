@@ -73,6 +73,14 @@ def ensure_compatibility_schema() -> None:
             "dismissal_equipment_notices",
             {"event_ids_json": "TEXT NOT NULL DEFAULT '[]'"},
         )
+        add_missing_columns(
+            connection,
+            "zimbra_lifecycle_settings",
+            {
+                "allow_employment_close": "BOOLEAN NOT NULL DEFAULT 0",
+                "allow_alias_remove": "BOOLEAN NOT NULL DEFAULT 0",
+            },
+        )
 
         if "hr_source_records" in tables:
             columns = {

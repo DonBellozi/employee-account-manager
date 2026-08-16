@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -19,6 +28,8 @@ class ZimbraLifecycleSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     allow_close: Mapped[bool] = mapped_column(Boolean, default=False)
+    allow_employment_close: Mapped[bool] = mapped_column(Boolean, default=False)
+    allow_alias_remove: Mapped[bool] = mapped_column(Boolean, default=False)
     allow_backup: Mapped[bool] = mapped_column(Boolean, default=False)
     allow_delete: Mapped[bool] = mapped_column(Boolean, default=False)
     backup_dir: Mapped[str] = mapped_column(String(1024), default="/opt/tmp")
@@ -77,4 +88,44 @@ class ZimbraLifecycleAction(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+class ZimbraEmploymentAction(Base):
+    """Кадрово-зависимое действие над физическим ящиком или его адресом."""
+
+    __tablename__ = "zimbra_employment_actions"
+    __table_args__ = (
+        UniqueConstraint("plan_key", name="uq_zimbra_employment_action_plan_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_key: Mapped[str] = mapped_column(String(64), index=True)
+    worker_key: Mapped[str] = mapped_column(String(64), index=True)
+    fio: Mapped[str] = mapped_column(String(512), default="")
+    zimbra_id: Mapped[str] = mapped_column(String(128), index=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    source_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    target_address: Mapped[str] = mapped_column(String(320), default="")
+    replacement_address: Mapped[str] = mapped_column(String(320), default="")
+    dismissal_date: Mapped[date] = mapped_column(Date, index=True)
+    effective_action_date: Mapped[date] = mapped_column(Date, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    details: Mapped[str] = mapped_column(Text, default="")
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancelled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

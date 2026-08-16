@@ -892,6 +892,20 @@ class ZimbraService:
             ["ma", normalized, "zimbraAccountStatus", "closed"]
         )
 
+    def remove_alias(self, primary_email: str, alias: str) -> None:
+        """Удалить только организационный alias, не затрагивая сам ящик."""
+        primary = str(primary_email or "").strip().lower()
+        normalized_alias = str(alias or "").strip().lower()
+        if not primary or "@" not in primary:
+            raise ValueError("Не передан основной адрес учетной записи Zimbra")
+        if not normalized_alias or "@" not in normalized_alias:
+            raise ValueError("Не передан удаляемый alias Zimbra")
+        if primary == normalized_alias:
+            raise ValueError("Основной адрес нельзя удалить как alias")
+        if self.settings.dry_run:
+            return
+        self._run_zmprov_direct(["raa", primary, normalized_alias])
+
     def lock_account(self, email: str) -> None:
         """Совместимость со старым вызовом: блокировка теперь означает «Закрыта»."""
         self.close_account(email)

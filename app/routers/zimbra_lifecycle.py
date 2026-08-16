@@ -9,6 +9,9 @@ from app.config import Settings, get_settings
 from app.db import get_db
 from app.security import get_or_create_csrf, require_admin, validate_csrf
 from app.services.zimbra_lifecycle import ZimbraLifecycleService
+from app.services.zimbra_employment_lifecycle import (
+    ZimbraEmploymentLifecycleService,
+)
 from app.time_utils import register_datetime_filters
 
 
@@ -53,6 +56,9 @@ def _context(
         "run": run,
         "actions": service.run_actions(run.id) if run is not None else [],
         "runs": recent,
+        "employment_actions": ZimbraEmploymentLifecycleService(
+            settings, db
+        ).recent_actions(),
         "action_labels": ACTION_LABELS,
         "status_labels": STATUS_LABELS,
         "saved": saved,
@@ -86,6 +92,8 @@ def lifecycle_save(
     request: Request,
     csrf: str = Form(...),
     allow_close: str = Form(""),
+    allow_employment_close: str = Form(""),
+    allow_alias_remove: str = Form(""),
     allow_backup: str = Form(""),
     allow_delete: str = Form(""),
     backup_dir: str = Form(...),
@@ -98,6 +106,12 @@ def lifecycle_save(
     try:
         ZimbraLifecycleService(settings, db).save_settings(
             allow_close=allow_close.strip().lower() in truthy,
+            allow_employment_close=(
+                allow_employment_close.strip().lower() in truthy
+            ),
+            allow_alias_remove=(
+                allow_alias_remove.strip().lower() in truthy
+            ),
             allow_backup=allow_backup.strip().lower() in truthy,
             allow_delete=allow_delete.strip().lower() in truthy,
             backup_dir=backup_dir,

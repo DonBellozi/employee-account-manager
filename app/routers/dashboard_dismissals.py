@@ -21,6 +21,7 @@ from app.models import (
     ProvisioningOperation,
 )
 from app.models_notifications import DismissalEquipmentNotice
+from app.models_zimbra_lifecycle import ZimbraEmploymentAction
 from app.models_dismissal_lifecycle import (
     ADReactivationAlert,
     FinalDismissalBlockRun,
@@ -433,6 +434,18 @@ def dashboard(
             )
         ).all()
     )
+    zimbra_attention_actions = list(
+        db.scalars(
+            select(ZimbraEmploymentAction)
+            .where(
+                ZimbraEmploymentAction.status.in_(["intervention", "failed"])
+            )
+            .order_by(
+                desc(ZimbraEmploymentAction.updated_at),
+                desc(ZimbraEmploymentAction.id),
+            )
+        ).all()
+    )
 
     return templates.TemplateResponse(
         request,
@@ -441,6 +454,7 @@ def dashboard(
             request,
             journal_items=_journal_items(db),
             ad_reactivation_alerts=ad_reactivation_alerts,
+            zimbra_attention_actions=zimbra_attention_actions,
             upcoming_dismissals=upcoming,
             dismissal_message=request.query_params.get(
                 "dismissal_message",

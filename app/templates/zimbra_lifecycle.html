@@ -32,7 +32,7 @@
   {% elif not lifecycle.any_action_enabled %}
   <div class="alert success">
     <strong>Исполнение полностью выключено.</strong>
-    Все три разрешения действий отключены. Формирование плана остается доступным.
+    Все разрешения действий отключены. Формирование плана остается доступным.
   </div>
   {% else %}
   <div class="alert warning">
@@ -66,6 +66,26 @@
           <span>
             <strong>Разрешить закрытие</strong>
             <small class="muted">Только для свежих рекомендаций «Рекомендуется закрыть Zimbra».</small>
+          </span>
+        </label>
+
+        <label class="lifecycle-permission">
+          <input type="checkbox" name="allow_alias_remove" value="on"{% if lifecycle.allow_alias_remove %} checked{% endif %}>
+          <span>
+            <strong>Разрешить удаление адресов уволившей организации</strong>
+            <small class="muted">
+              Удаляется только alias. Физический ящик и адреса действующих организаций сохраняются.
+            </small>
+          </span>
+        </label>
+
+        <label class="lifecycle-permission">
+          <input type="checkbox" name="allow_employment_close" value="on"{% if lifecycle.allow_employment_close %} checked{% endif %}>
+          <span>
+            <strong>Разрешить кадровое закрытие отдельных ящиков</strong>
+            <small class="muted">
+              Только когда у конкретного физического zimbraId не осталось адресов действующих организаций.
+            </small>
           </span>
         </label>
 
@@ -107,6 +127,61 @@
         {% endif %}
       </div>
     </form>
+  </section>
+
+  <section class="card table-wrap lifecycle-result-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>Кадровые действия Zimbra</h2>
+        <p class="muted">
+          Решения строятся по физическому zimbraId и состояниям организаций.
+          Переход primary между доменами никогда не выполняется автоматически.
+        </p>
+      </div>
+    </div>
+    <table class="journal-table">
+      <thead>
+        <tr>
+          <th>Работник</th>
+          <th>Действие</th>
+          <th>Адрес</th>
+          <th>Новый адрес</th>
+          <th>Статус</th>
+          <th>Пояснение</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in employment_actions %}
+        <tr>
+          <td><strong>{{ item.fio or item.worker_key }}</strong></td>
+          <td>
+            {% if item.action == 'close' %}Закрыть отдельный ящик
+            {% elif item.action == 'remove_alias' %}Удалить alias
+            {% elif item.action == 'transition' %}Переход между организациями
+            {% else %}Ручной разбор{% endif %}
+          </td>
+          <td>{{ item.target_address }}</td>
+          <td>{{ item.replacement_address or '–' }}</td>
+          <td>
+            <span class="status {{ 'success' if item.status == 'completed' else 'failed' if item.status in ['failed', 'intervention'] else 'partial' if item.status == 'cancelled' else 'running' }}">
+              {% if item.status == 'awaiting_permission' %}Действие выключено
+              {% elif item.status == 'intervention' %}Требует оператора
+              {% elif item.status == 'failed' %}Ошибка
+              {% elif item.status == 'completed' %}Выполнено
+              {% elif item.status == 'cancelled' %}Отменено после HR-проверки
+              {% else %}Ожидает{% endif %}
+            </span>
+          </td>
+          <td>
+            {{ item.details }}
+            {% if item.last_error %}<div class="journal-error">{{ item.last_error }}</div>{% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">Кадровых действий Zimbra, требующих внимания, нет.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </section>
 
   <section class="card lifecycle-run-card">

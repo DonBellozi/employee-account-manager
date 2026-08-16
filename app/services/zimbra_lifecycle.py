@@ -53,6 +53,8 @@ class ZimbraLifecycleService:
             row = ZimbraLifecycleSettings(
                 id=1,
                 allow_close=False,
+                allow_employment_close=False,
+                allow_alias_remove=False,
                 allow_backup=False,
                 allow_delete=False,
                 backup_dir="/opt/tmp",
@@ -92,6 +94,8 @@ class ZimbraLifecycleService:
         row = self.get_settings_record()
         return {
             "allow_close": bool(row.allow_close),
+            "allow_employment_close": bool(row.allow_employment_close),
+            "allow_alias_remove": bool(row.allow_alias_remove),
             "allow_backup": bool(row.allow_backup),
             "allow_delete": bool(row.allow_delete),
             "backup_dir": row.backup_dir,
@@ -99,7 +103,11 @@ class ZimbraLifecycleService:
             "updated_at": row.updated_at,
             "global_dry_run": bool(self.settings.dry_run),
             "any_action_enabled": bool(
-                row.allow_close or row.allow_backup or row.allow_delete
+                row.allow_close
+                or row.allow_employment_close
+                or row.allow_alias_remove
+                or row.allow_backup
+                or row.allow_delete
             ),
         }
 
@@ -107,6 +115,8 @@ class ZimbraLifecycleService:
         self,
         *,
         allow_close: bool,
+        allow_employment_close: bool = False,
+        allow_alias_remove: bool = False,
         allow_backup: bool,
         allow_delete: bool,
         backup_dir: str,
@@ -119,6 +129,8 @@ class ZimbraLifecycleService:
         normalized_dir = self._normalize_backup_dir(backup_dir)
         row = self.get_settings_record()
         row.allow_close = bool(allow_close)
+        row.allow_employment_close = bool(allow_employment_close)
+        row.allow_alias_remove = bool(allow_alias_remove)
         row.allow_backup = bool(allow_backup)
         row.allow_delete = bool(allow_delete)
         row.backup_dir = normalized_dir

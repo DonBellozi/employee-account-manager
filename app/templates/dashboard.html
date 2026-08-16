@@ -18,43 +18,6 @@
 </div>
 {% endif %}
 
-{% if ad_reactivation_alerts %}
-<section class="card">
-  <div class="alert warning">
-    <strong>Требуется решение оператора: заблокированный работник снова активен</strong>
-    <div>
-      AD автоматически не включается. Проверьте кадровое состояние и связанные
-      учетные записи перед будущим ручным восстановлением.
-    </div>
-  </div>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Работник</th>
-          <th>Логин AD</th>
-          <th>Обнаружено</th>
-          <th>Состояние</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for alert in ad_reactivation_alerts %}
-        <tr>
-          <td><strong>{{ alert.fio or alert.worker_key }}</strong></td>
-          <td>{{ alert.ad_login or '–' }}</td>
-          <td>{{ alert.updated_at|app_datetime('%d.%m.%Y %H:%M') }}</td>
-          <td>
-            <span class="status failed">Уволенный воскрес</span>
-            <div class="muted">Автоматическое восстановление запрещено</div>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
-{% endif %}
-
 <section class="card upcoming-dismissals-card">
   <div class="upcoming-dismissals-heading">
     <div>
@@ -73,6 +36,59 @@
   </div>
 
 </section>
+
+{% if ad_reactivation_alerts or zimbra_attention_actions %}
+<section class="card">
+  <div class="alert warning">
+    <strong>Требуют внимания оператора</strong>
+    <div>Автоматика остановлена для неоднозначных или ошибочных действий.</div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Работник</th>
+          <th>Система</th>
+          <th>Объект</th>
+          <th>Состояние</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for alert in ad_reactivation_alerts %}
+        <tr>
+          <td><strong>{{ alert.fio or alert.worker_key }}</strong></td>
+          <td>AD</td>
+          <td>{{ alert.ad_login or '–' }}</td>
+          <td>
+            <span class="status failed">Уволенный воскрес</span>
+            <div class="muted">Автоматическое восстановление запрещено</div>
+          </td>
+        </tr>
+        {% endfor %}
+        {% for item in zimbra_attention_actions %}
+        <tr>
+          <td><strong>{{ item.fio or item.worker_key }}</strong></td>
+          <td>Zimbra</td>
+          <td>
+            {{ item.target_address }}
+            {% if item.replacement_address %}
+            <div class="muted">Предлагаемый primary: {{ item.replacement_address }}</div>
+            {% endif %}
+          </td>
+          <td>
+            <span class="status failed">
+              {{ 'Переход требует решения' if item.action == 'transition' else 'Ошибка' }}
+            </span>
+            <div class="muted">{{ item.details }}</div>
+            {% if item.last_error %}<div class="journal-error">{{ item.last_error }}</div>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
 
 <section class="card table-wrap journal-card">
   <table class="journal-table">
