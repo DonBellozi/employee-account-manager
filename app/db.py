@@ -62,6 +62,16 @@ def ensure_compatibility_schema() -> None:
         )
         add_missing_columns(
             connection,
+            "synology_account_states",
+            {
+                "disabled_reason_code": "VARCHAR(64) NOT NULL DEFAULT ''",
+                "attention_state": "VARCHAR(64) NOT NULL DEFAULT ''",
+                "attention_details": "TEXT NOT NULL DEFAULT ''",
+                "attention_at": "DATETIME",
+            },
+        )
+        add_missing_columns(
+            connection,
             "synology_sync_runs",
             {
                 "disabled_accounts": "INTEGER NOT NULL DEFAULT 0",

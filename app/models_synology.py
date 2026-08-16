@@ -117,6 +117,16 @@ class SynologyAccountState(Base):
     last_action_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    disabled_reason_code: Mapped[str] = mapped_column(
+        String(64), default="", index=True
+    )
+    attention_state: Mapped[str] = mapped_column(
+        String(64), default="", index=True
+    )
+    attention_details: Mapped[str] = mapped_column(Text, default="")
+    attention_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_error: Mapped[str] = mapped_column(Text, default="")
 
     first_seen_at: Mapped[datetime] = mapped_column(

@@ -23,7 +23,6 @@ from app.models_dismissal_lifecycle import (
     FinalDismissalBlockRun,
     FinalDismissalBlockTarget,
 )
-from app.models_synology import SynologyAccountState
 from app.services.ad import ActiveDirectoryService
 from app.services.hr_registry import (
     reconciliation_status_for,
@@ -37,8 +36,6 @@ from app.services.blocking_window import (
     is_block_window_open,
 )
 from app.services.onec_freshness import OneCSourceFreshnessService
-from app.services.synology import SynologyLocalUser, SynologyService
-from app.services.synology_policy import CLASS_EXCEPTION, CLASS_PROTECTED
 from app.services.upcoming_dismissals import UpcomingDismissalService
 from app.services.zimbra import ZimbraService
 
@@ -622,46 +619,6 @@ class FinalDismissalLifecycleService:
 
         return result
 
-    def _synology_plan(self, worker_key: str) -> list[dict]:
-        """Локальные учетки Synology DSM, принадлежащие этому работнику.
-
-        Связь берется из ``SynologyAccountState.worker_key``, который
-        заполняет сверка DSM по совокупности признаков (почта, логин, ФИО).
-        Несопоставленные учетки целями не становятся: неизвестно, чьи они,
-        и по одному лишь совпадению домена их блокировать нельзя.
-        """
-        key = str(worker_key or "").strip()
-        if not key or not self.settings.synology_enabled:
-            return []
-
-        rows = list(
-            self.db.scalars(
-                select(SynologyAccountState).where(
-                    SynologyAccountState.worker_key == key,
-                    SynologyAccountState.is_present.is_(True),
-                )
-            ).all()
-        )
-
-        result: list[dict] = []
-        for row in rows:
-            if row.classification in {CLASS_EXCEPTION, CLASS_PROTECTED}:
-                # Исключения и системные записи не блокируются никогда,
-                # в том числе при увольнении.
-                continue
-            if not row.is_active:
-                continue
-            result.append(
-                {
-                    "system": "synology",
-                    "target_key": f"synology:{row.stable_id or row.login}",
-                    "identifier": row.login,
-                    "stable_id": row.stable_id,
-                    "error": "",
-                }
-            )
-        return result
-
     def _ensure_run(
         self,
         candidate: dict,
@@ -884,72 +841,6 @@ class FinalDismissalLifecycleService:
             result="closed",
         )
 
-    def _process_synology(
-        self,
-        target: FinalDismissalBlockTarget,
-    ) -> None:
-        if not self.settings.synology_enabled:
-            raise PermanentLifecycleError(
-                "Интеграция Synology отключена: SYNOLOGY_ENABLED=false"
-            )
-
-        state = self.db.scalar(
-            select(SynologyAccountState).where(
-                SynologyAccountState.stable_id == str(target.stable_id or "").strip()
-            )
-        )
-        login = normalize(target.target_identifier) or (
-            state.login if state is not None else ""
-        )
-        if not login:
-            raise PermanentLifecycleError(
-                "Локальная учетная запись Synology не найдена"
-            )
-
-        service = SynologyService(self.settings)
-        account = SynologyLocalUser(
-            login=login,
-            stable_id=str(target.stable_id or "").strip()
-            or (state.stable_id if state is not None else ""),
-            uid=state.uid if state is not None else "",
-            email=state.email if state is not None else "",
-            description=state.description if state is not None else "",
-            status=state.status if state is not None else "unknown",
-            is_active=True,
-        )
-
-        if state is not None and not state.is_active:
-            self._complete_target(
-                target,
-                status="already_completed",
-                result="already_disabled",
-            )
-            return
-
-        after = service.expire_account(account)
-        target.target_identifier = after.login
-        if after.stable_id:
-            target.stable_id = after.stable_id
-
-        if state is not None:
-            state.status = after.status
-            state.is_active = after.is_active
-            state.expires_at = after.expires_at
-            state.last_observed_active = False
-            state.last_action = "disable"
-            state.last_action_at = utcnow()
-            state.last_error = ""
-            state.desired_action = "none"
-            state.desired_reason = (
-                "Отключена общим контуром увольнения вместе с AD и Zimbra."
-            )
-
-        self._complete_target(
-            target,
-            status="completed",
-            result="disabled",
-        )
-
     def _refresh_run(
         self,
         run: FinalDismissalBlockRun,
@@ -1040,6 +931,20 @@ class FinalDismissalLifecycleService:
         run: FinalDismissalBlockRun,
         target: FinalDismissalBlockTarget,
     ) -> None:
+        # Старые БД могут содержать цели, созданные прежним общим сценарием.
+        # DSM и Zimbra теперь исполняют кадровые события в собственных
+        # организационных контурах; повторять здесь внешнее действие нельзя.
+        if target.system in {"synology", "zimbra"}:
+            target.attempts = int(target.attempts or 0) + 1
+            target.last_attempt_at = utcnow()
+            self._complete_target(
+                target,
+                status="already_completed",
+                result="delegated_to_employment_lifecycle",
+            )
+            self.db.commit()
+            return
+
         # Последний interlock прямо перед внешним изменением.
         candidate = self._still_due(
             worker_key=run.worker_key,
@@ -1059,10 +964,6 @@ class FinalDismissalLifecycleService:
         try:
             if target.system == "ad":
                 self._process_ad(target)
-            elif target.system == "zimbra":
-                self._process_zimbra(target)
-            elif target.system == "synology":
-                self._process_synology(target)
             else:
                 raise PermanentLifecycleError(
                     f"Неизвестная система: {target.system}"

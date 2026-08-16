@@ -48,10 +48,10 @@ class OrganisationEmployment:
 
     @property
     def active(self) -> bool:
-        return bool(
-            self.is_present
-            or self.status.strip().lower() in ACTIVE_EMPLOYMENT_STATUSES
-        )
+        # Строка с наступившей датой увольнения еще может присутствовать в
+        # сегодняшней выгрузке. Источником истины является рассчитанный
+        # кадровый статус; is_present отличает исчезновение от явной даты.
+        return self.status.strip().lower() in ACTIVE_EMPLOYMENT_STATUSES
 
 
 @dataclass(frozen=True)

@@ -21,6 +21,7 @@ from app.models import (
     ProvisioningOperation,
 )
 from app.models_notifications import DismissalEquipmentNotice
+from app.models_synology import SynologyAccountState
 from app.models_zimbra_lifecycle import ZimbraEmploymentAction
 from app.models_dismissal_lifecycle import (
     ADReactivationAlert,
@@ -446,6 +447,19 @@ def dashboard(
             )
         ).all()
     )
+    synology_attention_accounts = list(
+        db.scalars(
+            select(SynologyAccountState)
+            .where(
+                SynologyAccountState.attention_state
+                == "hr_active_after_dsm_disable"
+            )
+            .order_by(
+                desc(SynologyAccountState.attention_at),
+                desc(SynologyAccountState.id),
+            )
+        ).all()
+    )
 
     return templates.TemplateResponse(
         request,
@@ -455,6 +469,7 @@ def dashboard(
             journal_items=_journal_items(db),
             ad_reactivation_alerts=ad_reactivation_alerts,
             zimbra_attention_actions=zimbra_attention_actions,
+            synology_attention_accounts=synology_attention_accounts,
             upcoming_dismissals=upcoming,
             dismissal_message=request.query_params.get(
                 "dismissal_message",

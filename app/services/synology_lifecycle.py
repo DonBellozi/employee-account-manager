@@ -17,6 +17,7 @@ from app.models import (
     HRSourceRecord,
     OneCImportRun,
 )
+from app.models_dismissals import DismissalDeferral
 from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
 from app.models_synology import (
     SynologyAccountState,
@@ -49,6 +50,7 @@ from app.services.synology_policy import (
     add_months,
     classify_account,
     desired_action,
+    email_domain,
     normalize_domain,
     normalize_email,
     normalize_login,
@@ -62,9 +64,13 @@ _SYNC_LOCK = threading.Lock()
 # подтверждает конкретный разбор ситуации, а не снимает предохранитель навсегда.
 MASS_DISABLE_ACK_TTL_MINUTES = 60
 
+DISABLED_BY_EMPLOYMENT = "employment_dismissal"
+DISABLED_BY_LIFECYCLE = "lifecycle_expiry"
+ATTENTION_HR_ACTIVE_AFTER_DISABLE = "hr_active_after_dsm_disable"
+
 CLASSIFICATION_LABELS = {
     CLASS_INTERNAL_ACTIVE: "Наш сотрудник",
-    CLASS_INTERNAL_DISMISSED: "Уволен (блокирует общий контур)",
+    CLASS_INTERNAL_DISMISSED: "Не работает в организации DSM-e-mail",
     CLASS_EXTERNAL: "Внешняя",
     CLASS_UNKNOWN: "Требует классификации",
     CLASS_EXCEPTION: "Исключение",
@@ -98,6 +104,11 @@ class SynologyLifecycleService:
         self.settings = settings
         self.db = db
         self._identity = WorkerIdentityResolver(db)
+
+    def _reset_hr_snapshot(self) -> None:
+        """Сбросить ORM/cache перед последней кадровой перепроверкой."""
+        self.db.expire_all()
+        self._identity = WorkerIdentityResolver(self.db)
 
     @property
     def local_now(self) -> datetime:
@@ -203,9 +214,9 @@ class SynologyLifecycleService:
     ) -> tuple[bool, str]:
         """Можно ли сейчас применять плановые блокировки DSM.
 
-        Окно общее для всего проекта: AD, Zimbra и DSM меняются в одно время
-        суток. Внутри окна попытки повторяются с ровным интервалом, пока не
-        исчерпан суточный лимит.
+        Плановые изменения DSM используют общее вечернее окно проекта.
+        Исчезновение из выгрузки и уже прошедшая дата увольнения исполняются
+        сразу после повторной кадровой проверки и сюда не попадают.
         """
         now = self.local_now
         if not is_block_window_open(now):
@@ -363,32 +374,56 @@ class SynologyLifecycleService:
     def _hr_snapshot(self, account: SynologyLocalUser) -> dict[str, object]:
         """Связать локальную учетку DSM с работником кадровой выгрузки.
 
-        Правило сопоставления общее для всего проекта и живет в
-        WorkerIdentityResolver: e-mail в DSM часто пустой или личный, поэтому
-        одного признака недостаточно.
+        Идентичность определяет общий WorkerIdentityResolver, но кадровое
+        состояние e-mail оценивается только в организации его домена. Пустой
+        или неоднозначный адрес никогда не дает автоматического действия.
         """
         match = self._identity.resolve(
             emails=[account.email],
             logins=[account.login],
             fio=account.description,
         )
+        source_id = email_domain(account.email)
+        employment = None
+        if match.worker_key and source_id:
+            employment = self.db.scalar(
+                select(HREmploymentState).where(
+                    HREmploymentState.worker_key == match.worker_key,
+                    func.lower(HREmploymentState.source_id) == source_id,
+                )
+            )
         return {
             "matched": match.matched,
+            "ambiguous": match.ambiguous,
             "active": match.active,
             "worker_key": match.worker_key,
             "match_method": match.method,
-            "dismissal_date": match.dismissal_date,
+            "source_id": source_id,
+            "employment_status": str(
+                getattr(employment, "status", "") or ""
+            ).strip().lower(),
+            "status_reason": str(
+                getattr(employment, "status_reason", "") or ""
+            ).strip().lower(),
+            "is_present": bool(getattr(employment, "is_present", False)),
+            "dismissal_date": (
+                employment.dismissal_date
+                if employment is not None
+                else match.dismissal_date
+            ),
         }
 
-    def _hr_write_ready(self) -> tuple[bool, str]:
-        running = bool(
+    def _import_running(self) -> bool:
+        return bool(
             self.db.scalar(
                 select(OneCImportRun.id)
                 .where(OneCImportRun.status == "running")
                 .limit(1)
             )
         )
-        if running:
+
+    def _hr_write_ready(self) -> tuple[bool, str]:
+        if self._import_running():
             return False, "Выполняется импорт 1С"
         ready = OneCSourceFreshnessService(
             self.settings,
@@ -470,6 +505,10 @@ class SynologyLifecycleService:
             row.desired_reason,
             row.last_action,
             row.last_action_at,
+            row.disabled_reason_code,
+            row.attention_state,
+            row.attention_details,
+            row.attention_at,
         )
 
     def _start_cycle(
@@ -541,10 +580,18 @@ class SynologyLifecycleService:
             active_employee=bool(hr["active"]),
             matched_employee=bool(hr["matched"]),
         )
+        if (
+            bool(hr["ambiguous"])
+            and classification in {
+                CLASS_INTERNAL_ACTIVE,
+                CLASS_INTERNAL_DISMISSED,
+            }
+        ):
+            classification = CLASS_UNKNOWN
 
-        # worker_key сохраняется при любом успешном сопоставлении, а не только
-        # для внутренних классов: по нему общий контур увольнения находит
-        # DSM-учетки работника и блокирует их вместе с AD и Zimbra.
+        # worker_key нужен DSM для отсрочки конкретного кадрового события и
+        # для операторского предупреждения. Решение остается доменным: работа
+        # человека в другой организации эту DSM-учетку не защищает.
         worker_key = str(hr["worker_key"] or "")
         match_method = str(hr["match_method"] or "")
 
@@ -578,7 +625,7 @@ class SynologyLifecycleService:
         elif classification == CLASS_INTERNAL_DISMISSED:
             self._clear_cycle(row)
             explicit_date = hr["dismissal_date"]
-            if explicit_date is not None and row.dismissal_reference_source != "hr":
+            if explicit_date is not None:
                 row.dismissal_reference_date = explicit_date
                 row.dismissal_reference_source = "hr"
                 row.delete_after = add_months(explicit_date, control.delete_after_months)
@@ -630,6 +677,46 @@ class SynologyLifecycleService:
         )
         row.desired_action = decision.action
         row.desired_reason = decision.reason
+        if bool(hr["ambiguous"]):
+            row.desired_action = ACTION_CLASSIFY
+            row.desired_reason = (
+                "Один e-mail связан с несколькими работниками. "
+                "Автоматические действия остановлены до ручной проверки."
+            )
+
+        hr_returned_after_disable = bool(
+            classification == CLASS_INTERNAL_ACTIVE
+            and not account.is_active
+            and (
+                row.disabled_reason_code == DISABLED_BY_EMPLOYMENT
+                or (
+                    row.last_action == "disable"
+                    and previous_classification == CLASS_INTERNAL_DISMISSED
+                )
+            )
+        )
+        if hr_returned_after_disable:
+            row.disabled_reason_code = DISABLED_BY_EMPLOYMENT
+            if row.attention_state != ATTENTION_HR_ACTIVE_AFTER_DISABLE:
+                row.attention_at = now
+                self._audit(
+                    action="synology_hr_reactivation_attention",
+                    target=account.login,
+                    result="warning",
+                    details=(
+                        f"worker_key={row.worker_key or '-'}; "
+                        f"email={row.email or '-'}; automatic_restore=false"
+                    ),
+                )
+            row.attention_state = ATTENTION_HR_ACTIVE_AFTER_DISABLE
+            row.attention_details = (
+                "Сотрудник снова активен в организации, но DSM-учетка уже "
+                "заблокирована. Автоматическое включение запрещено."
+            )
+        elif row.attention_state == ATTENTION_HR_ACTIVE_AFTER_DISABLE:
+            row.attention_state = ""
+            row.attention_details = ""
+            row.attention_at = None
 
         if is_new:
             self._audit(
@@ -739,7 +826,7 @@ class SynologyLifecycleService:
         exception_by_login: dict[str, SynologyException],
         exception_by_stable: dict[str, SynologyException],
         control: SynologyControlSettings,
-    ) -> str:
+    ) -> tuple[str, dict[str, object]]:
         exception = (
             exception_by_stable.get(account.stable_id)
             or exception_by_login.get(normalize_login(account.login))
@@ -753,16 +840,28 @@ class SynologyLifecycleService:
             active_employee=bool(hr["active"]),
             matched_employee=bool(hr["matched"]),
         )
-        if classification != row.classification:
-            row.classification = classification
-            row.worker_key = str(hr["worker_key"] or "") if classification in {
+        if (
+            bool(hr["ambiguous"])
+            and classification in {
                 CLASS_INTERNAL_ACTIVE,
                 CLASS_INTERNAL_DISMISSED,
-            } else ""
-            row.match_method = str(hr["match_method"] or "") if classification in {
-                CLASS_INTERNAL_ACTIVE,
-                CLASS_INTERNAL_DISMISSED,
-            } else ""
+            }
+        ):
+            classification = CLASS_UNKNOWN
+
+        row.classification = classification
+        row.worker_key = str(hr["worker_key"] or "")
+        row.match_method = str(hr["match_method"] or "")
+        if classification == CLASS_INTERNAL_DISMISSED:
+            self._clear_cycle(row)
+            dismissal_date = hr["dismissal_date"]
+            if dismissal_date is not None:
+                row.dismissal_reference_date = dismissal_date
+                row.dismissal_reference_source = "hr"
+        elif classification == CLASS_INTERNAL_ACTIVE:
+            row.dismissal_reference_date = None
+            row.dismissal_reference_source = ""
+            row.delete_after = None
 
         decision = desired_action(
             classification=classification,
@@ -778,7 +877,93 @@ class SynologyLifecycleService:
         )
         row.desired_action = decision.action
         row.desired_reason = decision.reason
-        return classification
+        if bool(hr["ambiguous"]):
+            row.desired_action = ACTION_CLASSIFY
+            row.desired_reason = (
+                "Один e-mail связан с несколькими работниками. "
+                "Автоматические действия остановлены до ручной проверки."
+            )
+        return classification, hr
+
+    def _deferral_until(
+        self,
+        *,
+        worker_key: str,
+        dismissal_date: date | None,
+    ) -> date | None:
+        key = str(worker_key or "").strip()
+        if not key or dismissal_date is None:
+            return None
+        return self.db.scalar(
+            select(DismissalDeferral.deferred_until).where(
+                DismissalDeferral.worker_key == key,
+                DismissalDeferral.dismissal_date == dismissal_date,
+            )
+        )
+
+    def _disable_gate(
+        self,
+        row: SynologyAccountState,
+        *,
+        classification: str,
+        hr: dict[str, object],
+        control: SynologyControlSettings,
+        window_authorized: bool = False,
+    ) -> tuple[bool, bool, str]:
+        """Вернуть ``allowed, uses_window, reason`` для одной DSM-учетки."""
+        if classification == CLASS_EXTERNAL:
+            if window_authorized:
+                return True, True, "Истек внешний lifecycle-срок"
+            allowed, reason = self.block_window_state(control)
+            return allowed, True, reason
+
+        if classification == CLASS_INTERNAL_ACTIVE:
+            ready, reason = self._hr_write_ready()
+            if not ready:
+                return False, True, reason
+            if window_authorized:
+                return True, True, "Истек внутренний lifecycle-срок"
+            allowed, reason = self.block_window_state(control)
+            return allowed, True, reason
+
+        if classification != CLASS_INTERNAL_DISMISSED:
+            return False, False, "Класс учетной записи запрещает блокировку"
+
+        # Даже немедленное событие не исполняется поверх незавершенного
+        # импорта: сначала получаем целостное состояние организации.
+        if self._import_running():
+            return False, False, "Выполняется импорт 1С"
+
+        dismissal_date = hr["dismissal_date"] or row.dismissal_reference_date
+        deferral_until = self._deferral_until(
+            worker_key=str(hr["worker_key"] or row.worker_key or ""),
+            dismissal_date=dismissal_date,
+        )
+        effective_date = dismissal_date
+        if deferral_until is not None and (
+            effective_date is None or deferral_until > effective_date
+        ):
+            effective_date = deferral_until
+
+        if effective_date is not None and effective_date > self.today:
+            return False, False, f"Отложено до {effective_date.isoformat()}"
+
+        # Исчезновение из свежей выгрузки и уже прошедшая дата — события,
+        # которые обнаружены постфактум. Они не ждут следующего окна 19:10.
+        if str(hr["status_reason"] or "") == "absent_from_export":
+            return True, False, "Исчезновение из кадровой выгрузки"
+        if effective_date is not None and effective_date < self.today:
+            return True, False, "Дата увольнения уже прошла"
+
+        # Обычное увольнение сегодняшней датой и впервые замеченный адрес
+        # нашего домена проходят через контрольные выгрузки и вечернее окно.
+        ready, reason = self._hr_write_ready()
+        if not ready:
+            return False, True, reason
+        if window_authorized:
+            return True, True, "Плановое увольнение подтверждено"
+        allowed, reason = self.block_window_state(control)
+        return allowed, True, reason
 
     def _execute_disables(
         self,
@@ -810,21 +995,68 @@ class SynologyLifecycleService:
         if not rows:
             return 0, 0, 0, ""
 
-        # Единое окно проекта. Работа никуда не девается: невыполненное
-        # останется в desired_action и уйдет в ближайшую разрешенную попытку.
-        window_open, _window_reason = self.block_window_state(control)
-        if not window_open:
-            return 0, 0, len(rows), ""
+        success = failed = deferred = 0
+        prepared: list[tuple[int, bool]] = []
+
+        # Сначала повторно классифицируем каждую учетку и отделяем реально
+        # готовые действия. Предохранитель ниже считает именно их, а не все
+        # накопленные планы, среди которых могут быть отсроченные события.
+        for initial_row in rows:
+            account = by_stable.get(initial_row.stable_id)
+            if account is None or account.detail_error:
+                failed += 1
+                initial_row.last_error = (
+                    account.detail_error
+                    if account is not None
+                    else "DSM: учетка исчезла из снимка"
+                )
+                continue
+
+            self._reset_hr_snapshot()
+            row = self.db.get(SynologyAccountState, initial_row.id)
+            if row is None:
+                failed += 1
+                continue
+            classification, hr = self._refresh_action_for_current_snapshot(
+                row,
+                account,
+                managed_domains=managed_domains,
+                exception_by_login=exception_by_login,
+                exception_by_stable=exception_by_stable,
+                control=control,
+            )
+            if row.desired_action != ACTION_DISABLE or classification in {
+                CLASS_EXCEPTION,
+                CLASS_PROTECTED,
+                CLASS_UNKNOWN,
+            }:
+                deferred += 1
+                continue
+            allowed, uses_window, _reason = self._disable_gate(
+                row,
+                classification=classification,
+                hr=hr,
+                control=control,
+            )
+            if not allowed:
+                deferred += 1
+                continue
+            prepared.append((row.id, uses_window))
+
+        self.db.commit()
+        if not prepared:
+            return 0, failed, deferred, ""
 
         # Предохранитель: единичная ошибка кадровой выгрузки не должна
         # превратиться в массовое отключение. Частичное исполнение здесь тоже
         # недопустимо, поэтому этап пропускается целиком.
         limit = max(1, int(control.max_disables_per_run or 1))
-        if len(rows) > limit:
-            if not self._mass_disable_ack_valid_for(control, len(rows)):
+        candidate_count = len(prepared)
+        if candidate_count > limit:
+            if not self._mass_disable_ack_valid_for(control, candidate_count):
                 guard = (
                     f"Сработал предохранитель массовой блокировки: "
-                    f"к отключению {len(rows)} учеток при лимите {limit}. "
+                    f"к отключению {candidate_count} учеток при лимите {limit}. "
                     f"Блокировки не выполнялись. Проверьте кадровые данные и "
                     f"подтвердите операцию вручную."
                 )
@@ -836,16 +1068,16 @@ class SynologyLifecycleService:
                         action="synology_mass_disable_blocked",
                         target="Synology DSM",
                         result="warning",
-                        details=f"candidates={len(rows)}; limit={limit}",
+                        details=f"candidates={candidate_count}; limit={limit}",
                     )
                     self.db.commit()
-                return 0, 0, len(rows), guard
+                return 0, failed, deferred + candidate_count, guard
             self._audit(
                 action="synology_mass_disable_confirmed",
                 target="Synology DSM",
                 result="warning",
                 details=(
-                    f"candidates={len(rows)}; limit={limit}; "
+                    f"candidates={candidate_count}; limit={limit}; "
                     f"actor={control.mass_disable_ack_by or '-'}"
                 ),
             )
@@ -854,23 +1086,35 @@ class SynologyLifecycleService:
             self._clear_mass_disable_ack(control)
             self.db.commit()
 
-        # Попытка засчитывается до обращения к DSM: если сервер недоступен и
-        # упадут все учетки, следующий заход будет ровно через интервал
-        # повтора, а не на каждом тике планировщика.
-        self._register_block_attempt(control)
-        self.db.commit()
+        # Немедленные кадровые события не расходуют суточный счетчик вечернего
+        # окна. Плановые 3/6-месячные циклы и увольнение текущей датой — да.
+        if any(uses_window for _row_id, uses_window in prepared):
+            self._register_block_attempt(control)
+            self.db.commit()
 
         dsm = SynologyService(self.settings)
-        success = failed = deferred = 0
 
-        for row in rows:
+        for row_id, window_authorized in prepared:
+            # Последняя HR-перепроверка делается непосредственно перед каждым
+            # Expired=1. Между подготовкой пакета и этой строкой мог начаться
+            # новый импорт или измениться кадровое состояние.
+            self._reset_hr_snapshot()
+            row = self.db.get(SynologyAccountState, row_id)
+            if row is None:
+                failed += 1
+                continue
             account = by_stable.get(row.stable_id)
             if account is None or account.detail_error:
                 failed += 1
-                row.last_error = account.detail_error if account is not None else "DSM: учетка исчезла из снимка"
+                row.last_error = (
+                    account.detail_error
+                    if account is not None
+                    else "DSM: учетка исчезла из снимка"
+                )
+                self.db.commit()
                 continue
 
-            classification = self._refresh_action_for_current_snapshot(
+            classification, hr = self._refresh_action_for_current_snapshot(
                 row,
                 account,
                 managed_domains=managed_domains,
@@ -878,28 +1122,25 @@ class SynologyLifecycleService:
                 exception_by_stable=exception_by_stable,
                 control=control,
             )
-            if row.desired_action != ACTION_DISABLE:
-                deferred += 1
-                continue
-            # Последний рубеж перед изменением DSM. CLASS_UNKNOWN здесь
-            # обязателен: нераспознанная учетка может принадлежать
-            # действующему работнику, у которого просто не заполнен e-mail.
-            if classification in {
+            if row.desired_action != ACTION_DISABLE or classification in {
                 CLASS_EXCEPTION,
                 CLASS_PROTECTED,
                 CLASS_UNKNOWN,
             }:
                 deferred += 1
+                self.db.commit()
                 continue
-            if classification in {CLASS_INTERNAL_ACTIVE, CLASS_INTERNAL_DISMISSED}:
-                # Проверка выполняется непосредственно перед каждым внешним
-                # изменением: импорт мог начаться уже после начала DSM-sync.
-                hr_ready, hr_reason = self._hr_write_ready()
-                if not hr_ready:
-                    deferred += 1
-                    # Это штатное ожидание, не ошибка карточки.
-                    row.desired_reason = f"{row.desired_reason} Ожидание: {hr_reason}."
-                    continue
+            allowed, _uses_window, _reason = self._disable_gate(
+                row,
+                classification=classification,
+                hr=hr,
+                control=control,
+                window_authorized=window_authorized,
+            )
+            if not allowed:
+                deferred += 1
+                self.db.commit()
+                continue
 
             try:
                 after = dsm.expire_account(account)
@@ -910,6 +1151,14 @@ class SynologyLifecycleService:
                 row.last_action = "disable"
                 row.last_action_at = self.utcnow()
                 row.last_error = ""
+                row.disabled_reason_code = (
+                    DISABLED_BY_EMPLOYMENT
+                    if classification == CLASS_INTERNAL_DISMISSED
+                    else DISABLED_BY_LIFECYCLE
+                )
+                row.attention_state = ""
+                row.attention_details = ""
+                row.attention_at = None
                 row.desired_action = ACTION_NONE
                 row.desired_reason = "Учетная запись отключена в DSM (Expired=1)."
                 self._audit(
@@ -951,6 +1200,7 @@ class SynologyLifecycleService:
 
         try:
             accounts = SynologyService(self.settings).list_accounts()
+            self._reset_hr_snapshot()
             control = self.control_settings()
             domains = self.managed_domains()
             by_login, by_stable = self._active_exceptions()
@@ -1100,6 +1350,10 @@ class SynologyLifecycleService:
         row.last_action = "restore"
         row.last_action_at = self.utcnow()
         row.last_error = ""
+        row.disabled_reason_code = ""
+        row.attention_state = ""
+        row.attention_details = ""
+        row.attention_at = None
         self._clear_cycle(row)
         row.classification = CLASS_UNKNOWN
         row.desired_action = ACTION_CLASSIFY
