@@ -17,6 +17,7 @@ from app.models_notifications import (
 from app.models_techexpert import TechExpertSettings
 from app.services.ad import ActiveDirectoryService
 from app.services.blocking import BlockingCard, BlockingService
+from app.services.dismissal_notifications import DismissalNotificationService
 
 
 class DismissalDetailsService:
@@ -138,10 +139,15 @@ class DismissalDetailsService:
                 None,
             )
         if notice is None:
+            status = DismissalNotificationService(
+                self.settings,
+                self.db,
+            ).notice_creation_status(candidate)
             return self._row(
                 "Письмо о возврате оборудования",
-                "Не создано",
-                note="Письмо ещё не поставлено в очередь кадровым циклом",
+                status["value"],
+                state=status["state"],
+                note=status["note"],
             )
 
         sent_times = self._recipient_timestamps(notice)

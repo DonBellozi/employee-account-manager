@@ -16,6 +16,7 @@ from app.models_notifications import (
     DismissalEquipmentNotice,
     HREmploymentDismissalEvent,
 )
+from app.models_onec_polling import OneCSourcePollState
 from app.models_onec_sources import HREmploymentState
 from app.models_onec_sources import OneCAdditionalSource
 from app.services.dismissal_mailer import (
@@ -69,23 +70,42 @@ class DismissalNotificationService:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
-    def _sources_synchronized(self) -> bool:
-        """Не отправлять между последовательными импортами разных организаций."""
-        source_ids = [
-            row.source_id
-            for row in self.db.scalars(
+    def _source_confirmation(self) -> tuple[bool, str]:
+        """Подтвердить, что все источники проверены после кадрового изменения.
+
+        Для подтверждения не требуется новый XLSX. Достаточно успешного IMAP-
+        опроса после изменения: это не заставляет один молчащий источник
+        бессрочно удерживать письма остальных организаций.
+        """
+        sources = list(
+            self.db.scalars(
                 select(OneCAdditionalSource).where(
                     OneCAdditionalSource.enabled.is_(True)
                 )
             ).all()
-            if str(row.source_id or "").strip()
+        )
+        sources = [
+            source
+            for source in sources
+            if str(source.source_id or "").strip()
         ]
-        source_ids = list(dict.fromkeys(source_ids))
-        if not source_ids:
-            return True
+        if not sources:
+            return True, ""
 
-        completed: list[datetime] = []
-        for source_id in source_ids:
+        changed_values = [
+            self._aware_utc(value)
+            for value in self.db.scalars(
+                select(HREmploymentState.updated_at).where(
+                    HREmploymentState.dismissal_date.is_not(None)
+                )
+            ).all()
+            if value is not None
+        ]
+        latest_change = max(changed_values) if changed_values else None
+        now = utcnow()
+
+        for source in sources:
+            source_id = source.source_id
             run = self.db.scalar(
                 select(OneCImportRun)
                 .where(
@@ -101,17 +121,123 @@ class DismissalNotificationService:
                 .limit(1)
             )
             if run is None or run.completed_at is None:
-                return False
-            completed.append(self._aware_utc(run.completed_at))
+                return (
+                    False,
+                    f"Для источника «{source.name or source_id}» еще нет "
+                    "подтвержденной кадровой выгрузки",
+                )
 
-        now = utcnow()
-        newest = max(completed)
-        oldest = min(completed)
-        if now - newest > timedelta(hours=36):
-            return False
-        # Плановый импорт обходит источники последовательно. Допускаем
-        # достаточный запас для больших файлов и временных задержек IMAP.
-        return newest - oldest <= timedelta(minutes=30)
+            observed_at = self._aware_utc(run.completed_at)
+            poll = self.db.scalar(
+                select(OneCSourcePollState).where(
+                    OneCSourcePollState.source_id == source_id
+                )
+            )
+            if (
+                poll is not None
+                and poll.last_checked_at is not None
+                and str(poll.last_status or "").strip().lower() != "failed"
+            ):
+                observed_at = max(
+                    observed_at,
+                    self._aware_utc(poll.last_checked_at),
+                )
+
+            if now - observed_at > timedelta(hours=36):
+                return (
+                    False,
+                    f"Источник «{source.name or source_id}» не проверялся "
+                    "более 36 часов",
+                )
+            if latest_change is not None and observed_at < latest_change:
+                return (
+                    False,
+                    f"Ожидается проверка источника «{source.name or source_id}» "
+                    "после кадрового изменения. Новый файл не обязателен",
+                )
+
+        return True, ""
+
+    def _sources_synchronized(self) -> bool:
+        return self._source_confirmation()[0]
+
+    def notice_creation_status(self, candidate: dict) -> dict[str, str]:
+        """Объяснить оператору, почему письмо еще не поставлено в очередь."""
+        if self.settings.dry_run:
+            return {
+                "value": "Отключено безопасным режимом",
+                "state": "warning",
+                "note": "Автоматическая отправка сейчас отключена",
+            }
+        if self._import_running():
+            return {
+                "value": "Ожидает завершения импорта",
+                "state": "pending",
+                "note": "После импорта кадровое состояние будет проверено повторно",
+            }
+        confirmed, reason = self._source_confirmation()
+        if not confirmed:
+            return {
+                "value": "Ожидает кадровый цикл",
+                "state": "pending",
+                "note": reason,
+            }
+
+        profiles = self._profiles()
+        if not profiles:
+            return {
+                "value": "Не настроен отправитель",
+                "state": "error",
+                "note": "В настройках почты нет доступного домена отправителя",
+            }
+        _, recipients = self._event_recipient_plan(candidate, profiles)
+        if not recipients:
+            organizations = ", ".join(
+                str(item.get("source_name") or item.get("source_id") or "").strip()
+                for item in candidate.get("organizations") or []
+                if str(item.get("source_name") or item.get("source_id") or "").strip()
+            )
+            return {
+                "value": "Нет адреса получателя",
+                "state": "error",
+                "note": (
+                    "Не найден корпоративный email"
+                    + (f" для {organizations}" if organizations else "")
+                ),
+            }
+
+        templates = ensure_dismissal_mail_templates(self.db, self.settings)
+        missing_templates = sorted(
+            {
+                str(item.get("sender_domain") or "").strip().lower()
+                for item in recipients
+                if str(item.get("sender_domain") or "").strip()
+                and (
+                    str(item.get("sender_domain") or "").strip().lower()
+                    not in templates
+                    or not str(
+                        templates[
+                            str(item.get("sender_domain") or "").strip().lower()
+                        ].updated_by
+                        or ""
+                    ).strip()
+                )
+            }
+        )
+        if missing_templates:
+            return {
+                "value": "Шаблон не подтвержден",
+                "state": "warning",
+                "note": (
+                    "Откройте и сохраните шаблон «Возврат оборудования» для: "
+                    + ", ".join(missing_templates)
+                ),
+            }
+        return {
+            "value": "Ожидает постановки в очередь",
+            "state": "pending",
+            "note": "Фоновый цикл выполняется один раз в минуту",
+        }
 
     def _profiles(self):
         return {
