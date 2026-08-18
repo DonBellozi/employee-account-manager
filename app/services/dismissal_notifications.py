@@ -233,6 +233,31 @@ class DismissalNotificationService:
                     + ", ".join(missing_templates)
                 ),
             }
+
+        current_events = list(
+            self.db.scalars(
+                select(HREmploymentDismissalEvent).where(
+                    HREmploymentDismissalEvent.worker_key
+                    == candidate["worker_key"],
+                    HREmploymentDismissalEvent.current_dismissal_date.is_not(None),
+                )
+            ).all()
+        )
+        if not current_events:
+            return {
+                "value": "Ожидает фиксации кадрового события",
+                "state": "pending",
+                "note": "Событие будет зафиксировано ближайшим фоновым циклом",
+            }
+        if any(event.noticed_at is not None for event in current_events):
+            return {
+                "value": "Восстанавливается очередь",
+                "state": "warning",
+                "note": (
+                    "Кадровое событие найдено без связанного письма. "
+                    "Очередь будет восстановлена автоматически"
+                ),
+            }
         return {
             "value": "Ожидает постановки в очередь",
             "state": "pending",
@@ -619,7 +644,7 @@ class DismissalNotificationService:
         }
 
     def _event_recipient_plan(self, candidate: dict, profiles: dict) -> tuple[str, list[dict]]:
-        """По одному корпоративному адресу каждой затронутой организации."""
+        """Корпоративные адреса организаций и один личный адрес, если он есть."""
         source_ids = {
             str(item.get("source_id") or "").strip().lower()
             for item in candidate.get("organizations") or []
@@ -671,7 +696,56 @@ class DismissalNotificationService:
                     }
                 )
         default_domain = recipients[0]["sender_domain"] if recipients else ""
+        corporate_addresses = {
+            normalize_email(item.get("email"))
+            for item in recipients
+            if normalize_email(item.get("email"))
+        }
+        personal_addresses = sorted(
+            {
+                normalize_email(record.personal_email)
+                for record in records
+                if normalize_email(record.personal_email)
+                and normalize_email(record.personal_email)
+                not in corporate_addresses
+            }
+        )
+        if default_domain:
+            for address in personal_addresses:
+                recipients.append(
+                    {
+                        "email": address,
+                        "kind": "personal",
+                        "source_id": "",
+                        "sender_domain": default_domain,
+                        "sent": False,
+                        "sent_at": "",
+                        "error": "",
+                    }
+                )
         return default_domain, recipients
+
+    @staticmethod
+    def _merge_recipients(
+        existing: list[dict],
+        planned: list[dict],
+    ) -> tuple[list[dict], int]:
+        """Добавить отсутствующие адреса, не сбрасывая результаты отправки."""
+        merged = [dict(item) for item in existing if isinstance(item, dict)]
+        known = {
+            normalize_email(item.get("email"))
+            for item in merged
+            if normalize_email(item.get("email"))
+        }
+        added = 0
+        for item in planned:
+            address = normalize_email(item.get("email"))
+            if not address or address in known:
+                continue
+            merged.append(dict(item))
+            known.add(address)
+            added += 1
+        return merged, added
 
     def process(self) -> dict[str, int | str]:
         if self.settings.dry_run:
@@ -691,14 +765,29 @@ class DismissalNotificationService:
         created = 0
         sent_now = 0
 
-        unnotified = list(
+        current_events = list(
             self.db.scalars(
                 select(HREmploymentDismissalEvent).where(
-                    HREmploymentDismissalEvent.noticed_at.is_(None),
                     HREmploymentDismissalEvent.current_dismissal_date.is_not(None),
                 )
             ).all()
         )
+        existing_notices = list(
+            self.db.scalars(select(DismissalEquipmentNotice)).all()
+        )
+        linked_event_ids = {
+            event_id
+            for notice in existing_notices
+            for event_id in self._event_ids(notice)
+        }
+        # noticed_at — диагностическая отметка, а не единственный источник
+        # истины. Если событие отмечено, но связанного письма в БД нет,
+        # следующий цикл автоматически восстановит очередь.
+        unnotified = [
+            event
+            for event in current_events
+            if event.noticed_at is None or event.id not in linked_event_ids
+        ]
         by_worker: dict[str, list[HREmploymentDismissalEvent]] = defaultdict(list)
         for event in unnotified:
             by_worker[event.worker_key].append(event)
@@ -733,25 +822,72 @@ class DismissalNotificationService:
                 ):
                     continue
 
-                notice = DismissalEquipmentNotice(
-                    worker_key=candidate["worker_key"],
-                    dismissal_date=candidate["dismissal_date"],
-                    fio=str(candidate.get("fio") or ""),
-                    sender_domain=sender_domain,
-                    event_ids_json=json.dumps([event.id for event in events]),
-                    recipients_json=json.dumps(
-                        recipients,
+                notice = self.db.scalar(
+                    select(DismissalEquipmentNotice).where(
+                        DismissalEquipmentNotice.worker_key
+                        == candidate["worker_key"],
+                        DismissalEquipmentNotice.dismissal_date
+                        == candidate["dismissal_date"],
+                    )
+                )
+                if notice is None:
+                    notice = DismissalEquipmentNotice(
+                        worker_key=candidate["worker_key"],
+                        dismissal_date=candidate["dismissal_date"],
+                        fio=str(candidate.get("fio") or ""),
+                        sender_domain=sender_domain,
+                        event_ids_json=json.dumps([event.id for event in events]),
+                        recipients_json=json.dumps(
+                            recipients,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        status="pending",
+                    )
+                    self.db.add(notice)
+                    created += 1
+                else:
+                    combined_ids = list(
+                        dict.fromkeys(
+                            [*self._event_ids(notice), *[event.id for event in events]]
+                        )
+                    )
+                    combined_events = list(
+                        self.db.scalars(
+                            select(HREmploymentDismissalEvent).where(
+                                HREmploymentDismissalEvent.id.in_(combined_ids)
+                            )
+                        ).all()
+                    )
+                    combined_candidate = self._event_candidate(combined_events)
+                    _, combined_plan = self._event_recipient_plan(
+                        combined_candidate,
+                        profiles,
+                    )
+                    merged, added = self._merge_recipients(
+                        self._load_recipients(notice),
+                        combined_plan,
+                    )
+                    notice.event_ids_json = json.dumps(combined_ids)
+                    notice.recipients_json = json.dumps(
+                        merged,
                         ensure_ascii=False,
                         sort_keys=True,
-                    ),
-                    status="pending",
-                )
-                self.db.add(notice)
+                    )
+                    notice.fio = str(combined_candidate.get("fio") or notice.fio)
+                    candidate = combined_candidate
+                    if added:
+                        sent_count = sum(
+                            1 for item in merged if item.get("sent")
+                        )
+                        notice.status = "partial" if sent_count else "pending"
+                        notice.next_attempt_at = None
+                        notice.last_error = ""
+                    notice.updated_at = utcnow()
                 for event in events:
                     event.noticed_at = utcnow()
                 self.db.commit()
                 self.db.refresh(notice)
-                created += 1
                 notices.append((notice, candidate))
 
         retry_notices = list(
@@ -839,7 +975,11 @@ class DismissalNotificationWorker:
                 )
 
     def _run_loop(self) -> None:
-        # Первый цикл откладываем: при старте приложения сначала должна
-        # завершиться возможная catch-up выгрузка 1С.
+        # process() сам пропускает цикл, пока идет кадровый импорт, поэтому
+        # после короткой форы стартовому IMAP-опросу можно восстановить
+        # накопившуюся очередь, не ожидая полную минуту.
+        if self._stop_event.wait(5):
+            return
+        self._run_once()
         while not self._stop_event.wait(POLL_SECONDS):
             self._run_once()
