@@ -34,12 +34,61 @@
   function scheduleRefresh() {
     window.clearTimeout(timer);
     timer = window.setTimeout(async () => {
-      if (document.visibilityState === 'visible') {
+      const detailsAreOpen = host.querySelector(
+        'details[data-upcoming-dismissal-details][open]'
+      );
+      if (document.visibilityState === 'visible' && !detailsAreOpen) {
         await refreshFragment();
       }
       scheduleRefresh();
     }, refreshIntervalMs);
   }
+
+  host.addEventListener('toggle', async event => {
+    const details = event.target.closest(
+      'details[data-upcoming-dismissal-details]'
+    );
+    if (!details?.open || details.dataset.loaded === 'true') return;
+
+    const content = details.querySelector('[data-upcoming-details-content]');
+    if (!content) return;
+    content.setAttribute('aria-busy', 'true');
+
+    const url = new URL(details.dataset.detailsUrl, window.location.origin);
+    url.searchParams.set('worker_key', details.dataset.workerKey || '');
+    url.searchParams.set('dismissal_date', details.dataset.dismissalDate || '');
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: {'Accept': 'text/html'},
+      });
+      const html = await response.text();
+      content.innerHTML = html;
+      if (response.ok) details.dataset.loaded = 'true';
+    } catch (_) {
+      content.textContent = 'Не удалось проверить системы. Попробуйте открыть снова.';
+    } finally {
+      content.removeAttribute('aria-busy');
+    }
+  }, true);
+
+  host.addEventListener('click', event => {
+    const close = event.target.closest('[data-upcoming-details-close]');
+    if (!close) return;
+    const details = close.closest('details[data-upcoming-dismissal-details]');
+    if (details) details.open = false;
+  });
+
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    const details = host.querySelector(
+      'details[data-upcoming-dismissal-details][open]'
+    );
+    if (details) details.open = false;
+  });
 
   host.addEventListener('submit', async event => {
     const form = event.target.closest('form[data-upcoming-dismissal-defer]');
@@ -79,7 +128,10 @@
   });
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
+    if (
+      document.visibilityState === 'visible'
+      && !host.querySelector('details[data-upcoming-dismissal-details][open]')
+    ) {
       refreshFragment();
     }
   });

@@ -334,6 +334,33 @@ class UpcomingDismissalService:
         self.ensure_primary_employment_state()
         return self._all_candidates()[: max(1, int(limit))]
 
+    def get_upcoming(
+        self,
+        *,
+        worker_key: str,
+        expected_dismissal_date: date,
+    ) -> dict:
+        """Вернуть актуального кандидата перед показом подробностей."""
+        self.ensure_primary_employment_state()
+        normalized_key = str(worker_key or "").strip()
+        candidate = next(
+            (
+                item
+                for item in self._all_candidates()
+                if item["worker_key"] == normalized_key
+            ),
+            None,
+        )
+        if candidate is None:
+            raise ValueError(
+                "Работник больше не является кандидатом на окончательное увольнение"
+            )
+        if candidate["dismissal_date"] != expected_dismissal_date:
+            raise ValueError(
+                "Дата увольнения изменилась. Обновите список и откройте подробности снова"
+            )
+        return candidate
+
     def list_for_blocking(self, *, limit: int = 10000) -> list[dict]:
         """Все окончательные увольнения, включая уже наступившие.
 

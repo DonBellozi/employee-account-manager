@@ -44,6 +44,7 @@ from app.services.upcoming_dismissals import (
     DEFERRAL_ACTION,
     UpcomingDismissalService,
 )
+from app.services.dismissal_details import DismissalDetailsService
 from app.time_utils import register_datetime_filters
 
 
@@ -737,6 +738,45 @@ def upcoming_dismissals_fragment(
             dismissal_message=message,
             dismissal_error=dismissal_error,
         ),
+    )
+
+
+@router.get("/dismissals/upcoming/details")
+def upcoming_dismissal_details(
+    request: Request,
+    worker_key: str,
+    dismissal_date: date,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Лениво проверить внешние системы для выбранного увольнения."""
+    get_current_user(request)
+    status_code = 200
+    details = None
+    details_error = ""
+    try:
+        candidate = UpcomingDismissalService(
+            settings,
+            db,
+        ).get_upcoming(
+            worker_key=worker_key,
+            expected_dismissal_date=dismissal_date,
+        )
+        details = DismissalDetailsService(settings, db).build(candidate)
+    except Exception as exc:
+        db.rollback()
+        details_error = str(exc)
+        status_code = 400
+
+    return templates.TemplateResponse(
+        request,
+        "upcoming_dismissal_details.html",
+        _context(
+            request,
+            details=details,
+            details_error=details_error,
+        ),
+        status_code=status_code,
     )
 
 

@@ -1,0 +1,36 @@
+{% if details_error %}
+<div class="upcoming-details-error">
+  <strong>Не удалось открыть подробности</strong>
+  <span>{{ details_error }}</span>
+</div>
+{% elif details %}
+<div class="upcoming-details-heading">
+  <div>
+    <strong>{{ details.fio }}</strong>
+    <span>Увольнение {{ details.dismissal_date.strftime('%d.%m.%Y') }}</span>
+  </div>
+  <div class="upcoming-details-heading-actions">
+    <div class="upcoming-details-organizations">
+      {% for organization in details.organizations %}
+      <span>{{ organization.source_name }}</span>
+      {% endfor %}
+    </div>
+    <button type="button"
+            class="upcoming-details-close"
+            data-upcoming-details-close
+            aria-label="Закрыть подробности">×</button>
+  </div>
+</div>
+
+<dl class="upcoming-details-list">
+  {% for row in details.rows %}
+  <div class="upcoming-details-row {{ row.state }}">
+    <dt>{{ row.label }}</dt>
+    <dd>
+      <strong>{{ row.value }}</strong>
+      {% if row.note %}<span>{{ row.note }}</span>{% endif %}
+    </dd>
+  </div>
+  {% endfor %}
+</dl>
+{% endif %}

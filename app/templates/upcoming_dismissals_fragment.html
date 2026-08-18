@@ -60,7 +60,19 @@
           </div>
           {% endif %}
         </td>
-        <td>
+        <td class="upcoming-actions-cell">
+          <div class="upcoming-actions">
+            <details class="journal-details upcoming-details"
+                     data-upcoming-dismissal-details
+                     data-details-url="/dismissals/upcoming/details"
+                     data-worker-key="{{ item.worker_key }}"
+                     data-dismissal-date="{{ item.dismissal_date.isoformat() }}">
+              <summary>Подробности</summary>
+              <div class="journal-details-panel upcoming-details-panel"
+                   data-upcoming-details-content>
+                <div class="upcoming-details-loading">Проверяю системы…</div>
+              </div>
+            </details>
           <form method="post"
                 action="/dismissals/upcoming/defer"
                 data-upcoming-dismissal-defer>
@@ -72,6 +84,7 @@
               {{ 'Еще на неделю' if item.deferred else 'Отложить' }}
             </button>
           </form>
+          </div>
         </td>
       </tr>
       {% endfor %}
