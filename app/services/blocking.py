@@ -389,7 +389,12 @@ class BlockingService:
             self._remember_itinvent(record, result)
         return result
 
-    def card(self, record_id: int) -> BlockingCard:
+    def card(
+        self,
+        record_id: int,
+        *,
+        remember_itinvent: bool = True,
+    ) -> BlockingCard:
         record = self.db.get(HRSourceRecord, record_id)
         if record is None or not record.is_present:
             raise LookupError("Работник не найден в текущем кадровом реестре")
@@ -452,7 +457,10 @@ class BlockingService:
 
         effective_login = ad_user.username if ad_user is not None else candidate_login
         itinvent_result = self._itinvent_lookup(effective_login)
-        if itinvent_result.state in {"found", "owner_not_found"}:
+        if (
+            remember_itinvent
+            and itinvent_result.state in {"found", "owner_not_found"}
+        ):
             self._remember_itinvent(record, itinvent_result)
         elif itinvent_result.state == "error":
             cached = self._cached_itinvent(

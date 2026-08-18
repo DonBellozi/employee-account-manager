@@ -22,6 +22,24 @@
   </div>
 </div>
 
+{% if details.snapshot_state == 'pending' %}
+<div class="upcoming-details-cache-note pending">
+  <strong>Фоновая проверка запланирована</strong>
+  <span>Результаты появятся здесь автоматически. Окно можно закрыть.</span>
+</div>
+{% elif details.snapshot_state == 'error' %}
+<div class="upcoming-details-cache-note error">
+  <strong>Фоновая проверка пока не выполнена</strong>
+  <span>{{ details.snapshot_error or 'Система повторит попытку автоматически.' }}</span>
+</div>
+{% elif details.snapshot_state == 'stale' %}
+<div class="upcoming-details-cache-note warning">
+  <strong>Показан последний успешный снимок</strong>
+  <span>{{ details.snapshot_error or 'Обновление будет повторено автоматически.' }}</span>
+</div>
+{% endif %}
+
+{% if details.rows %}
 <dl class="upcoming-details-list">
   {% for row in details.rows %}
   <div class="upcoming-details-row {{ row.state }}">
@@ -33,4 +51,13 @@
   </div>
   {% endfor %}
 </dl>
+{% endif %}
+
+<div class="upcoming-details-cache-footer">
+  {% if details.snapshot_checked_at %}
+  Проверено {{ details.snapshot_checked_at }}. Обновляется в фоне каждые 5 минут.
+  {% else %}
+  Проверка выполняется в фоне, без ожидания открытия этого окна.
+  {% endif %}
+</div>
 {% endif %}

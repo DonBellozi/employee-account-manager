@@ -44,7 +44,7 @@ from app.services.upcoming_dismissals import (
     DEFERRAL_ACTION,
     UpcomingDismissalService,
 )
-from app.services.dismissal_details import DismissalDetailsService
+from app.services.dismissal_details_cache import DismissalDetailsCacheService
 from app.time_utils import register_datetime_filters
 
 
@@ -749,7 +749,7 @@ def upcoming_dismissal_details(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
-    """Лениво проверить внешние системы для выбранного увольнения."""
+    """Показать последний фоновый снимок без внешних запросов."""
     get_current_user(request)
     status_code = 200
     details = None
@@ -762,7 +762,7 @@ def upcoming_dismissal_details(
             worker_key=worker_key,
             expected_dismissal_date=dismissal_date,
         )
-        details = DismissalDetailsService(settings, db).build(candidate)
+        details = DismissalDetailsCacheService(settings, db).view(candidate)
     except Exception as exc:
         db.rollback()
         details_error = str(exc)

@@ -391,6 +391,26 @@
   color: #991b1b;
   background: #fef2f2;
 }
+.upcoming-details-cache-note {
+  display: grid;
+  gap: 4px;
+  margin: 14px 18px 3px;
+  padding: 11px 13px;
+  border-radius: 8px;
+  color: #1e40af;
+  background: #eff6ff;
+}
+.upcoming-details-cache-note span {
+  font-size: .84rem;
+}
+.upcoming-details-cache-note.warning {
+  color: #854d0e;
+  background: #fffbeb;
+}
+.upcoming-details-cache-note.error {
+  color: #991b1b;
+  background: #fef2f2;
+}
 .upcoming-details-heading {
   display: flex;
   align-items: flex-start;
@@ -495,6 +515,11 @@
   color: #64748b;
   font-size: .82rem;
   font-weight: 400;
+}
+.upcoming-details-cache-footer {
+  padding: 0 18px 15px;
+  color: #64748b;
+  font-size: .8rem;
 }
 .integration-state {
   display: inline-flex;

@@ -4,8 +4,10 @@
 
   const fragmentUrl = host.dataset.fragmentUrl || '/dismissals/upcoming/fragment';
   const refreshIntervalMs = 30000;
+  const detailsRefreshIntervalMs = 15000;
   let requestNumber = 0;
   let timer = 0;
+  let detailsTimer = 0;
 
   async function refreshFragment(message = '', error = '') {
     const currentRequest = ++requestNumber;
@@ -44,12 +46,7 @@
     }, refreshIntervalMs);
   }
 
-  host.addEventListener('toggle', async event => {
-    const details = event.target.closest(
-      'details[data-upcoming-dismissal-details]'
-    );
-    if (!details?.open || details.dataset.loaded === 'true') return;
-
+  async function refreshDetails(details) {
     const content = details.querySelector('[data-upcoming-details-content]');
     if (!content) return;
     content.setAttribute('aria-busy', 'true');
@@ -67,12 +64,37 @@
       });
       const html = await response.text();
       content.innerHTML = html;
-      if (response.ok) details.dataset.loaded = 'true';
     } catch (_) {
-      content.textContent = 'Не удалось проверить системы. Попробуйте открыть снова.';
+      if (!content.querySelector('.upcoming-details-heading')) {
+        content.textContent = 'Не удалось загрузить сохранённые данные. Попробуйте открыть снова.';
+      }
     } finally {
       content.removeAttribute('aria-busy');
     }
+  }
+
+  function scheduleDetailsRefresh(details) {
+    window.clearTimeout(detailsTimer);
+    if (!details?.open) return;
+    detailsTimer = window.setTimeout(async () => {
+      if (details.open && document.visibilityState === 'visible') {
+        await refreshDetails(details);
+      }
+      scheduleDetailsRefresh(details);
+    }, detailsRefreshIntervalMs);
+  }
+
+  host.addEventListener('toggle', async event => {
+    const details = event.target.closest(
+      'details[data-upcoming-dismissal-details]'
+    );
+    if (!details) return;
+    if (!details.open) {
+      window.clearTimeout(detailsTimer);
+      return;
+    }
+    await refreshDetails(details);
+    scheduleDetailsRefresh(details);
   }, true);
 
   host.addEventListener('click', event => {

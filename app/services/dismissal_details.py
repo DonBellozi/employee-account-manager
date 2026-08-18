@@ -21,7 +21,7 @@ from app.services.dismissal_notifications import DismissalNotificationService
 
 
 class DismissalDetailsService:
-    """Лениво собирает read-only состояние систем для одного увольнения."""
+    """Собирает read-only состояние систем для фонового снимка увольнения."""
 
     def __init__(self, settings: Settings, db: Session):
         self.settings = settings
@@ -196,7 +196,10 @@ class DismissalDetailsService:
         if record is None or not record.is_present:
             return None, "Работник отсутствует в текущем кадровом реестре"
         try:
-            return BlockingService(self.settings, self.db).card(record.id), ""
+            return BlockingService(self.settings, self.db).card(
+                record.id,
+                remember_itinvent=False,
+            ), ""
         except Exception as exc:
             self.db.rollback()
             return None, str(exc)
