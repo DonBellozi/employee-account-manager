@@ -45,7 +45,13 @@
           {% endfor %}
         </td>
         <td>
-          {% if item.deferred %}
+          {% if item.blocking_completed %}
+          <span class="registry-state checked">Завершено</span>
+          <div class="muted">
+            {{ item.blocking_completed_at|app_datetime('%d.%m.%Y %H:%M') }}
+          </div>
+          <div class="muted">В журнале с начала следующего дня</div>
+          {% elif item.deferred %}
           <span class="registry-state checked">Отложено</span>
           <div class="muted">
             Автоблокировка {{ item.deferred_until.strftime('%d.%m.%Y') }} в 19:10
@@ -73,6 +79,7 @@
                 <div class="upcoming-details-loading">Загружаю сохранённые данные…</div>
               </div>
             </details>
+          {% if not item.blocking_completed %}
           <form method="post"
                 action="/dismissals/upcoming/defer"
                 data-upcoming-dismissal-defer>
@@ -84,6 +91,7 @@
               {{ 'Еще на неделю' if item.deferred else 'Отложить' }}
             </button>
           </form>
+          {% endif %}
           </div>
         </td>
       </tr>

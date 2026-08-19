@@ -140,6 +140,9 @@
         <td>
           <strong>{{ item.subject }}</strong>
           <div class="journal-object-meta">
+            {% if item.dismissal_date %}
+            <span>Увольнение {{ item.dismissal_date.strftime('%d.%m.%Y') }}</span>
+            {% endif %}
             {% if item.login %}<code>{{ item.login }}</code>{% endif %}
             {% if item.corporate_email %}<span>{{ item.corporate_email }}</span>{% endif %}
           </div>
@@ -147,12 +150,22 @@
         <td><span class="status {{ item.status_key }}">{{ item.status_label }}</span></td>
         <td>{{ item.operator }}</td>
         <td class="journal-details-cell">
-          <details class="journal-details">
+          <details class="journal-details{% if item.dismissal_steps %} journal-dismissal-details{% endif %}">
             <summary>Открыть</summary>
-            <div class="journal-details-panel">
+            <div class="journal-details-panel{% if item.dismissal_steps %} journal-dismissal-panel{% endif %}">
               <div class="journal-details-heading">
                 <strong>{{ item.action }}</strong>
-                <span class="muted">Запись № {{ item.record_id }}</span>
+                <div class="journal-details-heading-meta">
+                  <span class="muted">
+                    {{ 'Итоговая карточка' if item.kind == 'dismissal' and item.dismissal_steps else 'Запись № ' ~ item.record_id }}
+                  </span>
+                  {% if item.dismissal_steps %}
+                  <button type="button"
+                          class="journal-details-close"
+                          data-journal-details-close
+                          aria-label="Закрыть итоговую карточку">×</button>
+                  {% endif %}
+                </div>
               </div>
 
               <dl class="journal-details-grid">
@@ -175,7 +188,7 @@
 
                 <dt>Оператор</dt>
                 <dd>{{ item.operator }}</dd>
-                <dt>Начало операции</dt>
+                <dt>{{ 'Блокировка завершена' if item.dismissal_steps else 'Начало операции' }}</dt>
                 <dd>{{ item.created_at|app_datetime('%d.%m.%Y %H:%M:%S') }}</dd>
                 {% if item.completed_at %}
                 <dt>Завершение операции</dt>
@@ -183,43 +196,63 @@
                 {% endif %}
               </dl>
 
-              {% if item.techexpert_batch_items %}
-              <div class="table-wrap">
-                <table class="blocking-equipment-table">
-                  <thead>
-                    <tr>
-                      <th>Работник</th>
-                      <th>Дата увольнения</th>
-                      <th>Группа AD</th>
-                      <th>Результат</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {% for person in item.techexpert_batch_items %}
-                    <tr>
-                      <td>
-                        <strong>{{ person.fio }}</strong>
-                        {% if person.corporate_email %}
-                        <div class="muted">{{ person.corporate_email }}</div>
-                        {% endif %}
-                        {% if person.ad_login %}
-                        <div><code>{{ person.ad_login }}</code></div>
-                        {% endif %}
-                      </td>
-                      <td>{{ person.dismissal_date.strftime('%d.%m.%Y') }}</td>
-                      <td>{{ person.membership }}</td>
-                      <td>
-                        <span class="status {{ person.result_key }}">
-                          {{ person.result_label }}
+              {% if item.dismissal_system_rows %}
+              <div class="journal-dismissal-section">
+                <h3>Итог по системам</h3>
+                <dl class="journal-dismissal-systems">
+                  {% for row in item.dismissal_system_rows %}
+                  <div class="journal-dismissal-system-row {{ row.state }}">
+                    <dt>{{ row.label }}</dt>
+                    <dd>
+                      <strong>{{ row.value or '–' }}</strong>
+                      {% if row.note %}<span>{{ row.note }}</span>{% endif %}
+                    </dd>
+                  </div>
+                  {% endfor %}
+                </dl>
+              </div>
+              {% endif %}
+
+              {% if item.dismissal_steps %}
+              <div class="journal-dismissal-section">
+                <h3>История объекта</h3>
+                <div class="journal-dismissal-timeline">
+                  {% for step in item.dismissal_steps %}
+                  <article class="journal-dismissal-step">
+                    <div class="journal-dismissal-step-heading">
+                      <div>
+                        <strong>{{ step.action }}</strong>
+                        <span class="muted">
+                          {{ step.timestamp|app_datetime('%d.%m.%Y %H:%M:%S') }}
                         </span>
-                        {% if person.reason %}
-                        <div class="muted">{{ person.reason }}</div>
-                        {% endif %}
-                      </td>
-                    </tr>
+                      </div>
+                      <span class="status {{ step.status_key }}">{{ step.status_label }}</span>
+                    </div>
+                    {% if step.details %}
+                    <dl class="journal-step-details">
+                      {% for label, value in step.details %}
+                      <dt>{{ label }}</dt>
+                      <dd>{{ value or '–' }}</dd>
+                      {% endfor %}
+                      <dt>Оператор</dt>
+                      <dd>{{ step.operator }}</dd>
+                    </dl>
+                    {% endif %}
+                    {% for system in step.blocking_systems %}
+                    <div class="journal-step-system">
+                      <strong>{{ system.label }}</strong>
+                      <span>{{ system.result }}</span>
+                      {% if system.timestamp %}
+                      <span class="muted">{{ system.timestamp|app_datetime('%d.%m.%Y %H:%M:%S') }}</span>
+                      {% endif %}
+                    </div>
                     {% endfor %}
-                  </tbody>
-                </table>
+                    {% if step.error_message %}
+                    <div class="journal-step-error">{{ step.error_message }}</div>
+                    {% endif %}
+                  </article>
+                  {% endfor %}
+                </div>
               </div>
               {% endif %}
 

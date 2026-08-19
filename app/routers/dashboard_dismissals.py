@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timezone
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -22,14 +23,11 @@ from app.models import (
 )
 from app.models_notifications import DismissalEquipmentNotice
 from app.models_synology import SynologyAccountState
-from app.models_techexpert import (
-    TechExpertNotification,
-    TechExpertNotificationBatch,
-    TechExpertNotificationBatchItem,
-)
+from app.models_techexpert import TechExpertNotification
 from app.models_zimbra_lifecycle import ZimbraEmploymentAction
 from app.models_dismissal_lifecycle import (
     ADReactivationAlert,
+    DismissalDetailsSnapshot,
     FinalDismissalBlockRun,
     FinalDismissalBlockTarget,
 )
@@ -140,13 +138,19 @@ def _dismissal_notice_journal_item(
         for item in recipients
         if isinstance(item, dict) and not item.get("sent")
     ]
-    corporate_sent = next(
+    corporate_addresses = [
+        str(item.get("email") or "").strip()
+        for item in recipients
+        if isinstance(item, dict)
+        and item.get("kind") == "corporate"
+        and str(item.get("email") or "").strip()
+    ]
+    personal_address = next(
         (
             str(item.get("email") or "").strip()
             for item in recipients
             if isinstance(item, dict)
-            and item.get("sent")
-            and item.get("kind") == "corporate"
+            and item.get("kind") == "personal"
         ),
         "",
     )
@@ -185,8 +189,8 @@ def _dismissal_notice_journal_item(
         "action": "Уведомление о возврате оборудования",
         "subject": notice.fio or "Работник",
         "login": "",
-        "corporate_email": corporate_sent,
-        "personal_email": "",
+        "corporate_email": ", ".join(corporate_addresses),
+        "personal_email": personal_address,
         "mail_domain": notice.sender_domain,
         "operator": "Система",
         "status_key": status_key,
@@ -254,100 +258,6 @@ def _techexpert_journal_item(
         "error_message": row.last_error,
         "completed_at": row.sent_at or row.cancelled_at,
     }
-
-
-def _techexpert_batch_journal_item(
-    batch: TechExpertNotificationBatch,
-    items: list[TechExpertNotificationBatchItem],
-) -> dict[str, object]:
-    labels = {
-        "processing": ("running", "Обрабатывается"),
-        "sent": ("success", "Отправлено"),
-        "sent_with_exclusions": ("partial", "Отправлено с исключениями"),
-        "failed": ("failed", "Ошибка отправки"),
-        "no_send": ("partial", "Без отправки"),
-    }
-    status_key, status_label = labels.get(
-        batch.status,
-        ("running", batch.status),
-    )
-    membership_labels = {
-        "not_checked": "Не проверено",
-        "member": "Состоит в группе",
-        "not_member": "Не состоит в группе",
-        "error": "Ошибка проверки",
-    }
-    result_labels = {
-        "pending": ("running", "Ожидает проверки"),
-        "ready": ("running", "Подготовлен к отправке"),
-        "sent": ("success", "Включён и отправлен"),
-        "skipped": ("partial", "Исключён: нет в группе"),
-        "cancelled": ("partial", "Исключён: HR отменил"),
-        "deferred": ("partial", "Исключён: отсрочка"),
-        "failed": ("failed", "Ошибка"),
-        "intervention": ("failed", "Требует проверки"),
-    }
-    batch_people = []
-    for item in sorted(
-        items,
-        key=lambda value: (
-            not value.included,
-            str(value.fio or "").lower(),
-            value.id,
-        ),
-    ):
-        result_key, result_label = result_labels.get(
-            item.result,
-            ("running", item.result),
-        )
-        if item.included and item.result == "failed":
-            result_label = "Включён, отправка не удалась"
-        batch_people.append(
-            {
-                "fio": item.fio or item.worker_key,
-                "corporate_email": item.corporate_email,
-                "ad_login": item.ad_login,
-                "dismissal_date": item.dismissal_date,
-                "membership": membership_labels.get(
-                    item.membership_state,
-                    item.membership_state,
-                ),
-                "included": item.included,
-                "result_key": result_key,
-                "result_label": result_label,
-                "reason": item.reason,
-            }
-        )
-
-    details = [
-        ("Организация", batch.source_name or batch.source_id),
-        ("Получатель", batch.recipient_email),
-        ("Тема письма", batch.subject),
-        ("Проверено сотрудников", str(int(batch.total_count or 0))),
-        ("Включено в письмо", str(int(batch.included_count or 0))),
-        ("Исключено", str(int(batch.excluded_count or 0))),
-    ]
-    return {
-        "kind": "dismissal",
-        "record_id": f"ТЭ-{batch.id}",
-        "created_at": batch.created_at,
-        "action": "Пакетное письмо Техэксперта",
-        "subject": (
-            f"Сотрудников в письме: {int(batch.included_count or 0)}"
-        ),
-        "login": "",
-        "corporate_email": batch.recipient_email,
-        "personal_email": "",
-        "mail_domain": batch.source_id,
-        "operator": "Система",
-        "status_key": status_key,
-        "status_label": status_label,
-        "details": details,
-        "techexpert_batch_items": batch_people,
-        "error_message": batch.last_error,
-        "completed_at": batch.sent_at or batch.completed_at,
-    }
-
 
 
 def _final_dismissal_block_journal_item(
@@ -442,7 +352,226 @@ def _final_dismissal_block_journal_item(
         "completed_at": run.completed_at or run.cancelled_at,
     }
 
-def _journal_items(db: Session) -> list[dict[str, object]]:
+
+def _completed_dismissal_journal_item(
+    run: FinalDismissalBlockRun,
+    targets: list[FinalDismissalBlockTarget],
+    *,
+    notice: DismissalEquipmentNotice | None,
+    techexpert_notifications: list[TechExpertNotification],
+    deferral_items: list[dict[str, object]],
+    snapshot: DismissalDetailsSnapshot | None,
+) -> dict[str, object]:
+    """Итоговая карточка одного завершенного объекта увольнения."""
+    block_item = _final_dismissal_block_journal_item(run, targets)
+    components: list[dict[str, object]] = [*deferral_items]
+    if notice is not None:
+        components.append(_dismissal_notice_journal_item(notice))
+    components.extend(
+        _techexpert_journal_item(item)
+        for item in techexpert_notifications
+    )
+    components.append(block_item)
+    components.sort(
+        key=lambda item: item.get("completed_at") or item["created_at"]
+    )
+
+    corporate_email = next(
+        (
+            str(item.get("corporate_email") or "").strip()
+            for item in components
+            if str(item.get("corporate_email") or "").strip()
+        ),
+        "",
+    )
+    personal_email = next(
+        (
+            str(item.get("personal_email") or "").strip()
+            for item in components
+            if str(item.get("personal_email") or "").strip()
+        ),
+        "",
+    )
+    human_operators = [
+        str(item.get("operator") or "").strip()
+        for item in reversed(components)
+        if str(item.get("operator") or "").strip()
+        and str(item.get("operator") or "").strip().casefold()
+        != "система"
+    ]
+    operator = human_operators[0] if human_operators else "Система"
+
+    system_rows = (
+        DismissalDetailsCacheService._valid_rows(snapshot.payload_json)
+        if snapshot is not None
+        else []
+    )
+
+    def system_row(label: str) -> dict[str, str] | None:
+        return next(
+            (row for row in system_rows if row["label"] == label),
+            None,
+        )
+
+    def set_system_row(
+        label: str,
+        value: str,
+        *,
+        state: str,
+        note: str = "",
+    ) -> None:
+        row = system_row(label)
+        if row is None:
+            system_rows.append(
+                {
+                    "label": label,
+                    "value": value,
+                    "state": state,
+                    "note": note,
+                }
+            )
+            return
+        row.update(value=value, state=state, note=note)
+
+    if notice is not None:
+        notice_labels = {
+            "pending": ("Ожидает отправки", "pending"),
+            "partial": ("Отправлено частично", "warning"),
+            "failed": ("Ошибка отправки", "error"),
+            "sent": ("Отправлено", "success"),
+            "cancelled": ("Отменено", "warning"),
+        }
+        notice_value, notice_state = notice_labels.get(
+            notice.status,
+            (notice.status or "Неизвестно", "neutral"),
+        )
+        set_system_row(
+            "Письмо о возврате оборудования",
+            notice_value,
+            state=notice_state,
+            note=notice.last_error,
+        )
+
+    if techexpert_notifications:
+        membership_states = {
+            item.membership_state for item in techexpert_notifications
+        }
+        notification_statuses = {
+            item.status for item in techexpert_notifications
+        }
+        if "member" in membership_states:
+            value = "Есть"
+        elif membership_states == {"not_member"}:
+            value = "Нет"
+        else:
+            value = "Проверено"
+        if notification_statuses <= {"sent", "skipped"}:
+            state = "success"
+            note = "Уведомление обработано"
+        elif notification_statuses.intersection(
+            {"failed", "intervention"}
+        ):
+            state = "error"
+            note = "Требует проверки"
+        else:
+            state = "warning"
+            note = "Обработано частично"
+        set_system_row(
+            "Техэксперт",
+            value,
+            state=state,
+            note=note,
+        )
+    successful_ad = next(
+        (
+            target
+            for target in targets
+            if target.system == "ad"
+            and target.status in {"completed", "already_completed"}
+        ),
+        None,
+    )
+    if successful_ad is not None:
+        set_system_row(
+            "AD",
+            successful_ad.target_identifier or "Учетная запись",
+            state="warning",
+            note="Заблокирован",
+        )
+    set_system_row(
+        "Автоблокировка при увольнении",
+        "Выполнена",
+        state="success",
+    )
+
+    steps = [
+        {
+            "record_id": item["record_id"],
+            "action": item["action"],
+            "status_key": item["status_key"],
+            "status_label": item["status_label"],
+            "operator": item["operator"],
+            "timestamp": item.get("completed_at") or item["created_at"],
+            "details": item.get("details") or [],
+            "blocking_systems": item.get("blocking_systems") or [],
+            "error_message": item.get("error_message") or "",
+        }
+        for item in components
+    ]
+    errors = [
+        f"{item['action']}: {item['error_message']}"
+        for item in components
+        if str(item.get("error_message") or "").strip()
+    ]
+    has_warnings = any(
+        item.get("status_key") in {"failed", "partial", "running"}
+        for item in components
+    )
+
+    return {
+        "kind": "dismissal",
+        "record_id": run.id,
+        "created_at": run.completed_at or run.updated_at,
+        "action": "Увольнение",
+        "subject": run.fio or "Работник",
+        "login": str(block_item.get("login") or ""),
+        "corporate_email": corporate_email,
+        "personal_email": personal_email,
+        "mail_domain": "",
+        "operator": operator,
+        "status_key": "partial" if has_warnings else "success",
+        "status_label": (
+            "Завершено с предупреждениями"
+            if has_warnings
+            else "Завершено"
+        ),
+        "details": [
+            ("ФИО", run.fio),
+            ("Дата увольнения", run.dismissal_date.strftime("%d.%m.%Y")),
+            (
+                "Автоблокировка выполнена",
+                (run.completed_at or run.updated_at).strftime("%d.%m.%Y %H:%M"),
+            ),
+            ("Логин AD", str(block_item.get("login") or "")),
+            ("Корпоративная почта", corporate_email),
+            ("Личная почта", personal_email),
+        ],
+        "dismissal_date": run.dismissal_date,
+        "dismissal_system_rows": system_rows,
+        "dismissal_steps": steps,
+        "blocking_systems": [],
+        "equipment_snapshot": [],
+        "error_message": "\n".join(errors),
+        "completed_at": run.completed_at,
+    }
+
+def _journal_items(
+    db: Session,
+    *,
+    today: date | None = None,
+    timezone_name: str = "UTC",
+) -> list[dict[str, object]]:
+    today = today or date.today()
     provisioning_operations = db.scalars(
         select(ProvisioningOperation)
         .order_by(desc(ProvisioningOperation.created_at))
@@ -480,66 +609,33 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
             [],
         ).append(queue_item)
 
-    deferral_events = db.scalars(
-        select(AuditLog)
-        .where(AuditLog.action == DEFERRAL_ACTION)
-        .order_by(desc(AuditLog.created_at), desc(AuditLog.id))
-        .limit(50)
-    ).all()
-    dismissal_notices = db.scalars(
-        select(DismissalEquipmentNotice)
-        .order_by(
-            desc(DismissalEquipmentNotice.created_at),
-            desc(DismissalEquipmentNotice.id),
-        )
-        .limit(50)
-    ).all()
-    techexpert_batches = db.scalars(
-        select(TechExpertNotificationBatch)
-        .order_by(
-            desc(TechExpertNotificationBatch.created_at),
-            desc(TechExpertNotificationBatch.id),
-        )
-        .limit(50)
-    ).all()
-    techexpert_batch_ids = [item.id for item in techexpert_batches]
-    techexpert_batch_items = (
-        db.scalars(
-            select(TechExpertNotificationBatchItem).where(
-                TechExpertNotificationBatchItem.batch_id.in_(
-                    techexpert_batch_ids
-                )
-            )
-        ).all()
-        if techexpert_batch_ids
-        else []
-    )
-    techexpert_items_by_batch: dict[
-        int,
-        list[TechExpertNotificationBatchItem],
-    ] = {}
-    for item in techexpert_batch_items:
-        techexpert_items_by_batch.setdefault(item.batch_id, []).append(item)
-    batched_notification_ids = {
-        item.notification_id for item in techexpert_batch_items
-    }
-    techexpert_notifications = db.scalars(
-        select(TechExpertNotification)
-        .order_by(
-            desc(TechExpertNotification.created_at),
-            desc(TechExpertNotification.id),
-        )
-        .limit(50)
-    ).all()
-
-    final_block_runs = db.scalars(
+    successful_final_block_runs = db.scalars(
         select(FinalDismissalBlockRun)
+        .where(FinalDismissalBlockRun.status == "success")
         .order_by(
-            desc(FinalDismissalBlockRun.created_at),
+            desc(FinalDismissalBlockRun.completed_at),
             desc(FinalDismissalBlockRun.id),
         )
-        .limit(50)
+        .limit(200)
     ).all()
+    try:
+        local_zone = ZoneInfo(timezone_name)
+    except Exception:
+        local_zone = timezone.utc
+
+    def completed_before_today(run: FinalDismissalBlockRun) -> bool:
+        value = run.completed_at
+        if value is None:
+            return False
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(local_zone).date() < today
+
+    final_block_runs = [
+        run
+        for run in successful_final_block_runs
+        if completed_before_today(run)
+    ][:50]
     final_block_run_ids = [item.id for item in final_block_runs]
     final_block_targets = (
         db.scalars(
@@ -562,6 +658,133 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
             [],
         ).append(target)
 
+    completed_keys = {
+        (item.worker_key, item.dismissal_date)
+        for item in final_block_runs
+    }
+    completed_worker_keys = {
+        item.worker_key for item in final_block_runs
+    }
+    dismissal_notices = (
+        list(
+            db.scalars(
+                select(DismissalEquipmentNotice)
+                .where(
+                    DismissalEquipmentNotice.worker_key.in_(
+                        completed_worker_keys
+                    )
+                )
+                .order_by(
+                    desc(DismissalEquipmentNotice.created_at),
+                    desc(DismissalEquipmentNotice.id),
+                )
+            ).all()
+        )
+        if completed_worker_keys
+        else []
+    )
+    techexpert_notifications = (
+        list(
+            db.scalars(
+                select(TechExpertNotification)
+                .where(
+                    TechExpertNotification.worker_key.in_(
+                        completed_worker_keys
+                    )
+                )
+                .order_by(
+                    desc(TechExpertNotification.created_at),
+                    desc(TechExpertNotification.id),
+                )
+            ).all()
+        )
+        if completed_worker_keys
+        else []
+    )
+    deferral_events = (
+        list(
+            db.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.action == DEFERRAL_ACTION,
+                    AuditLog.target.in_(completed_worker_keys),
+                )
+                .order_by(desc(AuditLog.created_at), desc(AuditLog.id))
+            ).all()
+        )
+        if completed_worker_keys
+        else []
+    )
+    notice_by_key = {
+        (item.worker_key, item.dismissal_date): item
+        for item in dismissal_notices
+        if (item.worker_key, item.dismissal_date) in completed_keys
+    }
+    techexpert_by_key: dict[
+        tuple[str, date],
+        list[TechExpertNotification],
+    ] = {}
+    for item in techexpert_notifications:
+        key = (item.worker_key, item.dismissal_date)
+        if key in completed_keys:
+            techexpert_by_key.setdefault(key, []).append(item)
+
+    deferrals_by_key: dict[
+        tuple[str, date],
+        list[dict[str, object]],
+    ] = {}
+    for event in deferral_events:
+        try:
+            payload = json.loads(event.details or "{}")
+            dismissal_date = date.fromisoformat(
+                str(payload.get("dismissal_date") or "")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        key = (str(event.target or "").strip(), dismissal_date)
+        if key in completed_keys:
+            deferrals_by_key.setdefault(key, []).append(
+                _deferral_journal_item(event)
+            )
+
+    snapshots = (
+        list(
+            db.scalars(
+                select(DismissalDetailsSnapshot).where(
+                    DismissalDetailsSnapshot.worker_key.in_(
+                        completed_worker_keys
+                    )
+                )
+            ).all()
+        )
+        if completed_worker_keys
+        else []
+    )
+    snapshot_by_key = {
+        (item.worker_key, item.dismissal_date): item
+        for item in snapshots
+        if (item.worker_key, item.dismissal_date) in completed_keys
+    }
+    completed_dismissal_items = [
+        _completed_dismissal_journal_item(
+            run,
+            final_targets_by_run.get(run.id, []),
+            notice=notice_by_key.get((run.worker_key, run.dismissal_date)),
+            techexpert_notifications=techexpert_by_key.get(
+                (run.worker_key, run.dismissal_date),
+                [],
+            ),
+            deferral_items=deferrals_by_key.get(
+                (run.worker_key, run.dismissal_date),
+                [],
+            ),
+            snapshot=snapshot_by_key.get(
+                (run.worker_key, run.dismissal_date)
+            ),
+        )
+        for run in final_block_runs
+    ]
+
     items = [
         *(
             _provisioning_journal_item(item)
@@ -582,33 +805,7 @@ def _journal_items(db: Session) -> list[dict[str, object]]:
             _dismissal_journal_item(item)
             for item in dismissal_operations
         ),
-        *(
-            _deferral_journal_item(item)
-            for item in deferral_events
-        ),
-        *(
-            _dismissal_notice_journal_item(item)
-            for item in dismissal_notices
-        ),
-        *(
-            _techexpert_batch_journal_item(
-                item,
-                techexpert_items_by_batch.get(item.id, []),
-            )
-            for item in techexpert_batches
-        ),
-        *(
-            _techexpert_journal_item(item)
-            for item in techexpert_notifications
-            if item.id not in batched_notification_ids
-        ),
-        *(
-            _final_dismissal_block_journal_item(
-                item,
-                final_targets_by_run.get(item.id, []),
-            )
-            for item in final_block_runs
-        ),
+        *completed_dismissal_items,
     ]
     items.sort(key=lambda item: item["created_at"], reverse=True)
     return items[:50]
@@ -622,11 +819,10 @@ def dashboard(
 ):
     get_current_user(request)
     dismissal_error = request.query_params.get("dismissal_error", "")
+    upcoming_service = UpcomingDismissalService(settings, db)
+    dashboard_today = upcoming_service.today
     try:
-        upcoming = UpcomingDismissalService(
-            settings,
-            db,
-        ).list_upcoming(limit=20)
+        upcoming = upcoming_service.list_upcoming(limit=20)
     except Exception as exc:
         db.rollback()
         upcoming = []
@@ -690,7 +886,11 @@ def dashboard(
         "dashboard.html",
         _context(
             request,
-            journal_items=_journal_items(db),
+            journal_items=_journal_items(
+                db,
+                today=dashboard_today,
+                timezone_name=settings.app_timezone,
+            ),
             ad_reactivation_alerts=ad_reactivation_alerts,
             zimbra_attention_actions=zimbra_attention_actions,
             synology_attention_accounts=synology_attention_accounts,

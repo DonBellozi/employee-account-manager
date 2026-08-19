@@ -104,12 +104,23 @@
     if (details) details.open = false;
   });
 
+  document.addEventListener('click', event => {
+    const close = event.target.closest('[data-journal-details-close]');
+    if (!close) return;
+    const details = close.closest('details.journal-dismissal-details');
+    if (details) details.open = false;
+  });
+
   document.addEventListener('keydown', event => {
     if (event.key !== 'Escape') return;
     const details = host.querySelector(
       'details[data-upcoming-dismissal-details][open]'
     );
     if (details) details.open = false;
+    const journalDetails = document.querySelector(
+      'details.journal-dismissal-details[open]'
+    );
+    if (journalDetails) journalDetails.open = false;
   });
 
   host.addEventListener('submit', async event => {

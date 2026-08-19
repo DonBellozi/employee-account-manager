@@ -12,6 +12,10 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import AuditLog, HRSourceRecord
 from app.models_dismissals import DismissalDeferral
+from app.models_dismissal_lifecycle import (
+    FinalDismissalAutomationState,
+    FinalDismissalBlockRun,
+)
 from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
 from app.services.hr_employment import sync_workbook_employment
 from app.services.onec_xlsx import parse_onec_xlsx
@@ -39,6 +43,24 @@ class UpcomingDismissalService:
     @property
     def today(self) -> date:
         return datetime.now(ZoneInfo(self.settings.app_timezone)).date()
+
+    def _completed_before_today(
+        self,
+        run: FinalDismissalBlockRun | None,
+        today: date,
+    ) -> bool:
+        if (
+            run is None
+            or run.status != "success"
+            or run.completed_at is None
+        ):
+            return False
+        completed_at = run.completed_at
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=timezone.utc)
+        return completed_at.astimezone(
+            ZoneInfo(self.settings.app_timezone)
+        ).date() < today
 
     def ensure_primary_employment_state(self) -> None:
         """Однократный backfill для основного источника после установки патча.
@@ -177,6 +199,22 @@ class UpcomingDismissalService:
             (item.worker_key, item.dismissal_date): item
             for item in deferrals
         }
+        block_runs = list(
+            self.db.scalars(
+                select(FinalDismissalBlockRun).where(
+                    FinalDismissalBlockRun.worker_key.in_(worker_keys)
+                )
+            ).all()
+        )
+        block_run_by_pair = {
+            (item.worker_key, item.dismissal_date): item
+            for item in block_runs
+        }
+        automation_state = self.db.scalar(
+            select(FinalDismissalAutomationState)
+            .order_by(FinalDismissalAutomationState.id)
+            .limit(1)
+        )
         source_names = self._source_names()
         today = self.today
         candidates: list[dict] = []
@@ -199,10 +237,10 @@ class UpcomingDismissalService:
             deferral = deferral_by_pair.get((worker_key, final_date))
             deferred_until = deferral.deferred_until if deferral else None
 
-            # В интерфейсе старые завершенные увольнения не показываем.
-            # Автоматическая блокировка запрашивает include_expired=True,
-            # потому что временная ошибка AD/Zimbra может пережить дату
-            # увольнения и должна безопасно повториться позднее.
+            # Объект остается в «Ближайших увольнениях», пока не завершилась
+            # автоблокировка. Успешный объект исчезает только на следующий
+            # день и затем показывается одной итоговой строкой в журнале.
+            block_run = block_run_by_pair.get((worker_key, final_date))
             if (
                 not include_expired
                 and final_date < today
@@ -211,7 +249,19 @@ class UpcomingDismissalService:
                     or deferred_until < today
                 )
             ):
-                continue
+                completed_before_today = self._completed_before_today(
+                    block_run,
+                    today,
+                )
+                historical_before_automation = bool(
+                    block_run is None
+                    and (
+                        automation_state is None
+                        or final_date < automation_state.activated_on
+                    )
+                )
+                if completed_before_today or historical_before_automation:
+                    continue
 
             worker_records = records_by_worker.get(worker_key, [])
             preferred_records = sorted(
@@ -309,6 +359,16 @@ class UpcomingDismissalService:
                     ),
                     "deferred_until": deferred_until,
                     "effective_block_date": effective_block_date,
+                    "blocking_completed": bool(
+                        block_run is not None
+                        and block_run.status == "success"
+                    ),
+                    "blocking_completed_at": (
+                        block_run.completed_at
+                        if block_run is not None
+                        and block_run.status == "success"
+                        else None
+                    ),
                     "deferral_count": (
                         int(deferral.deferral_count or 0)
                         if deferral is not None
