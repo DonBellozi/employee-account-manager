@@ -66,6 +66,9 @@ MASS_DISABLE_ACK_TTL_MINUTES = 60
 
 DISABLED_BY_EMPLOYMENT = "employment_dismissal"
 DISABLED_BY_LIFECYCLE = "lifecycle_expiry"
+# Старый маркер хранится только для очистки записей, созданных предыдущей
+# версией. Возврат сотрудника в HR больше не требует восстановления локальной
+# DSM-учетки: при переходе на AD она штатно остается отключенной.
 ATTENTION_HR_ACTIVE_AFTER_DISABLE = "hr_active_after_dsm_disable"
 
 CLASSIFICATION_LABELS = {
@@ -684,36 +687,7 @@ class SynologyLifecycleService:
                 "Автоматические действия остановлены до ручной проверки."
             )
 
-        hr_returned_after_disable = bool(
-            classification == CLASS_INTERNAL_ACTIVE
-            and not account.is_active
-            and (
-                row.disabled_reason_code == DISABLED_BY_EMPLOYMENT
-                or (
-                    row.last_action == "disable"
-                    and previous_classification == CLASS_INTERNAL_DISMISSED
-                )
-            )
-        )
-        if hr_returned_after_disable:
-            row.disabled_reason_code = DISABLED_BY_EMPLOYMENT
-            if row.attention_state != ATTENTION_HR_ACTIVE_AFTER_DISABLE:
-                row.attention_at = now
-                self._audit(
-                    action="synology_hr_reactivation_attention",
-                    target=account.login,
-                    result="warning",
-                    details=(
-                        f"worker_key={row.worker_key or '-'}; "
-                        f"email={row.email or '-'}; automatic_restore=false"
-                    ),
-                )
-            row.attention_state = ATTENTION_HR_ACTIVE_AFTER_DISABLE
-            row.attention_details = (
-                "Сотрудник снова активен в организации, но DSM-учетка уже "
-                "заблокирована. Автоматическое включение запрещено."
-            )
-        elif row.attention_state == ATTENTION_HR_ACTIVE_AFTER_DISABLE:
+        if row.attention_state == ATTENTION_HR_ACTIVE_AFTER_DISABLE:
             row.attention_state = ""
             row.attention_details = ""
             row.attention_at = None

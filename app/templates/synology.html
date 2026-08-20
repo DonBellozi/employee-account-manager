@@ -282,9 +282,6 @@
         </td>
         <td>
           <strong>{{ item.action_label }}</strong>
-          {% if row.attention_state == 'hr_active_after_dsm_disable' %}
-            <div class="registry-error">Сотрудник снова активен. Автоматическое включение запрещено.</div>
-          {% endif %}
           {% if row.desired_reason %}<div class="journal-object-meta">{{ row.desired_reason }}</div>{% endif %}
           {% if row.last_action_at %}<div class="journal-object-meta">последнее действие: {{ row.last_action or '–' }} {{ row.last_action_at|app_datetime('%d.%m.%Y %H:%M') }}</div>{% endif %}
         </td>
@@ -332,9 +329,6 @@
         <td>
           {{ row.email or '–' }}
           {% if row.description %}<div class="journal-object-meta">{{ row.description }}</div>{% endif %}
-          {% if row.attention_state == 'hr_active_after_dsm_disable' %}
-            <div class="registry-error">HR снова активен — требуется решение оператора</div>
-          {% endif %}
         </td>
         <td>{{ item.classification_label }}</td>
         <td>{{ row.last_action_at|app_datetime('%d.%m.%Y %H:%M') if row.last_action_at else '–' }}</td>

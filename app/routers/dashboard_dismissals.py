@@ -22,7 +22,6 @@ from app.models import (
     ProvisioningOperation,
 )
 from app.models_notifications import DismissalEquipmentNotice
-from app.models_synology import SynologyAccountState
 from app.models_techexpert import TechExpertNotification
 from app.models_zimbra_lifecycle import ZimbraEmploymentAction
 from app.models_dismissal_lifecycle import (
@@ -850,19 +849,6 @@ def dashboard(
             )
         ).all()
     )
-    synology_attention_accounts = list(
-        db.scalars(
-            select(SynologyAccountState)
-            .where(
-                SynologyAccountState.attention_state
-                == "hr_active_after_dsm_disable"
-            )
-            .order_by(
-                desc(SynologyAccountState.attention_at),
-                desc(SynologyAccountState.id),
-            )
-        ).all()
-    )
     techexpert_attention_notifications = list(
         db.scalars(
             select(TechExpertNotification)
@@ -893,7 +879,6 @@ def dashboard(
             ),
             ad_reactivation_alerts=ad_reactivation_alerts,
             zimbra_attention_actions=zimbra_attention_actions,
-            synology_attention_accounts=synology_attention_accounts,
             techexpert_attention_notifications=(
                 techexpert_attention_notifications
             ),
