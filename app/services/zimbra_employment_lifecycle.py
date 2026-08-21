@@ -42,6 +42,11 @@ def address_domain(value: str) -> str:
     return address.rsplit("@", 1)[1] if address.count("@") == 1 else ""
 
 
+def address_login(value: str) -> str:
+    address = normalize(value)
+    return address.split("@", 1)[0] if address.count("@") == 1 else ""
+
+
 @dataclass(frozen=True)
 class ZimbraEmploymentSpec:
     plan_key: str
@@ -174,6 +179,7 @@ class ZimbraEmploymentLifecycleService:
         identity: ZimbraAccountIdentity,
         states: dict[str, HREmploymentState],
         deferrals: dict[tuple[str, date], date],
+        address_sources: dict[str, str] | None = None,
     ) -> list[ZimbraEmploymentSpec]:
         addresses = tuple(dict.fromkeys(normalize(v) for v in identity.addresses if v))
         primary = normalize(identity.primary_email)
@@ -183,8 +189,17 @@ class ZimbraEmploymentLifecycleService:
         due_by_address: dict[str, HREmploymentState] = {}
         active_addresses: list[str] = []
         unknown_addresses: list[str] = []
+        address_sources = {
+            normalize(address): normalize(source_id)
+            for address, source_id in (address_sources or {}).items()
+            if normalize(address) and normalize(source_id)
+        }
         for address in addresses:
-            state = states.get(address_domain(address))
+            source_id = address_sources.get(
+                address,
+                address_domain(address),
+            )
+            state = states.get(source_id)
             if state is None:
                 unknown_addresses.append(address)
             elif self._due(state, deferrals):
@@ -267,6 +282,108 @@ class ZimbraEmploymentLifecycleService:
             )
         return result
 
+    @staticmethod
+    def _address_sources_for_mailbox(
+        *,
+        identity: ZimbraAccountIdentity,
+        mappings: list[EmailLoginMapping],
+        states: dict[str, HREmploymentState],
+        records: list[HRSourceRecord],
+    ) -> dict[str, str]:
+        """Связать legacy-адреса Zimbra с текущими кадровыми доменами.
+
+        При переименовании домена source_id уже новый, а primary/alias в
+        Zimbra может остаться старым. Стабильный zimbraId и явное
+        сопоставление позволяют считать эти адреса одной занятостью.
+        """
+
+        state_sources = set(states)
+        result: dict[str, str] = {}
+        logins_by_source: dict[str, set[str]] = {}
+
+        records_by_source: dict[str, list[HRSourceRecord]] = {}
+        for record in records:
+            source_id = normalize(record.source_id)
+            if source_id in state_sources:
+                records_by_source.setdefault(source_id, []).append(record)
+
+        for mapping in mappings:
+            mapping_addresses = {
+                normalize(mapping.source_email),
+                normalize(mapping.zimbra_email),
+            }
+            mapping_addresses.discard("")
+            candidates = [
+                normalize(mapping.source_domain),
+                *[address_domain(value) for value in mapping_addresses],
+            ]
+            source_id = next(
+                (value for value in candidates if value in state_sources),
+                "",
+            )
+
+            if not source_id:
+                mapping_logins = {
+                    address_login(value)
+                    for value in mapping_addresses
+                    if address_login(value)
+                }
+                matched_sources = {
+                    candidate_source
+                    for candidate_source, source_records in records_by_source.items()
+                    for record in source_records
+                    if (
+                        normalize(record.corporate_email) in mapping_addresses
+                        or address_login(record.corporate_email)
+                        in mapping_logins
+                    )
+                }
+                if len(matched_sources) == 1:
+                    source_id = next(iter(matched_sources))
+
+            # Для единственной занятости и единственного физического ящика
+            # это безопасный fallback миграции домена. При нескольких
+            # организациях остаются только точные связи выше.
+            if not source_id and len(state_sources) == 1 and len(mappings) == 1:
+                source_id = next(iter(state_sources))
+            if not source_id:
+                continue
+
+            for address in mapping_addresses:
+                result[address] = source_id
+                login = address_login(address)
+                if login:
+                    logins_by_source.setdefault(source_id, set()).add(login)
+            for record in records_by_source.get(source_id, []):
+                address = normalize(record.corporate_email)
+                if address:
+                    result[address] = source_id
+                    login = address_login(address)
+                    if login:
+                        logins_by_source.setdefault(source_id, set()).add(login)
+
+        identity_addresses = {
+            normalize(identity.primary_email),
+            *(normalize(value) for value in identity.addresses),
+        }
+        identity_addresses.discard("")
+        for address in identity_addresses:
+            if address in result:
+                continue
+            domain = address_domain(address)
+            if domain in state_sources:
+                result[address] = domain
+                continue
+            login = address_login(address)
+            matching_sources = {
+                source_id
+                for source_id, source_logins in logins_by_source.items()
+                if login and login in source_logins
+            }
+            if len(matching_sources) == 1:
+                result[address] = next(iter(matching_sources))
+        return result
+
     def _current_specs(self) -> list[ZimbraEmploymentSpec]:
         mappings = list(
             self.db.scalars(
@@ -301,6 +418,9 @@ class ZimbraEmploymentLifecycleService:
                 normalize(state.source_id)
             ] = state
         fio_by_worker: dict[str, str] = {}
+        records_by_worker: dict[str, list[HRSourceRecord]] = {}
+        for record in records:
+            records_by_worker.setdefault(record.worker_key, []).append(record)
         for row in [*states, *records]:
             if row.worker_key not in fio_by_worker and str(row.fio or "").strip():
                 fio_by_worker[row.worker_key] = str(row.fio).strip()
@@ -313,17 +433,24 @@ class ZimbraEmploymentLifecycleService:
 
         deferrals = self._deferrals()
         result: list[ZimbraEmploymentSpec] = []
-        for (worker_key, zimbra_id), _ in groups.items():
+        for (worker_key, zimbra_id), group_mappings in groups.items():
             identity = identities.get(zimbra_id)
             if identity is None:
                 continue
+            worker_states = states_by_worker.get(worker_key, {})
             result.extend(
                 self._specs_for_mailbox(
                     worker_key=worker_key,
                     fio=fio_by_worker.get(worker_key, ""),
                     identity=identity,
-                    states=states_by_worker.get(worker_key, {}),
+                    states=worker_states,
                     deferrals=deferrals,
+                    address_sources=self._address_sources_for_mailbox(
+                        identity=identity,
+                        mappings=group_mappings,
+                        states=worker_states,
+                        records=records_by_worker.get(worker_key, []),
+                    ),
                 )
             )
         return result
