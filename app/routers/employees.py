@@ -25,6 +25,7 @@ from app.time_utils import register_datetime_filters
 from app.security import get_current_user, get_or_create_csrf, validate_csrf
 from app.services.ad import ActiveDirectoryService
 from app.services.blocking import BlockingService
+from app.services.employee_arrivals import EmployeeArrivalService
 from app.services.hr_registry import HRRegistryService
 from app.services.names import build_login_candidates, parse_two_line_input, validate_person_name
 from app.services.provisioning import ProvisioningInput, ProvisioningService
@@ -573,18 +574,79 @@ def create_ad_for_existing_mailbox(
 
 
 @router.get("/employees/new")
-def new_employee(request: Request, fio: str = "", settings: Settings = Depends(get_settings)):
+def new_employee(
+    request: Request,
+    fio: str = "",
+    arrival_event_ids: str = "",
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    domains = _domains(settings)
+    if arrival_event_ids.strip():
+        try:
+            arrival = EmployeeArrivalService(db).registration_context(
+                arrival_event_ids
+            )
+            raw_input = str(arrival["fio"])
+            if arrival["personal_email"]:
+                raw_input += f"\n{arrival['personal_email']}"
+            parsed = parse_two_line_input(raw_input)
+            candidates = build_login_candidates(
+                parsed.last_name,
+                parsed.first_name,
+                parsed.middle_name,
+            )[:MAX_BACKGROUND_CANDIDATES]
+            if not candidates:
+                raise RuntimeError("Не удалось сформировать логин из ФИО")
+            preferred_domain = str(arrival["preferred_domain"])
+            return templates.TemplateResponse(
+                request,
+                "employee_form.html",
+                _context(
+                    request,
+                    domains=domains,
+                    parsed=parsed,
+                    candidates=candidates,
+                    selected_login=candidates[0],
+                    selected_domain=(
+                        preferred_domain if preferred_domain in domains else ""
+                    ),
+                    error="",
+                    raw_input=raw_input,
+                    domain_mode=settings.zimbra_domain_mode,
+                    no_email_confirmed=False,
+                    arrival_event_ids=arrival["event_ids_value"],
+                ),
+            )
+        except Exception as exc:
+            db.rollback()
+            return templates.TemplateResponse(
+                request,
+                "employee_form.html",
+                _context(
+                    request,
+                    domains=domains,
+                    parsed=None,
+                    candidates=[],
+                    error=str(exc),
+                    raw_input=fio.strip(),
+                    domain_mode=settings.zimbra_domain_mode,
+                    arrival_event_ids="",
+                ),
+                status_code=400,
+            )
     return templates.TemplateResponse(
         request,
         "employee_form.html",
         _context(
             request,
-            domains=_domains(settings),
+            domains=domains,
             parsed=None,
             candidates=[],
             error="",
             raw_input=fio.strip(),
             domain_mode=settings.zimbra_domain_mode,
+            arrival_event_ids="",
         ),
     )
 
@@ -593,6 +655,7 @@ def new_employee(request: Request, fio: str = "", settings: Settings = Depends(g
 def parse_employee(
     request: Request,
     raw_input: str = Form(...),
+    arrival_event_ids: str = Form(""),
     confirm_no_personal_email: str = Form("false"),
     csrf: str = Form(...),
     settings: Settings = Depends(get_settings),
@@ -635,6 +698,7 @@ def parse_employee(
                 raw_input=raw_input,
                 domain_mode=settings.zimbra_domain_mode,
                 no_email_confirmed=no_email_confirmed,
+                arrival_event_ids=arrival_event_ids,
             ),
         )
     except Exception as exc:
@@ -649,6 +713,7 @@ def parse_employee(
                 error=str(exc),
                 raw_input=raw_input,
                 domain_mode=settings.zimbra_domain_mode,
+                arrival_event_ids=arrival_event_ids,
             ),
             status_code=400,
         )
@@ -798,6 +863,7 @@ def provision_employee(
     confirm_no_personal_email: str = Form("false"),
     login: str = Form(...),
     mail_domain: str = Form(...),
+    arrival_event_ids: str = Form(""),
     csrf: str = Form(...),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -809,6 +875,13 @@ def provision_employee(
 
     try:
         from email_validator import EmailNotValidError, validate_email
+
+        arrival_service = EmployeeArrivalService(db)
+        if arrival_event_ids.strip():
+            # Повторно читаем кадровое состояние непосредственно перед
+            # внешними действиями: исчезнувший или уже обработанный эпизод
+            # не должен запустить создание учетных записей.
+            arrival_service.registration_context(arrival_event_ids)
 
         if not LOGIN_RE.fullmatch(login):
             raise ValueError("Логин должен начинаться с латинской буквы и содержать не более 20 символов")
@@ -850,6 +923,12 @@ def provision_employee(
             mail_domain=mail_domain,
         )
         credentials = ProvisioningService(settings).provision(db, user.username, data)
+        if arrival_event_ids.strip() and credentials.status in {"success", "partial"}:
+            arrival_service.mark_registered(
+                arrival_event_ids,
+                operator=user.username,
+                provisioning_operation_id=credentials.operation_id,
+            )
         response = templates.TemplateResponse(
             request,
             "result.html",
@@ -885,6 +964,7 @@ def provision_employee(
                 no_email_confirmed=(
                     confirm_no_personal_email.strip().lower() == "true"
                 ),
+                arrival_event_ids=arrival_event_ids,
             ),
             status_code=400,
         )

@@ -19,6 +19,10 @@ from app.config import Settings
 from app.models import HRPerson, HRSourceRecord, OneCImportRun
 from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
 from app.services.hr_employment import capture_dismissal_event
+from app.services.employee_arrivals import (
+    begin_arrival_source_sync,
+    sync_employment_arrival,
+)
 from app.services.hr_registry_multisource import MultiSourceHRRegistryViewService
 from app.services.onec_imap import OneCAttachment, OneCImapService
 from app.services.onec_xlsx import (
@@ -402,6 +406,12 @@ class OneCAdditionalImportService:
                 HRSourceRecord.source_id == source_id
             )
         ).all()
+        arrival_baseline = begin_arrival_source_sync(
+            self.db,
+            source_id=source_id,
+            source_name=self.source.name,
+            has_existing_records=bool(records),
+        )
         by_worker = {row.worker_key: row for row in records}
 
         employment_rows = self.db.scalars(
@@ -432,6 +442,7 @@ class OneCAdditionalImportService:
 
         for worker in workbook.workers:
             person = people_by_worker.get(worker.worker_key)
+            is_new_person = person is None
             if person is None:
                 person = HRPerson(
                     worker_key=worker.worker_key,
@@ -459,6 +470,7 @@ class OneCAdditionalImportService:
             )
 
             record = by_worker.get(worker.worker_key)
+            episode_started = record is None or not record.is_present
             if record is None:
                 record = HRSourceRecord(
                     worker_key=worker.worker_key,
@@ -485,6 +497,19 @@ class OneCAdditionalImportService:
                 record.placements_json = placements_json
                 record.is_present = True
                 record.last_seen_at = now
+
+            sync_employment_arrival(
+                self.db,
+                worker_key=worker.worker_key,
+                source_id=source_id,
+                source_name=self.source.name,
+                fio=worker.fio,
+                is_present=True,
+                episode_started=episode_started,
+                is_new_person=is_new_person,
+                baseline=arrival_baseline,
+                seen_at=now,
+            )
 
             if worker.email:
                 if record.zimbra_status == "no_email":
@@ -549,6 +574,16 @@ class OneCAdditionalImportService:
                 continue
             if record.is_present:
                 record.is_present = False
+            sync_employment_arrival(
+                self.db,
+                worker_key=worker_key,
+                source_id=source_id,
+                source_name=self.source.name,
+                fio=record.fio,
+                is_present=False,
+                episode_started=False,
+                seen_at=now,
+            )
             employment = employment_by_worker.get(worker_key)
             if employment is None:
                 employment = HREmploymentState(

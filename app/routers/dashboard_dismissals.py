@@ -46,6 +46,10 @@ from app.services.upcoming_dismissals import (
     UpcomingDismissalService,
 )
 from app.services.dismissal_details_cache import DismissalDetailsCacheService
+from app.services.employee_arrivals import (
+    NOT_REQUIRED_ACTION,
+    EmployeeArrivalService,
+)
 from app.time_utils import register_datetime_filters
 
 
@@ -201,6 +205,42 @@ def _dismissal_notice_journal_item(
         "details": details,
         "error_message": notice.last_error,
         "completed_at": notice.sent_at or notice.cancelled_at,
+    }
+
+
+def _arrival_not_required_journal_item(event: AuditLog) -> dict[str, object]:
+    try:
+        payload = json.loads(event.details or "{}")
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    organizations = [
+        str(item.get("source_name") or item.get("source_id") or "").strip()
+        for item in payload.get("organizations") or []
+        if isinstance(item, dict)
+    ]
+    fio = str(payload.get("fio") or event.target or "Работник")
+    return {
+        "kind": "arrival",
+        "record_id": event.id,
+        "created_at": event.created_at,
+        "action": "Регистрация не требуется",
+        "subject": fio,
+        "login": "",
+        "corporate_email": "",
+        "personal_email": "",
+        "mail_domain": "",
+        "operator": event.actor,
+        "status_key": "success",
+        "status_label": "Не требуется",
+        "details": [
+            ("ФИО", fio),
+            ("Организации", ", ".join(value for value in organizations if value)),
+            ("Область решения", "Только текущий эпизод занятости"),
+        ],
+        "error_message": "",
+        "completed_at": event.created_at,
     }
 
 
@@ -791,6 +831,12 @@ def _journal_items(
         )
         .limit(200)
     ).all()
+    arrival_not_required_events = db.scalars(
+        select(AuditLog)
+        .where(AuditLog.action == NOT_REQUIRED_ACTION)
+        .order_by(desc(AuditLog.created_at), desc(AuditLog.id))
+        .limit(50)
+    ).all()
     try:
         local_zone = ZoneInfo(timezone_name)
     except Exception:
@@ -1107,6 +1153,10 @@ def _journal_items(
             _dismissal_journal_item(item)
             for item in dismissal_operations
         ),
+        *(
+            _arrival_not_required_journal_item(item)
+            for item in arrival_not_required_events
+        ),
         *completed_dismissal_items,
         *organization_dismissal_items,
     ]
@@ -1130,6 +1180,14 @@ def dashboard(
         db.rollback()
         upcoming = []
         dismissal_error = str(exc)
+
+    employee_error = request.query_params.get("employee_error", "")
+    try:
+        new_employee_groups = EmployeeArrivalService(db).list_pending(limit=50)
+    except Exception as exc:
+        db.rollback()
+        new_employee_groups = []
+        employee_error = str(exc)
 
     ad_reactivation_alerts = list(
         db.scalars(
@@ -1186,6 +1244,9 @@ def dashboard(
             techexpert_attention_notifications=(
                 techexpert_attention_notifications
             ),
+            new_employee_groups=new_employee_groups,
+            employee_message=request.query_params.get("employee_message", ""),
+            employee_error=employee_error,
             upcoming_dismissals=upcoming,
             dismissal_message=request.query_params.get(
                 "dismissal_message",
@@ -1228,6 +1289,33 @@ def upcoming_dismissals_fragment(
             dismissal_error=dismissal_error,
         ),
     )
+
+
+@router.post("/employees/arrivals/not-required")
+def mark_employee_arrival_not_required(
+    request: Request,
+    arrival_event_ids: str = Form(...),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf)
+    user = get_current_user(request)
+    try:
+        result = EmployeeArrivalService(db).mark_not_required(
+            arrival_event_ids,
+            operator=user.username,
+        )
+        message = f"Для {result['fio']} регистрация отмечена как ненужная"
+        return RedirectResponse(
+            f"/?employee_message={quote_plus(message)}#new-employees",
+            status_code=303,
+        )
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(
+            f"/?employee_error={quote_plus(str(exc))}#new-employees",
+            status_code=303,
+        )
 
 
 @router.get("/dismissals/upcoming/details")

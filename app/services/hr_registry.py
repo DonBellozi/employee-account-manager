@@ -19,6 +19,10 @@ from app.models_onec_sources import HREmploymentState
 from app.services.ad import ActiveDirectoryService
 from app.services.email_login_mapping import EmailLoginMappingService
 from app.services.hr_employment import sync_workbook_employment
+from app.services.employee_arrivals import (
+    begin_arrival_source_sync,
+    sync_employment_arrival,
+)
 from app.services.onec_xlsx import OneCWorkbook
 from app.services.zimbra import ZimbraService
 
@@ -456,6 +460,12 @@ class HRRegistryService:
                 HRSourceRecord.source_id == source_id
             )
         ).all()
+        arrival_baseline = begin_arrival_source_sync(
+            self.db,
+            source_id=source_id,
+            source_name=self.source_name,
+            has_existing_records=bool(source_records),
+        )
         existing_records = {
             record.worker_key: record
             for record in source_records
@@ -481,6 +491,7 @@ class HRRegistryService:
 
         for worker in workbook.workers:
             person = people_by_key.get(worker.worker_key)
+            is_new_person = person is None
             if person is None:
                 person = HRPerson(
                     worker_key=worker.worker_key,
@@ -508,6 +519,7 @@ class HRRegistryService:
             )
 
             record = existing_records.get(worker.worker_key)
+            episode_started = record is None or not record.is_present
             if record is None:
                 record = HRSourceRecord(
                     worker_key=worker.worker_key,
@@ -563,10 +575,33 @@ class HRRegistryService:
                 record.is_present = True
                 record.last_seen_at = now
 
+            sync_employment_arrival(
+                self.db,
+                worker_key=worker.worker_key,
+                source_id=source_id,
+                source_name=self.source_name,
+                fio=worker.fio,
+                is_present=True,
+                episode_started=episode_started,
+                is_new_person=is_new_person,
+                baseline=arrival_baseline,
+                seen_at=now,
+            )
+
         missing = 0
         for key, record in existing_records.items():
             if key not in current_keys and record.is_present:
                 record.is_present = False
+                sync_employment_arrival(
+                    self.db,
+                    worker_key=record.worker_key,
+                    source_id=source_id,
+                    source_name=self.source_name,
+                    fio=record.fio,
+                    is_present=False,
+                    episode_started=False,
+                    seen_at=now,
+                )
                 missing += 1
 
         employment = sync_workbook_employment(
@@ -574,7 +609,7 @@ class HRRegistryService:
             workbook=workbook,
             source_id=source_id,
             source_name=self.source_name,
-            timezone_name=self.settings.app_timezone,
+            timezone_name=getattr(self.settings, "app_timezone", "UTC"),
         )
 
         self.db.commit()

@@ -18,6 +18,75 @@
 </div>
 {% endif %}
 
+{% if employee_message %}<div class="alert success">{{ employee_message }}</div>{% endif %}
+{% if employee_error %}<div class="alert error">{{ employee_error }}</div>{% endif %}
+
+{% if new_employee_groups %}
+<section class="card new-employees-card" id="new-employees">
+  <div class="new-employees-heading">
+    <div>
+      <div class="new-employees-title-row">
+        <h2>Новые сотрудники</h2>
+        <span class="new-employees-count">{{ new_employee_groups|length }}</span>
+      </div>
+      <p class="muted">
+        Новые появления в кадровых выгрузках. Перед регистрацией система еще раз
+        проверит учетные записи в AD и Zimbra.
+      </p>
+    </div>
+  </div>
+
+  <div class="new-employees-list">
+    {% for item in new_employee_groups %}
+    <article class="new-employee-item">
+      <div class="new-employee-main">
+        <div class="new-employee-name-row">
+          <strong>{{ item.fio }}</strong>
+          <span class="new-employee-kind">
+            {{ 'Новый сотрудник' if item.kind == 'employee' else 'Новая занятость' }}
+          </span>
+        </div>
+
+        <div class="new-employee-organizations">
+          {% for organization in item.organizations %}
+          <span>{{ organization.source_name }}</span>
+          {% endfor %}
+        </div>
+
+        {% if item.positions %}
+        <div class="new-employee-positions">
+          {% for position in item.positions %}<span>{{ position }}</span>{% endfor %}
+        </div>
+        {% endif %}
+
+        {% if item.corporate_emails or item.personal_email %}
+        <div class="new-employee-contacts muted">
+          {% if item.corporate_emails %}{{ item.corporate_emails|join(', ') }}{% endif %}
+          {% if item.personal_email %}<span>{{ item.personal_email }}</span>{% endif %}
+        </div>
+        {% endif %}
+      </div>
+
+      <div class="new-employee-actions">
+        <a class="button"
+           href="{{ item.registration_url }}"
+           data-workspace-modal
+           data-workspace-title="Регистрация работника"
+           data-workspace-refresh="true">Зарегистрировать</a>
+        <form method="post" action="/employees/arrivals/not-required" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="arrival_event_ids" value="{{ item.event_ids_value }}">
+          <button class="button secondary"
+                  type="submit"
+                  title="Скрыть только этот эпизод занятости. При повторном появлении уведомление возникнет снова.">Не требуется</button>
+        </form>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <section class="card upcoming-dismissals-card">
   <div class="upcoming-dismissals-heading">
     <div>

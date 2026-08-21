@@ -9,6 +9,7 @@
   <h2>Введите данные работника</h2>
   <form method="post" action="/employees/parse" class="stack" id="parse-form">
     <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids|default('') }}">
     <input type="hidden"
            name="confirm_no_personal_email"
            id="parse-confirm-no-personal-email"
@@ -60,6 +61,7 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
 {% else %}
 <form method="post" action="/employees/provision" class="stack" id="provision-form">
   <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids|default('') }}">
   <input type="hidden"
          name="confirm_no_personal_email"
          id="confirm-no-personal-email"

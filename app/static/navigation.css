@@ -287,6 +287,141 @@
 }
 
 /* Ближайшие увольнения на главной */
+.new-employees-card {
+  border-color: #bfd7ef;
+  background: linear-gradient(135deg, #f7fbff 0%, #eef6fd 100%);
+}
+
+.new-employees-heading,
+.new-employees-title-row,
+.new-employee-name-row,
+.new-employee-actions {
+  display: flex;
+  align-items: center;
+}
+
+.new-employees-heading {
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 14px;
+}
+
+.new-employees-heading h2,
+.new-employees-heading p {
+  margin: 0;
+}
+
+.new-employees-title-row {
+  gap: 10px;
+  margin-bottom: 5px;
+}
+
+.new-employees-count {
+  display: inline-flex;
+  min-width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #2f6fae;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.new-employees-list {
+  display: grid;
+  gap: 10px;
+}
+
+.new-employee-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  padding: 15px 16px;
+  border: 1px solid #d7e6f4;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.new-employee-main {
+  min-width: 0;
+}
+
+.new-employee-name-row {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.new-employee-name-row > strong {
+  font-size: 16px;
+}
+
+.new-employee-kind {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #e7f2fc;
+  color: #245f95;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.new-employee-organizations,
+.new-employee-positions,
+.new-employee-contacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.new-employee-organizations span {
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #edf3f8;
+  color: #34495e;
+  font-size: 13px;
+}
+
+.new-employee-positions {
+  margin-top: 7px;
+  color: #4f6070;
+  font-size: 13px;
+}
+
+.new-employee-contacts {
+  margin-top: 7px;
+  font-size: 12px;
+}
+
+.new-employee-contacts span::before {
+  content: "·";
+  margin-right: 10px;
+}
+
+.new-employee-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.action-badge.arrival {
+  background: #e7f2fc;
+  color: #245f95;
+}
+
+@media (max-width: 760px) {
+  .new-employee-item {
+    grid-template-columns: 1fr;
+  }
+
+  .new-employee-actions {
+    justify-content: flex-start;
+  }
+}
+
 .upcoming-dismissals-card {
   padding: 0;
   overflow: hidden;
