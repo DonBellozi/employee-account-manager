@@ -54,6 +54,7 @@ class TechExpertNotification(Base):
     source_id: Mapped[str] = mapped_column(String(128), index=True)
     source_name: Mapped[str] = mapped_column(String(256), default="")
     fio: Mapped[str] = mapped_column(String(512), default="")
+    department: Mapped[str] = mapped_column(String(512), default="")
     corporate_email: Mapped[str] = mapped_column(String(320), default="")
     ad_login: Mapped[str] = mapped_column(String(128), default="")
     ad_object_guid: Mapped[str] = mapped_column(String(64), default="")
@@ -75,6 +76,16 @@ class TechExpertNotification(Base):
         String(32),
         default="not_checked",
     )
+    group_removal_status: Mapped[str] = mapped_column(
+        String(32),
+        default="not_started",
+        index=True,
+    )
+    group_removed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    group_removal_error: Mapped[str] = mapped_column(Text, default="")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str] = mapped_column(Text, default="")
     next_attempt_at: Mapped[datetime | None] = mapped_column(
@@ -162,6 +173,7 @@ class TechExpertNotificationBatchItem(Base):
     notification_id: Mapped[int] = mapped_column(Integer, index=True)
     worker_key: Mapped[str] = mapped_column(String(64), index=True)
     fio: Mapped[str] = mapped_column(String(512), default="")
+    department: Mapped[str] = mapped_column(String(512), default="")
     corporate_email: Mapped[str] = mapped_column(String(320), default="")
     ad_login: Mapped[str] = mapped_column(String(128), default="")
     dismissal_date: Mapped[date] = mapped_column(Date)
@@ -176,6 +188,107 @@ class TechExpertNotificationBatchItem(Base):
         index=True,
     )
     reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+    )
+
+
+class TechExpertActualizationRun(Base):
+    """Последовательно наполняемый пакет первичной сверки Техэксперта."""
+
+    __tablename__ = "techexpert_actualization_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(128), index=True)
+    title: Mapped[str] = mapped_column(String(256), default="")
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    files_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_count: Mapped[int] = mapped_column(Integer, default=0)
+    working_count: Mapped[int] = mapped_column(Integer, default=0)
+    not_working_count: Mapped[int] = mapped_column(Integer, default=0)
+    review_count: Mapped[int] = mapped_column(Integer, default=0)
+    ad_found_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
+class TechExpertActualizationFile(Base):
+    """Один исходный XLSX внутри пакета актуализации."""
+
+    __tablename__ = "techexpert_actualization_files"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "filename",
+            name="uq_techexpert_actualization_file",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(Integer, index=True)
+    filename: Mapped[str] = mapped_column(String(512), default="")
+    department_name: Mapped[str] = mapped_column(String(512), default="")
+    rows_count: Mapped[int] = mapped_column(Integer, default=0)
+    working_count: Mapped[int] = mapped_column(Integer, default=0)
+    not_working_count: Mapped[int] = mapped_column(Integer, default=0)
+    review_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+    )
+
+
+class TechExpertActualizationItem(Base):
+    """Одна строка XLSX без внутреннего логина и пароля Техэксперта."""
+
+    __tablename__ = "techexpert_actualization_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "file_id",
+            "source_row",
+            name="uq_techexpert_actualization_item_row",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(Integer, index=True)
+    file_id: Mapped[int] = mapped_column(Integer, index=True)
+    source_row: Mapped[int] = mapped_column(Integer)
+    source_department: Mapped[str] = mapped_column(String(512), default="")
+    source_fio: Mapped[str] = mapped_column(String(512), default="")
+    normalized_fio: Mapped[str] = mapped_column(String(512), default="", index=True)
+    source_position: Mapped[str] = mapped_column(String(512), default="")
+    source_email: Mapped[str] = mapped_column(String(320), default="")
+    source_phone: Mapped[str] = mapped_column(String(128), default="")
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    candidates_json: Mapped[str] = mapped_column(Text, default="[]")
+    worker_key: Mapped[str] = mapped_column(String(64), default="", index=True)
+    hr_record_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    current_fio: Mapped[str] = mapped_column(String(512), default="")
+    current_positions: Mapped[str] = mapped_column(Text, default="")
+    current_departments: Mapped[str] = mapped_column(Text, default="")
+    ad_login: Mapped[str] = mapped_column(String(128), default="")
+    ad_object_guid: Mapped[str] = mapped_column(String(64), default="")
+    ad_distinguished_name: Mapped[str] = mapped_column(String(2048), default="")
+    ad_status: Mapped[str] = mapped_column(String(32), default="not_checked")
+    membership_state: Mapped[str] = mapped_column(String(32), default="not_checked")
+    group_action: Mapped[str] = mapped_column(String(32), default="not_started")
+    group_action_error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,

@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import json
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi.responses import RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.db import get_db
-from app.security import get_or_create_csrf, require_admin, validate_csrf
+from app.models import AuditLog
+from app.models_techexpert import TechExpertActualizationRun
+from app.security import (
+    get_or_create_csrf,
+    require_admin,
+    require_operator,
+    validate_csrf,
+)
 from app.services.ad import ActiveDirectoryService
 from app.services.mailer import (
     CredentialMailer,
@@ -22,6 +31,10 @@ from app.services.techexpert_settings import (
     TechExpertSettingsService,
     build_techexpert_template_context,
     normalize_email,
+)
+from app.services.techexpert_access import TechExpertGroupAccessService
+from app.services.techexpert_actualization import (
+    TechExpertActualizationService,
 )
 from app.time_utils import register_datetime_filters
 
@@ -47,15 +60,60 @@ def _page_context(
     db: Session,
     error: str = "",
 ) -> dict[str, object]:
-    current = require_admin(request)
+    current = require_operator(request)
     service = TechExpertSettingsService(settings, db)
     config = service.get()
     profiles = {
         profile.domain.strip().lower(): profile
         for profile in ensure_domain_mail_profiles(db, settings)
     }
+    access_summary = {"access_count": 0}
+    active_run = None
+    active_run_details = None
+    group_sync_summary: dict[str, object] = {}
+    if config.source_domain:
+        actualization = TechExpertActualizationService(settings, db, config)
+        access_summary = actualization.access_summary()
+        active_run = db.scalar(
+            select(TechExpertActualizationRun)
+            .where(
+                TechExpertActualizationRun.source_id
+                == config.source_domain.strip().lower(),
+                TechExpertActualizationRun.status == "open",
+            )
+            .order_by(TechExpertActualizationRun.id.desc())
+        )
+        if active_run is not None:
+            active_run_details = actualization.run_details(active_run.id)
+        last_group_sync = db.scalar(
+            select(AuditLog)
+            .where(
+                AuditLog.action == "techexpert_group_sync",
+                AuditLog.target == config.source_domain.strip().lower(),
+            )
+            .order_by(AuditLog.id.desc())
+        )
+        if last_group_sync is not None:
+            try:
+                parsed = json.loads(last_group_sync.details or "{}")
+                if isinstance(parsed, dict):
+                    group_sync_summary = parsed
+            except (TypeError, json.JSONDecodeError):
+                group_sync_summary = {}
+    history = list(
+        db.scalars(
+            select(TechExpertActualizationRun)
+            .where(
+                TechExpertActualizationRun.source_id
+                == config.source_domain.strip().lower()
+            )
+            .order_by(TechExpertActualizationRun.id.desc())
+            .limit(10)
+        ).all()
+    )
     return {
         "user": current,
+        "is_admin": current.role == "admin",
         "csrf": get_or_create_csrf(request),
         "techexpert": config,
         "source_domains": service.available_domains(),
@@ -65,6 +123,11 @@ def _page_context(
         "app_timezone": settings.app_timezone,
         "message": request.query_params.get("message", ""),
         "error": error or request.query_params.get("error", ""),
+        "access_summary": access_summary,
+        "group_sync_summary": group_sync_summary,
+        "actualization_run": active_run,
+        "actualization_details": active_run_details,
+        "actualization_history": history,
     }
 
 
@@ -136,7 +199,7 @@ def techexpert_check(
     try:
         config = TechExpertSettingsService(settings, db).get()
         if not config.ad_group_dn.strip():
-            raise ValueError("Сначала сохраните DN маркерной группы AD")
+            raise ValueError("Сначала сохраните DN группы доступа AD")
         ActiveDirectoryService(settings).test_group(config.ad_group_dn)
         CredentialMailer(settings).test_connection()
         return _redirect(
@@ -173,12 +236,14 @@ def techexpert_test_email(
                     "full_name": "Иванов Иван Иванович",
                     "corporate_email": f"ivanov@{config.source_domain}",
                     "organization": "Тестовая организация",
+                    "department": "Центральный аппарат",
                     "dismissal_date": "20.08.2026",
                 },
                 {
                     "full_name": "Петрова Анна Сергеевна",
                     "corporate_email": f"petrova@{config.source_domain}",
                     "organization": "Тестовая организация",
+                    "department": "ОП «Дирекция в Белгородской области»",
                     "dismissal_date": "20.08.2026",
                 },
             ]
@@ -201,3 +266,226 @@ def techexpert_test_email(
         return _redirect(message=f"Тестовое письмо отправлено на {recipient}")
     except Exception as exc:
         return _redirect(error=f"Тестовое письмо не отправлено: {exc}")
+
+
+@router.post("/settings/techexpert/group-sync")
+def techexpert_group_sync(
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        result = TechExpertGroupAccessService(
+            settings,
+            db,
+            config,
+        ).sync(actor=current.username)
+        return _redirect(
+            message=(
+                "Группа AD обновлена: "
+                f"участников {result['members']}, "
+                f"сопоставлено {result['matched']}, "
+                f"требуют проверки {len(result['issues'])}"
+            )
+        )
+    except Exception as exc:
+        db.rollback()
+        return _redirect(error=f"Группа AD не обновлена: {exc}")
+
+
+@router.post("/settings/techexpert/actualization/start")
+def techexpert_actualization_start(
+    request: Request,
+    csrf: str = Form(...),
+    title: str = Form(""),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        run = TechExpertActualizationService(
+            settings,
+            db,
+            config,
+        ).create_run(actor=current.username, title=title)
+        return _redirect(message=f"Пакет актуализации №{run.id} открыт")
+    except Exception as exc:
+        db.rollback()
+        return _redirect(error=f"Пакет не создан: {exc}")
+
+
+@router.post("/settings/techexpert/actualization/{run_id}/upload")
+async def techexpert_actualization_upload(
+    run_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        result = TechExpertActualizationService(
+            settings,
+            db,
+            config,
+        ).add_file(
+            run_id=run_id,
+            filename=file.filename or "",
+            data=await file.read(),
+            actor=current.username,
+        )
+        return _redirect(
+            message=(
+                f"Файл «{result['department']}» обработан: "
+                f"работают {result['working']}, "
+                f"не работают {result['not_working']}, "
+                f"проверить {result['review']}"
+            )
+        )
+    except Exception as exc:
+        db.rollback()
+        return _redirect(error=f"Файл не обработан: {exc}")
+
+
+@router.post(
+    "/settings/techexpert/actualization/{run_id}/items/{item_id}/resolve"
+)
+def techexpert_actualization_resolve(
+    run_id: int,
+    item_id: int,
+    request: Request,
+    record_id: int = Form(...),
+    ad_login: str = Form(...),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        TechExpertActualizationService(settings, db, config).resolve_item(
+            run_id=run_id,
+            item_id=item_id,
+            record_id=record_id,
+            ad_login=ad_login,
+            actor=current.username,
+        )
+        return _redirect(message="Сопоставление сохранено")
+    except Exception as exc:
+        db.rollback()
+        return _redirect(error=f"Сопоставление не сохранено: {exc}")
+
+
+@router.post("/settings/techexpert/actualization/{run_id}/group")
+def techexpert_actualization_group(
+    run_id: int,
+    request: Request,
+    action: str = Form(...),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        result = TechExpertActualizationService(
+            settings,
+            db,
+            config,
+        ).apply_group(run_id=run_id, action=action, actor=current.username)
+        return _redirect(
+            message=(
+                f"Группа AD обработана: изменено {result['changed']}, "
+                f"без изменений {result['skipped']}, ошибок {result['errors']}"
+            )
+        )
+    except Exception as exc:
+        db.rollback()
+        return _redirect(error=f"Группа AD не изменена: {exc}")
+
+
+@router.post("/settings/techexpert/actualization/{run_id}/complete")
+def techexpert_actualization_complete(
+    run_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        TechExpertActualizationService(
+            settings,
+            db,
+            config,
+        ).complete_run(run_id=run_id, actor=current.username)
+        return _redirect(message=f"Пакет №{run_id} завершён")
+    except Exception as exc:
+        db.rollback()
+        return _redirect(error=f"Пакет не завершён: {exc}")
+
+
+@router.get("/settings/techexpert/actualization/{run_id}/not-working.xlsx")
+def techexpert_actualization_not_working_export(
+    run_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    require_operator(request)
+    config = TechExpertSettingsService(settings, db).get()
+    payload = TechExpertActualizationService(
+        settings,
+        db,
+        config,
+    ).export_not_working(run_id)
+    return Response(
+        content=payload,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="techexpert-not-working-{run_id}.xlsx"'
+            )
+        },
+    )
+
+
+@router.get("/settings/techexpert/current.xlsx")
+def techexpert_current_export(
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    require_operator(request)
+    config = TechExpertSettingsService(settings, db).get()
+    payload = TechExpertActualizationService(
+        settings,
+        db,
+        config,
+    ).export_current()
+    return Response(
+        content=payload,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="techexpert-current-users.xlsx"'
+            )
+        },
+    )

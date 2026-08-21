@@ -269,16 +269,32 @@ def _techexpert_journal_item(
     details = [
         ("ФИО", row.fio),
         ("Организация", row.source_name or row.source_id),
+        ("Подразделение", row.department),
         ("Корпоративная почта", row.corporate_email),
         ("Получатель", row.recipient_email),
         ("Логин AD", row.ad_login),
         (
-            "Маркер доступа",
+            "Доступ по группе AD",
             membership_labels.get(row.membership_state, row.membership_state),
         ),
         ("Дата увольнения", row.dismissal_date.strftime("%d.%m.%Y")),
         ("Попыток", str(int(row.attempts or 0))),
     ]
+    removal_labels = {
+        "not_started": "Не выполнялось",
+        "removed": "Удален из группы",
+        "already_absent": "Уже отсутствовал в группе",
+        "failed": "Ошибка удаления из группы",
+    }
+    details.append(
+        (
+            "Группа AD",
+            removal_labels.get(
+                row.group_removal_status,
+                row.group_removal_status,
+            ),
+        )
+    )
     if row.deferred_until is not None:
         details.append(
             ("Отсрочка до", row.deferred_until.strftime("%d.%m.%Y"))

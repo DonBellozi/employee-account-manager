@@ -247,6 +247,13 @@ class HRSourceRecord(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     ad_status: Mapped[str] = mapped_column(String(32), default="not_checked", index=True)
     zimbra_status: Mapped[str] = mapped_column(String(32), default="not_checked", index=True)
+    # Доступ к Техэксперту относится к конкретной организации, поэтому
+    # отметка живет в HRSourceRecord, а не в глобальной карточке HRPerson.
+    techexpert_access: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        index=True,
+    )
     reconciliation_status: Mapped[str] = mapped_column(String(32), default="not_checked", index=True)
     reconciliation_error: Mapped[str] = mapped_column(Text, default="")
     reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

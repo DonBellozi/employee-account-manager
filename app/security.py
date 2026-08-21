@@ -165,6 +165,18 @@ def require_admin(request: Request) -> CurrentUser:
     return user
 
 
+def require_operator(request: Request) -> CurrentUser:
+    """Разрешить действие администратору или штатному оператору."""
+
+    user = get_current_user(request)
+    if user.role not in {UserRole.ADMIN.value, UserRole.OPERATOR.value}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Раздел доступен администраторам и операторам",
+        )
+    return user
+
+
 def get_or_create_csrf(request: Request) -> str:
     token = request.session.get("csrf")
     if not token:

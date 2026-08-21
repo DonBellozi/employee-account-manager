@@ -2,7 +2,9 @@
 {% block title %}Техэксперт{% endblock %}
 {% block content %}
 <link rel="stylesheet" href="/static/mail_templates.css">
+<link rel="stylesheet" href="/static/techexpert_actualization.css">
 {% set ready = techexpert.enabled and techexpert.source_domain and techexpert.ad_group_dn and techexpert.recipient_email and sender_profile and smtp_configured %}
+{% set membership_labels = {'member': 'состоит', 'not_member': 'не состоит', 'not_checked': 'не проверена', 'error': 'ошибка проверки'} %}
 
 <div class="heading-row">
   <div>
@@ -11,7 +13,7 @@
       Одно уведомление со списком работников после подтверждённых увольнений.
     </p>
   </div>
-  <a class="button secondary" href="/settings">Назад к настройкам</a>
+  <a class="button secondary" href="{% if is_admin %}/settings{% else %}/{% endif %}">Назад</a>
 </div>
 
 {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
@@ -26,17 +28,20 @@
       </span>
     </div>
     <div class="integration-card-actions">
+      {% if is_admin %}
       <a class="button secondary" href="/admin/mail-templates">Настроить отправителя</a>
       <form method="post" action="/settings/techexpert/check">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button class="button secondary" type="submit">Проверить AD и SMTP</button>
       </form>
+      {% endif %}
     </div>
   </div>
 
   <p class="muted">
-    Модуль читает состав маркерной группы AD и включает в письмо только её
-    участников. Группа AD и сам Техэксперт не изменяются.
+    Группа AD определяет текущий доступ. После подтвержденного увольнения из
+    выбранной организации и окончания отсрочки система удаляет прямое членство
+    и отправляет письмо на закрытие внешнего доступа.
   </p>
 
   <dl class="integration-details">
@@ -54,6 +59,7 @@
   </dl>
 </section>
 
+{% if is_admin %}
 <section class="card">
   <div class="integration-card-heading">
     <div>
@@ -106,7 +112,7 @@
       </div>
 
       <label>
-        <span>DN маркерной группы AD</span>
+          <span>DN группы доступа AD</span>
         <input type="text"
                name="ad_group_dn"
                value="{{ techexpert.ad_group_dn }}"
@@ -115,7 +121,8 @@
                required>
       </label>
       <p class="muted mail-template-hint">
-        Членство используется только как признак выданного доступа. Состав группы не изменяется.
+        Пользователи добавляются и удаляются только из этой группы. Между OU
+        учетные записи не перемещаются.
       </p>
     </section>
 
@@ -144,7 +151,8 @@
       <p class="muted mail-template-hint">
         <code>{{ "{{ employees }}" }}</code> — список работников. В цикле доступны
         <code>employee.full_name</code>, <code>employee.corporate_email</code>,
-        <code>employee.organization</code> и <code>employee.dismissal_date</code>.
+        <code>employee.organization</code>, <code>employee.department</code> и
+        <code>employee.dismissal_date</code>.
       </p>
     </section>
 
@@ -183,5 +191,227 @@
       <button class="button secondary" type="submit">Отправить тест</button>
     </div>
   </form>
+</section>
+{% endif %}
+
+<section class="card techexpert-actualization-card" id="techexpert-actualization">
+  <div class="integration-card-heading">
+    <div>
+      <h2>Реестр и актуализация пользователей</h2>
+      <p class="muted">
+        Текущий доступ определяется группой AD. Файлы Техэксперта используются
+        только для первичной сверки по ФИО, должности и e-mail.
+      </p>
+    </div>
+    <div class="integration-card-actions">
+      <form method="post" action="/settings/techexpert/group-sync">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="button secondary" type="submit"{% if not techexpert.ad_group_dn %} disabled{% endif %}>
+          Обновить из AD
+        </button>
+      </form>
+      <a class="button secondary" href="/settings/techexpert/current.xlsx">
+        Актуальный список
+      </a>
+    </div>
+  </div>
+
+  <div class="techexpert-access-summary">
+    <div><span>Пользуются Техэкспертом</span><strong>{{ access_summary.access_count }}</strong></div>
+    {% if actualization_run %}
+    <div><span>Файлов в текущем пакете</span><strong>{{ actualization_run.files_count }}</strong></div>
+    <div><span>Строк обработано</span><strong>{{ actualization_run.total_count }}</strong></div>
+    <div><span>Работают</span><strong>{{ actualization_run.working_count }}</strong></div>
+    <div><span>Не работают</span><strong>{{ actualization_run.not_working_count }}</strong></div>
+    <div><span>Требуют проверки</span><strong>{{ actualization_run.review_count }}</strong></div>
+    <div><span>AD найдена</span><strong>{{ actualization_run.ad_found_count }}</strong></div>
+    <div><span>AD не найдена</span><strong>{{ actualization_run.total_count - actualization_run.ad_found_count }}</strong></div>
+    {% endif %}
+  </div>
+
+  {% if group_sync_summary.issues %}
+  <details class="techexpert-files" open>
+    <summary>Не удалось сопоставить участников группы — {{ group_sync_summary.issues|length }}</summary>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Участник AD</th><th>Логин</th><th>Причина</th></tr></thead>
+        <tbody>
+        {% for issue in group_sync_summary.issues %}
+        <tr>
+          <td>{{ issue.display_name or '–' }}</td>
+          <td>{{ issue.ad_login or '–' }}</td>
+          <td>{{ issue.reason }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {% endif %}
+
+  {% if not techexpert.source_domain or not techexpert.ad_group_dn %}
+  <div class="alert warning">
+    Сначала администратор должен выбрать организацию и сохранить DN группы AD.
+  </div>
+  {% elif not actualization_run %}
+  <form method="post" action="/settings/techexpert/actualization/start" class="techexpert-start-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>
+      <span>Название пакета</span>
+      <input type="text" name="title" value="Первичная сверка Техэксперта" maxlength="256">
+    </label>
+    <button class="button" type="submit">Начать актуализацию</button>
+  </form>
+  {% else %}
+  <div class="techexpert-run-heading">
+    <div>
+      <strong>Пакет №{{ actualization_run.id }} — {{ actualization_run.title }}</strong>
+      <div class="muted">Организация: {{ actualization_run.source_id }}</div>
+    </div>
+    <a class="button secondary" href="/settings/techexpert/actualization/{{ actualization_run.id }}/not-working.xlsx">
+      Выгрузить неработающих
+    </a>
+  </div>
+
+  <form method="post"
+        action="/settings/techexpert/actualization/{{ actualization_run.id }}/upload"
+        enctype="multipart/form-data"
+        class="techexpert-upload-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>
+      <span>Следующий файл подразделения</span>
+      <input type="file" name="file" accept=".xlsx" required>
+    </label>
+    <button class="button" type="submit">Загрузить и проверить</button>
+  </form>
+  <p class="muted techexpert-file-note">
+    Строки 1–2 игнорируются, строка 3 — подразделение, строка 4 — заголовки.
+    Логин и пароль из файла не читаются и не сохраняются.
+  </p>
+
+  {% if actualization_details.files %}
+  <details class="techexpert-files">
+    <summary>Загруженные файлы — {{ actualization_details.files|length }}</summary>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Подразделение</th><th>Файл</th><th>Работают</th><th>Не работают</th><th>Проверить</th></tr></thead>
+        <tbody>
+        {% for file in actualization_details.files %}
+        <tr>
+          <td>{{ file.department_name }}</td>
+          <td>{{ file.filename }}</td>
+          <td>{{ file.working_count }}</td>
+          <td>{{ file.not_working_count }}</td>
+          <td>{{ file.review_count }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {% endif %}
+
+  {% if actualization_details.rows %}
+  <div class="techexpert-group-actions">
+    <form method="post" action="/settings/techexpert/actualization/{{ actualization_run.id }}/group">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="add">
+      <button class="button" type="submit">Добавить работающих в группу</button>
+    </form>
+    <form method="post" action="/settings/techexpert/actualization/{{ actualization_run.id }}/group">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="remove">
+      <button class="button danger" type="submit">Удалить неработающих из группы</button>
+    </form>
+  </div>
+
+  <div class="table-wrap techexpert-items-table">
+    <table>
+      <thead>
+        <tr><th>ФИО из файла</th><th>Подразделение и должность</th><th>Кадры / AD</th><th>Результат</th></tr>
+      </thead>
+      <tbody>
+      {% for row in actualization_details.rows %}
+      {% set item = row.item %}
+      <tr>
+        <td>
+          <strong>{{ item.source_fio }}</strong>
+          {% if item.source_email %}<div class="muted">{{ item.source_email }}</div>{% endif %}
+        </td>
+        <td>
+          <div>{{ item.source_department }}</div>
+          <div class="muted">{{ item.source_position or 'Должность не указана' }}</div>
+        </td>
+        <td>
+          {% if item.current_fio %}<div>{{ item.current_fio }}</div>{% endif %}
+          <div class="muted">AD: {{ item.ad_login or 'не найдена' }}</div>
+          <div class="muted">Группа: {{ membership_labels.get(item.membership_state, item.membership_state) }}</div>
+        </td>
+        <td>
+          <span class="registry-state {{ item.category }}">
+            {% if item.category == 'working' %}Работает{% elif item.category == 'not_working' %}Не работает{% else %}Проверить{% endif %}
+          </span>
+          {% if item.reason %}<div class="techexpert-item-reason">{{ item.reason }}</div>{% endif %}
+          {% if item.group_action_error %}<div class="registry-error">{{ item.group_action_error }}</div>{% endif %}
+          {% if item.category == 'review' and row.candidates %}
+          <form method="post"
+                action="/settings/techexpert/actualization/{{ actualization_run.id }}/items/{{ item.id }}/resolve"
+                class="techexpert-resolve-form">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <select name="record_id" required>
+              <option value="">Выберите работника</option>
+              {% for candidate in row.candidates %}
+              <option value="{{ candidate.record_id }}">{{ candidate.fio }}{% if candidate.positions %} — {{ candidate.positions|join(', ') }}{% endif %}</option>
+              {% endfor %}
+            </select>
+            <input type="text" name="ad_login" placeholder="Логин AD" required>
+            <button class="button small secondary" type="submit">Сопоставить</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <form method="post"
+        action="/settings/techexpert/actualization/{{ actualization_run.id }}/complete"
+        class="techexpert-complete-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="button secondary" type="submit"{% if actualization_run.review_count %} disabled{% endif %}>
+      Завершить пакет
+    </button>
+    {% if actualization_run.review_count %}<span class="muted">Сначала разберите спорные строки.</span>{% endif %}
+  </form>
+  {% endif %}
+
+  {% if actualization_history %}
+  <details class="techexpert-history">
+    <summary>История актуализаций</summary>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Пакет</th><th>Состояние</th><th>Файлов</th><th>Всего</th><th>Не работают</th></tr></thead>
+        <tbody>
+        {% for run in actualization_history %}
+        <tr>
+          <td>№{{ run.id }} — {{ run.title }}</td>
+          <td>{{ 'Завершён' if run.status == 'completed' else 'Открыт' }}</td>
+          <td>{{ run.files_count }}</td>
+          <td>{{ run.total_count }}</td>
+          <td>
+            {{ run.not_working_count }}
+            {% if run.not_working_count %}
+            <a href="/settings/techexpert/actualization/{{ run.id }}/not-working.xlsx">XLSX</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {% endif %}
 </section>
 {% endblock %}

@@ -13,6 +13,7 @@ from ldap3 import (
     SIMPLE,
     Connection,
     MODIFY_ADD,
+    MODIFY_DELETE,
     MODIFY_REPLACE,
     Server,
     Tls,
@@ -434,6 +435,151 @@ class ActiveDirectoryService:
                 size_limit=1,
             )
             return bool(conn.entries)
+
+    def group_members(self, group_dn: str) -> list[ADDirectoryUser]:
+        """Получить прямых пользователей группы одним сервисным bind.
+
+        Чтение выполняется по DN из настроек. Вложенные группы намеренно не
+        разворачиваются: сервис управляет только прямым составом группы
+        доступа Техэксперта.
+        """
+
+        normalized_group = str(group_dn or "").strip()
+        if not normalized_group:
+            raise ValueError("Не передан DN группы AD")
+
+        users: list[ADDirectoryUser] = []
+        with self._service_connection() as conn:
+            conn.search(
+                normalized_group,
+                "(objectClass=group)",
+                search_scope=BASE,
+                attributes=["member"],
+                size_limit=1,
+            )
+            if not conn.entries:
+                raise RuntimeError("Группа Техэксперта не найдена в AD")
+
+            member_attribute = getattr(conn.entries[0], "member", None)
+            member_dns = list(getattr(member_attribute, "values", []) or [])
+            for member_dn in member_dns:
+                conn.search(
+                    str(member_dn),
+                    "(&(objectCategory=person)(objectClass=user))",
+                    search_scope=BASE,
+                    attributes=[
+                        "sAMAccountName",
+                        "displayName",
+                        "mail",
+                        "userAccountControl",
+                        "distinguishedName",
+                        "objectGUID",
+                    ],
+                    size_limit=1,
+                )
+                if not conn.entries:
+                    continue
+                user = self._entry_to_directory_user(conn.entries[0])
+                if user is not None:
+                    users.append(user)
+
+        return sorted(
+            users,
+            key=lambda item: (
+                item.display_name.casefold(),
+                item.username,
+            ),
+        )
+
+    def _group_user(
+        self,
+        username: str,
+        object_guid: str,
+    ) -> ADDirectoryUser:
+        user = None
+        if str(object_guid or "").strip():
+            user = self.get_user_by_object_guid(object_guid)
+        if user is None and str(username or "").strip():
+            user = self.get_user(username)
+        if user is None:
+            raise RuntimeError("Учетная запись AD не найдена")
+        if not user.distinguished_name:
+            raise RuntimeError("AD не вернул DN учетной записи")
+        return user
+
+    def ensure_user_in_group(
+        self,
+        username: str,
+        group_dn: str,
+        *,
+        object_guid: str = "",
+    ) -> str:
+        """Идемпотентно добавить пользователя в группу без перемещения OU."""
+
+        normalized_group = str(group_dn or "").strip()
+        if not normalized_group:
+            raise ValueError("Не передан DN группы AD")
+        user = self._group_user(username, object_guid)
+        if self.settings.dry_run:
+            return "dry_run"
+
+        safe_dn = escape_filter_chars(user.distinguished_name)
+        with self._service_connection() as conn:
+            conn.search(
+                normalized_group,
+                f"(&(objectClass=group)(member={safe_dn}))",
+                search_scope=BASE,
+                attributes=["distinguishedName"],
+                size_limit=1,
+            )
+            if conn.entries:
+                return "already_member"
+            if not conn.modify(
+                normalized_group,
+                {"member": [(MODIFY_ADD, [user.distinguished_name])]},
+            ):
+                raise RuntimeError(
+                    "Не удалось добавить пользователя в группу Техэксперта: "
+                    f"{conn.result.get('message') or conn.result}"
+                )
+        return "added"
+
+    def remove_user_from_group(
+        self,
+        username: str,
+        group_dn: str,
+        *,
+        object_guid: str = "",
+    ) -> str:
+        """Идемпотентно удалить прямое членство, не меняя саму учетку."""
+
+        normalized_group = str(group_dn or "").strip()
+        if not normalized_group:
+            raise ValueError("Не передан DN группы AD")
+        user = self._group_user(username, object_guid)
+        if self.settings.dry_run:
+            return "dry_run"
+
+        safe_dn = escape_filter_chars(user.distinguished_name)
+        with self._service_connection() as conn:
+            conn.search(
+                normalized_group,
+                f"(&(objectClass=group)(member={safe_dn}))",
+                search_scope=BASE,
+                attributes=["distinguishedName"],
+                size_limit=1,
+            )
+            if not conn.entries:
+                return "not_member"
+            if not conn.modify(
+                normalized_group,
+                {"member": [(MODIFY_DELETE, [user.distinguished_name])]},
+            ):
+                raise RuntimeError(
+                    "Не удалось удалить пользователя из группы Техэксперта: "
+                    f"{conn.result.get('message') or conn.result}"
+                )
+        return "removed"
 
     def test_group(self, group_dn: str) -> str:
         """Проверить существование маркерной группы без изменения AD."""

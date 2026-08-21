@@ -1,0 +1,112 @@
+.techexpert-actualization-card {
+  margin-top: 18px;
+}
+
+.techexpert-access-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.techexpert-access-summary > div {
+  display: grid;
+  gap: 5px;
+  padding: 13px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+
+.techexpert-access-summary span {
+  color: #64748b;
+  font-size: .86rem;
+}
+
+.techexpert-access-summary strong {
+  font-size: 1.3rem;
+}
+
+.techexpert-start-form,
+.techexpert-upload-form {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.techexpert-run-heading,
+.techexpert-group-actions,
+.techexpert-complete-form {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.techexpert-file-note {
+  margin-top: 8px;
+}
+
+.techexpert-files,
+.techexpert-history {
+  margin-top: 16px;
+}
+
+.techexpert-files > summary,
+.techexpert-history > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.techexpert-items-table {
+  margin-top: 16px;
+}
+
+.techexpert-items-table td {
+  vertical-align: top;
+}
+
+.registry-state.working {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.registry-state.not_working {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.registry-state.review {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.techexpert-item-reason {
+  max-width: 360px;
+  margin-top: 6px;
+  color: #64748b;
+  font-size: .84rem;
+  line-height: 1.4;
+}
+
+.techexpert-resolve-form {
+  display: grid;
+  gap: 7px;
+  min-width: 280px;
+  margin-top: 10px;
+}
+
+.button.danger {
+  background: #b91c1c;
+}
+
+@media (max-width: 760px) {
+  .techexpert-start-form,
+  .techexpert-upload-form {
+    grid-template-columns: 1fr;
+  }
+}

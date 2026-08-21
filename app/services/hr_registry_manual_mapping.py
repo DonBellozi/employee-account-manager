@@ -251,6 +251,91 @@ class HRRegistryManualMappingService:
             "has_zimbra": bool(mapping.zimbra_id),
         }
 
+    def save_ad_identifier(
+        self,
+        *,
+        record_id: int,
+        identifier: str,
+        actor: str,
+    ) -> dict:
+        """Сохранить только AD-сопоставление, не обращаясь к Zimbra.
+
+        Служебной актуализации Техэксперта нужен именно AD-объект. Поэтому
+        недоступность или отсутствие почтового ящика не должна мешать
+        оператору подтвердить такое сопоставление.
+        """
+
+        record = self.get_record(record_id)
+        value = normalize(identifier)
+        if not value or "@" in value:
+            raise ValueError("Укажите логин AD")
+
+        ad_user = ActiveDirectoryService(self.settings).get_user(value)
+        if ad_user is None:
+            raise ValueError(f"AD: логин {value} не найден")
+        if not ad_user.object_guid:
+            raise ValueError(
+                f"AD: {ad_user.username} найден, но objectGUID не получен"
+            )
+
+        source_domain = normalize(record.source_id)
+        mapping = self.get_mapping(record)
+        created = mapping is None
+        if mapping is None:
+            mapping = EmailLoginMapping(
+                worker_key=record.worker_key,
+                source_domain=source_domain,
+                source_email=normalize(record.corporate_email),
+                ad_object_guid="",
+                ad_login="",
+                zimbra_id="",
+                zimbra_email="",
+                created_by=actor,
+            )
+            self.db.add(mapping)
+
+        mapping.ad_object_guid = ad_user.object_guid
+        mapping.ad_login = ad_user.username
+        mapping.updated_at = utcnow()
+        mapping.last_verified_at = utcnow()
+        self.db.add(
+            AuditLog(
+                actor=actor,
+                action=(
+                    "hr_registry_identity_mapping_create"
+                    if created
+                    else "hr_registry_identity_mapping_update"
+                ),
+                target=f"{record.source_id}:{record.worker_key}",
+                result="success",
+                details=json.dumps(
+                    {
+                        "record_id": record.id,
+                        "fio": record.fio,
+                        "source_id": record.source_id,
+                        "identifier": value,
+                        "identifier_type": "ad_login",
+                        "ad_login": mapping.ad_login,
+                        "ad_object_guid": mapping.ad_object_guid,
+                        "scope": "techexpert_actualization",
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+        )
+        self.db.commit()
+        self.db.refresh(mapping)
+        return {
+            "record_id": record.id,
+            "fio": record.fio,
+            "source_id": record.source_id,
+            "source_email": mapping.source_email,
+            "ad_login": mapping.ad_login,
+            "ad_object_guid": mapping.ad_object_guid,
+            "has_ad": True,
+        }
+
     def delete_for_record(
         self,
         *,

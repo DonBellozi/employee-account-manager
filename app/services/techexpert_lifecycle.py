@@ -31,6 +31,10 @@ from app.services.techexpert_settings import (
     ensure_techexpert_settings,
     parse_notification_time,
 )
+from app.services.techexpert_access import (
+    TechExpertGroupAccessService,
+    placement_snapshot,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -71,7 +75,7 @@ class TechExpertIdentity:
 
 
 class TechExpertLifecycleService:
-    """Уведомляет Техэксперт, не изменяя AD-группу или внешнюю систему."""
+    """Закрывает доступ в группе AD и уведомляет внешний Техэксперт."""
 
     def __init__(self, settings: Settings, db: Session):
         self.settings = settings
@@ -308,6 +312,8 @@ class TechExpertLifecycleService:
         corporate_email = normalize(
             getattr(record, "corporate_email", "")
         )
+        departments = placement_snapshot(record)["top_departments"]
+        department = ", ".join(departments)
 
         if row is None:
             row = TechExpertNotification(
@@ -316,6 +322,7 @@ class TechExpertLifecycleService:
                 source_id=self.source_domain,
                 source_name=event.source_name,
                 fio=event.fio,
+                department=department,
                 corporate_email=corporate_email,
                 dismissal_date=event.current_dismissal_date,
                 deferred_until=(deferral.deferred_until if deferral else None),
@@ -348,6 +355,8 @@ class TechExpertLifecycleService:
         )
         row.source_name = event.source_name
         row.fio = event.fio
+        if row.status != "sent":
+            row.department = department
         if row.status != "sent":
             row.corporate_email = corporate_email
             row.recipient_email = normalize(
@@ -516,34 +525,68 @@ class TechExpertLifecycleService:
         row.next_attempt_at = None
         row.updated_at = utcnow()
         try:
-            row.membership_state = "not_checked"
             identity = self._resolve_identity(row)
             row.corporate_email = identity.corporate_email
             row.ad_login = identity.ad_login
             row.ad_object_guid = identity.ad_object_guid
 
             ad = ActiveDirectoryService(self.settings)
-            try:
-                is_member = ad.is_user_member_of_group(
-                    identity.ad_login,
-                    self.config.ad_group_dn,
-                    object_guid=identity.ad_object_guid,
-                )
-            except Exception:
-                row.membership_state = "error"
-                raise
-            row.membership_state = "member" if is_member else "not_member"
-            if not is_member:
-                row.status = "skipped"
-                row.last_error = ""
-                row.updated_at = utcnow()
-                self._audit(
-                    row,
-                    action="techexpert_notification_skipped",
-                    result="not_member",
-                    details="Работник не входит в маркерную группу AD",
-                )
-                return False
+            if row.group_removal_status not in {"removed", "already_absent"}:
+                try:
+                    is_member = ad.is_user_member_of_group(
+                        identity.ad_login,
+                        self.config.ad_group_dn,
+                        object_guid=identity.ad_object_guid,
+                    )
+                except Exception:
+                    row.membership_state = "error"
+                    raise
+
+                if is_member:
+                    # membership_state является снимком доступа до удаления и
+                    # остается member для повторной отправки SMTP.
+                    row.membership_state = "member"
+                    try:
+                        removal = ad.remove_user_from_group(
+                            identity.ad_login,
+                            self.config.ad_group_dn,
+                            object_guid=identity.ad_object_guid,
+                        )
+                    except Exception as exc:
+                        row.group_removal_status = "failed"
+                        row.group_removal_error = str(exc)[:4000]
+                        raise
+                    row.group_removal_status = (
+                        "removed" if removal == "removed" else "already_absent"
+                    )
+                    row.group_removed_at = utcnow()
+                    row.group_removal_error = ""
+                    record = self._record_for_event(event)
+                    if record is not None:
+                        record.techexpert_access = False
+                    self._audit(
+                        row,
+                        action="techexpert_group_access_removed",
+                        result=row.group_removal_status,
+                        details="Доступ удален после повторной кадровой проверки",
+                    )
+                elif row.membership_state == "member":
+                    # Предыдущая попытка успела удалить членство, но процесс
+                    # завершился до фиксации результата.
+                    row.group_removal_status = "already_absent"
+                    row.group_removed_at = utcnow()
+                else:
+                    row.membership_state = "not_member"
+                    row.status = "skipped"
+                    row.last_error = ""
+                    row.updated_at = utcnow()
+                    self._audit(
+                        row,
+                        action="techexpert_notification_skipped",
+                        result="not_member",
+                        details="Работник не входит в группу доступа AD",
+                    )
+                    return False
             return True
         except Exception as exc:
             self._mark_send_failure(row, exc)
@@ -565,6 +608,7 @@ class TechExpertLifecycleService:
             "full_name": row.fio or row.worker_key,
             "corporate_email": row.corporate_email,
             "organization": row.source_name or row.source_id,
+            "department": row.department,
             "dismissal_date": row.dismissal_date.strftime("%d.%m.%Y"),
         }
 
@@ -599,6 +643,7 @@ class TechExpertLifecycleService:
                 notification_id=row.id,
                 worker_key=row.worker_key,
                 fio=row.fio,
+                department=row.department,
                 corporate_email=row.corporate_email,
                 ad_login=row.ad_login,
                 dismissal_date=row.dismissal_date,
@@ -634,6 +679,7 @@ class TechExpertLifecycleService:
         reason: str = "",
     ) -> None:
         item.fio = row.fio
+        item.department = row.department
         item.corporate_email = row.corporate_email
         item.ad_login = row.ad_login
         item.dismissal_date = row.dismissal_date
@@ -798,8 +844,31 @@ class TechExpertLifecycleService:
         return aware_utc(value) <= now
 
     def process(self) -> dict[str, int | str]:
+        group_sync: dict[str, object] = {}
+        if self.source_domain and str(self.config.ad_group_dn or "").strip():
+            try:
+                group_sync = TechExpertGroupAccessService(
+                    self.settings,
+                    self.db,
+                    self.config,
+                ).sync(actor="system")
+            except Exception as exc:
+                # Ошибка синхронизации не стирает последние кадровые отметки.
+                logger.warning("Техэксперт: группа AD не синхронизирована: %s", exc)
         if not self.config.enabled:
-            return {"status": "disabled", "planned": 0, "sent": 0}
+            return {
+                "status": "disabled",
+                "planned": 0,
+                "sent": 0,
+                "group_members": int(group_sync.get("members", 0) or 0),
+            }
+        if self.settings.dry_run:
+            return {
+                "status": "dry_run",
+                "planned": 0,
+                "sent": 0,
+                "group_members": int(group_sync.get("members", 0) or 0),
+            }
         configuration_error = self._configuration_error()
         if configuration_error:
             return {
@@ -859,6 +928,7 @@ class TechExpertLifecycleService:
             "planned": len(rows),
             "sent": sent,
             "emails": 1 if sent else 0,
+            "group_members": int(group_sync.get("members", 0) or 0),
         }
 
 

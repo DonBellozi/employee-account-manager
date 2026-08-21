@@ -19,6 +19,7 @@ TECHEXPERT_TEMPLATE_VARIABLES = {
     "full_name",
     "corporate_email",
     "organization",
+    "department",
     "dismissal_date",
 }
 
@@ -42,7 +43,7 @@ DEFAULT_TECHEXPERT_SUBJECT = (
     "({{ employee_count }})"
 )
 
-DEFAULT_TECHEXPERT_BODY_HTML = """\
+PREVIOUS_DEFAULT_TECHEXPERT_BODY_HTML = """\
 <p>Здравствуйте!</p>
 <p>Просим прекратить доступ к системе «Техэксперт» для следующих работников:</p>
 <table border="1" cellpadding="6" cellspacing="0">
@@ -68,6 +69,34 @@ DEFAULT_TECHEXPERT_BODY_HTML = """\
 <p>Это автоматическое уведомление по подтвержденным кадровым событиям.</p>
 """
 
+DEFAULT_TECHEXPERT_BODY_HTML = """\
+<p>Здравствуйте!</p>
+<p>Просим прекратить доступ к системе «Техэксперт» для следующих работников:</p>
+<table border="1" cellpadding="6" cellspacing="0">
+  <thead>
+    <tr>
+      <th>ФИО</th>
+      <th>Корпоративный e-mail</th>
+      <th>Организация</th>
+      <th>Подразделение</th>
+      <th>Дата увольнения</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for employee in employees %}
+    <tr>
+      <td>{{ employee.full_name }}</td>
+      <td>{{ employee.corporate_email }}</td>
+      <td>{{ employee.organization }}</td>
+      <td>{{ employee.department }}</td>
+      <td>{{ employee.dismissal_date }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p>Это автоматическое уведомление по подтвержденным кадровым событиям.</p>
+"""
+
 
 def build_techexpert_template_context(
     employees: list[dict[str, str]],
@@ -80,6 +109,9 @@ def build_techexpert_template_context(
     dismissal_dates = list(
         dict.fromkeys(item["dismissal_date"] for item in employees)
     )
+    departments = list(
+        dict.fromkeys(item.get("department", "") for item in employees)
+    )
     return {
         "employees": employees,
         "employee_count": len(employees),
@@ -88,6 +120,7 @@ def build_techexpert_template_context(
             item["corporate_email"] for item in employees
         ),
         "organization": ", ".join(organizations),
+        "department": ", ".join(value for value in departments if value),
         "dismissal_date": ", ".join(dismissal_dates),
     }
 
@@ -123,6 +156,10 @@ def ensure_techexpert_settings(db: Session) -> TechExpertSettings:
         if (
             row.subject.strip() == LEGACY_TECHEXPERT_SUBJECT.strip()
             and row.body_html.strip() == LEGACY_TECHEXPERT_BODY_HTML.strip()
+        ) or (
+            row.subject.strip() == DEFAULT_TECHEXPERT_SUBJECT.strip()
+            and row.body_html.strip()
+            == PREVIOUS_DEFAULT_TECHEXPERT_BODY_HTML.strip()
         ):
             row.subject = DEFAULT_TECHEXPERT_SUBJECT
             row.body_html = DEFAULT_TECHEXPERT_BODY_HTML
@@ -188,7 +225,7 @@ class TechExpertSettingsService:
             )
         group_dn = str(ad_group_dn or "").strip()
         if not group_dn:
-            raise ValueError("Укажите DN маркерной группы AD")
+            raise ValueError("Укажите DN группы доступа AD")
         recipient = normalize_email(
             recipient_email,
             field_name="e-mail получателя",

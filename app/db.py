@@ -110,17 +110,36 @@ def ensure_compatibility_schema() -> None:
         )
 
         if "hr_source_records" in tables:
-            columns = {
-                column["name"]
-                for column in inspector.get_columns("hr_source_records")
-            }
-            if "personal_email" not in columns:
-                connection.execute(
-                    text(
-                        "ALTER TABLE hr_source_records "
-                        "ADD COLUMN personal_email VARCHAR(320) NOT NULL DEFAULT ''"
-                    )
-                )
+            add_missing_columns(
+                connection,
+                "hr_source_records",
+                {
+                    "personal_email": (
+                        "VARCHAR(320) NOT NULL DEFAULT ''"
+                    ),
+                    "techexpert_access": (
+                        "BOOLEAN NOT NULL DEFAULT 0"
+                    ),
+                },
+            )
+
+        add_missing_columns(
+            connection,
+            "techexpert_notifications",
+            {
+                "department": "VARCHAR(512) NOT NULL DEFAULT ''",
+                "group_removal_status": (
+                    "VARCHAR(32) NOT NULL DEFAULT 'not_started'"
+                ),
+                "group_removed_at": "DATETIME",
+                "group_removal_error": "TEXT NOT NULL DEFAULT ''",
+            },
+        )
+        add_missing_columns(
+            connection,
+            "techexpert_notification_batch_items",
+            {"department": "VARCHAR(512) NOT NULL DEFAULT ''"},
+        )
 
         if "onec_additional_sources" in tables:
             columns = {
