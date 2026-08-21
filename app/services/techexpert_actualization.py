@@ -91,6 +91,18 @@ class ParsedTechExpertFile:
     rows: tuple[ParsedTechExpertRow, ...]
 
 
+@dataclass(frozen=True)
+class ActualizationAnalysisContext:
+    active_worker_keys: set[str]
+    by_fio: dict[str, list[HRSourceRecord]]
+    by_email: dict[str, list[HRSourceRecord]]
+    mappings: dict[str, list[EmailLoginMapping]]
+    ad: ActiveDirectoryService
+    member_by_guid: dict[str, ADDirectoryUser]
+    member_by_login: dict[str, ADDirectoryUser]
+    group_error: str
+
+
 class TechExpertActualizationService:
     """Первичная и редкая сверка файлов с кадровой организацией и AD."""
 
@@ -335,6 +347,223 @@ class TechExpertActualizationService:
                 user = next(iter(unique.values()))
         return user
 
+    def _analysis_context(self) -> ActualizationAnalysisContext:
+        records = self._source_records()
+        by_fio: dict[str, list[HRSourceRecord]] = {}
+        by_email: dict[str, list[HRSourceRecord]] = {}
+        for record in records:
+            by_fio.setdefault(normalize_fio(record.fio), []).append(record)
+            for email in (record.corporate_email, record.personal_email):
+                for email_key in organization_email_keys(email, self.source_id):
+                    by_email.setdefault(email_key, []).append(record)
+
+        ad = ActiveDirectoryService(self.settings)
+        try:
+            members = ad.group_members(self.config.ad_group_dn)
+            group_error = ""
+        except Exception as exc:
+            members = []
+            group_error = str(exc)
+        return ActualizationAnalysisContext(
+            active_worker_keys=self._active_worker_keys(),
+            by_fio=by_fio,
+            by_email=by_email,
+            mappings=self._mappings({record.worker_key for record in records}),
+            ad=ad,
+            member_by_guid={
+                normalize_email(member.object_guid): member
+                for member in members
+                if member.object_guid
+            },
+            member_by_login={
+                normalize_email(member.username): member for member in members
+            },
+            group_error=group_error,
+        )
+
+    def _records_by_email(
+        self,
+        context: ActualizationAnalysisContext,
+        value: object,
+    ) -> list[HRSourceRecord]:
+        matched: dict[int, HRSourceRecord] = {}
+        for email_key in organization_email_keys(value, self.source_id):
+            for candidate in context.by_email.get(email_key, []):
+                matched[candidate.id] = candidate
+        return list(matched.values())
+
+    def _analyze_source(
+        self,
+        source: ParsedTechExpertRow,
+        context: ActualizationAnalysisContext,
+    ) -> dict[str, object]:
+        exact = list(context.by_fio.get(normalize_fio(source.fio), []))
+        unique = {record.worker_key: record for record in exact}
+        candidates = list(unique.values())
+        reason_parts: list[str] = []
+
+        if len(candidates) > 1 and source.email:
+            email_candidates = {
+                record.worker_key: record
+                for record in self._records_by_email(context, source.email)
+                if record.worker_key in unique
+            }
+            if len(email_candidates) == 1:
+                candidates = list(email_candidates.values())
+                reason_parts.append(
+                    "Совпадение уточнено по e-mail"
+                    if source.email in context.by_email
+                    else "Совпадение уточнено по корпоративному e-mail "
+                    "с учетом смены домена .com/.ru"
+                )
+
+        record = candidates[0] if len(candidates) == 1 else None
+        if record is None:
+            email_suggestions = (
+                {
+                    value.worker_key: value
+                    for value in self._records_by_email(context, source.email)
+                }
+                if source.email
+                else {}
+            )
+            display_candidates = candidates or list(email_suggestions.values())
+            if not exact and not email_suggestions:
+                category = "not_working"
+                reason_parts.append(
+                    "ФИО отсутствует среди работников организации"
+                )
+            elif not exact and email_suggestions:
+                category = "review"
+                reason_parts.append("По e-mail найден сотрудник с другим ФИО")
+            else:
+                category = "review"
+                reason_parts.append("Найдено несколько работников с таким ФИО")
+            return {
+                "category": category,
+                "reason": "; ".join(reason_parts),
+                "candidates_json": json.dumps(
+                    [self._candidate_payload(value) for value in display_candidates],
+                    ensure_ascii=False,
+                ),
+                "worker_key": "",
+                "hr_record_id": None,
+                "current_fio": "",
+                "current_positions": "[]",
+                "current_departments": "[]",
+                "ad_login": "",
+                "ad_object_guid": "",
+                "ad_distinguished_name": "",
+                "ad_status": "not_found",
+                "membership_state": (
+                    "error" if context.group_error else "not_checked"
+                ),
+            }
+
+        snapshot = placement_snapshot(record)
+        normalized_positions = {
+            normalize_fio(value) for value in snapshot["positions"]
+        }
+        if (
+            source.position
+            and normalize_fio(source.position) not in normalized_positions
+        ):
+            reason_parts.append("Должность в кадрах изменилась")
+        record_email_keys = {
+            email_key
+            for value in (record.corporate_email, record.personal_email)
+            for email_key in organization_email_keys(value, self.source_id)
+        }
+        if (
+            source.email
+            and not organization_email_keys(source.email, self.source_id)
+            & record_email_keys
+        ):
+            reason_parts.append("E-mail отличается от кадровых данных")
+
+        try:
+            ad_user = self._resolve_ad(
+                record,
+                context.mappings,
+                context.ad,
+                context.member_by_guid,
+                context.member_by_login,
+            )
+            ad_error = ""
+        except Exception as exc:
+            ad_user = None
+            ad_error = str(exc)
+
+        membership_state = "error" if context.group_error else "not_member"
+        if ad_user is not None and (
+            normalize_email(ad_user.object_guid) in context.member_by_guid
+            or normalize_email(ad_user.username) in context.member_by_login
+        ):
+            membership_state = "member"
+
+        is_active = record.worker_key in context.active_worker_keys
+        if is_active and ad_user is not None and ad_user.is_enabled:
+            category = "working"
+        elif is_active:
+            category = "review"
+            reason_parts.append(
+                "AD-учетка не найдена"
+                if ad_user is None
+                else "AD-учетка отключена"
+            )
+        else:
+            category = "not_working"
+            reason_parts.append("Нет активной занятости в организации")
+
+        if ad_error:
+            reason_parts.append(f"AD: {ad_error}")
+        if context.group_error:
+            reason_parts.append(f"Группа AD: {context.group_error}")
+        return {
+            "category": category,
+            "reason": "; ".join(dict.fromkeys(reason_parts)),
+            "candidates_json": json.dumps(
+                [self._candidate_payload(record)],
+                ensure_ascii=False,
+            ),
+            "worker_key": record.worker_key,
+            "hr_record_id": record.id,
+            "current_fio": record.fio,
+            "current_positions": json.dumps(
+                snapshot["positions"], ensure_ascii=False
+            ),
+            "current_departments": json.dumps(
+                snapshot["departments"], ensure_ascii=False
+            ),
+            "ad_login": ad_user.username if ad_user else "",
+            "ad_object_guid": ad_user.object_guid if ad_user else "",
+            "ad_distinguished_name": (
+                ad_user.distinguished_name if ad_user else ""
+            ),
+            "ad_status": (
+                "enabled"
+                if ad_user is not None and ad_user.is_enabled
+                else "disabled"
+                if ad_user is not None
+                else "error"
+                if ad_error
+                else "not_found"
+            ),
+            "membership_state": membership_state,
+        }
+
+    @staticmethod
+    def _apply_analysis(
+        item: TechExpertActualizationItem,
+        analysis: dict[str, object],
+    ) -> None:
+        previous_category = item.category
+        for field, value in analysis.items():
+            setattr(item, field, value)
+        if item.category != previous_category:
+            item.group_action = "not_started"
+            item.group_action_error = ""
+
     def add_file(
         self,
         *,
@@ -363,39 +592,7 @@ class TechExpertActualizationService:
             suffix += 1
             display_filename = f"{stem} ({suffix}).{extension}"
 
-        records = self._source_records()
-        active_worker_keys = self._active_worker_keys()
-        by_fio: dict[str, list[HRSourceRecord]] = {}
-        by_email: dict[str, list[HRSourceRecord]] = {}
-        for record in records:
-            by_fio.setdefault(normalize_fio(record.fio), []).append(record)
-            for email in (record.corporate_email, record.personal_email):
-                for email_key in organization_email_keys(email, self.source_id):
-                    by_email.setdefault(email_key, []).append(record)
-
-        def records_by_email(value: object) -> list[HRSourceRecord]:
-            matched: dict[int, HRSourceRecord] = {}
-            for email_key in organization_email_keys(value, self.source_id):
-                for candidate in by_email.get(email_key, []):
-                    matched[candidate.id] = candidate
-            return list(matched.values())
-
-        mappings = self._mappings({record.worker_key for record in records})
-        ad = ActiveDirectoryService(self.settings)
-        try:
-            members = ad.group_members(self.config.ad_group_dn)
-            group_error = ""
-        except Exception as exc:
-            members = []
-            group_error = str(exc)
-        member_by_guid = {
-            normalize_email(member.object_guid): member
-            for member in members
-            if member.object_guid
-        }
-        member_by_login = {
-            normalize_email(member.username): member for member in members
-        }
+        context = self._analysis_context()
 
         file_row = TechExpertActualizationFile(
             run_id=run.id,
@@ -407,125 +604,7 @@ class TechExpertActualizationService:
 
         counts = {"working": 0, "not_working": 0, "review": 0}
         for source in parsed.rows:
-            exact = list(by_fio.get(normalize_fio(source.fio), []))
-            unique = {record.worker_key: record for record in exact}
-            candidates = list(unique.values())
-            reason_parts: list[str] = []
-
-            if len(candidates) > 1 and source.email:
-                email_candidates = {
-                    record.worker_key: record
-                    for record in records_by_email(source.email)
-                    if record.worker_key in unique
-                }
-                if len(email_candidates) == 1:
-                    candidates = list(email_candidates.values())
-                    reason_parts.append(
-                        "Совпадение уточнено по e-mail"
-                        if source.email in by_email
-                        else "Совпадение уточнено по корпоративному e-mail "
-                        "с учетом смены домена .com/.ru"
-                    )
-
-            category = "review"
-            record = candidates[0] if len(candidates) == 1 else None
-            if record is None:
-                email_suggestions = {
-                    value.worker_key: value
-                    for value in records_by_email(source.email)
-                } if source.email else {}
-                display_candidates = candidates or list(email_suggestions.values())
-                if not exact and not email_suggestions:
-                    category = "not_working"
-                    reason_parts.append(
-                        "ФИО отсутствует среди работников организации"
-                    )
-                elif not exact and email_suggestions:
-                    reason_parts.append(
-                        "По e-mail найден сотрудник с другим ФИО"
-                    )
-                else:
-                    reason_parts.append("Найдено несколько работников с таким ФИО")
-                payload = [
-                    self._candidate_payload(value)
-                    for value in display_candidates
-                ]
-                item = TechExpertActualizationItem(
-                    run_id=run.id,
-                    file_id=file_row.id,
-                    source_row=source.row_number,
-                    source_department=parsed.department_name,
-                    source_fio=source.fio,
-                    normalized_fio=normalize_fio(source.fio),
-                    source_position=source.position,
-                    source_email=source.email,
-                    source_phone=source.phone,
-                    category=category,
-                    reason="; ".join(reason_parts),
-                    candidates_json=json.dumps(payload, ensure_ascii=False),
-                    ad_status="not_found",
-                    membership_state=("error" if group_error else "not_checked"),
-                )
-                self.db.add(item)
-                counts[category] += 1
-                continue
-
-            snapshot = placement_snapshot(record)
-            normalized_positions = {
-                normalize_fio(value) for value in snapshot["positions"]
-            }
-            if source.position and normalize_fio(source.position) not in normalized_positions:
-                reason_parts.append("Должность в кадрах изменилась")
-            record_email_keys = {
-                email_key
-                for value in (record.corporate_email, record.personal_email)
-                for email_key in organization_email_keys(value, self.source_id)
-            }
-            if (
-                source.email
-                and not organization_email_keys(source.email, self.source_id)
-                & record_email_keys
-            ):
-                reason_parts.append("E-mail отличается от кадровых данных")
-
-            is_active = record.worker_key in active_worker_keys
-            try:
-                ad_user = self._resolve_ad(
-                    record,
-                    mappings,
-                    ad,
-                    member_by_guid,
-                    member_by_login,
-                )
-                ad_error = ""
-            except Exception as exc:
-                ad_user = None
-                ad_error = str(exc)
-
-            membership_state = "error" if group_error else "not_member"
-            if ad_user is not None:
-                if (
-                    normalize_email(ad_user.object_guid) in member_by_guid
-                    or ad_user.username in member_by_login
-                ):
-                    membership_state = "member"
-            if is_active and ad_user is not None and ad_user.is_enabled:
-                category = "working"
-            elif is_active:
-                category = "review"
-                reason_parts.append(
-                    "AD-учетка не найдена"
-                    if ad_user is None
-                    else "AD-учетка отключена"
-                )
-            else:
-                category = "not_working"
-                reason_parts.append("Нет активной занятости в организации")
-
-            if ad_error:
-                reason_parts.append(f"AD: {ad_error}")
-            if group_error:
-                reason_parts.append(f"Группа AD: {group_error}")
+            analysis = self._analyze_source(source, context)
             item = TechExpertActualizationItem(
                 run_id=run.id,
                 file_id=file_row.id,
@@ -536,35 +615,10 @@ class TechExpertActualizationService:
                 source_position=source.position,
                 source_email=source.email,
                 source_phone=source.phone,
-                category=category,
-                reason="; ".join(dict.fromkeys(reason_parts)),
-                candidates_json=json.dumps(
-                    [self._candidate_payload(record)],
-                    ensure_ascii=False,
-                ),
-                worker_key=record.worker_key,
-                hr_record_id=record.id,
-                current_fio=record.fio,
-                current_positions=json.dumps(snapshot["positions"], ensure_ascii=False),
-                current_departments=json.dumps(snapshot["departments"], ensure_ascii=False),
-                ad_login=ad_user.username if ad_user else "",
-                ad_object_guid=ad_user.object_guid if ad_user else "",
-                ad_distinguished_name=(
-                    ad_user.distinguished_name if ad_user else ""
-                ),
-                ad_status=(
-                    "enabled"
-                    if ad_user is not None and ad_user.is_enabled
-                    else "disabled"
-                    if ad_user is not None
-                    else "error"
-                    if ad_error
-                    else "not_found"
-                ),
-                membership_state=membership_state,
+                **analysis,
             )
             self.db.add(item)
-            counts[category] += 1
+            counts[str(analysis["category"])] += 1
 
         file_row.rows_count = len(parsed.rows)
         file_row.working_count = counts["working"]
@@ -624,6 +678,93 @@ class TechExpertActualizationService:
             item.ad_status in {"enabled", "disabled"} for item in items
         )
         run.updated_at = utcnow()
+
+    def _recalculate_files(self, run_id: int) -> None:
+        files = {
+            file_row.id: file_row
+            for file_row in self.db.scalars(
+                select(TechExpertActualizationFile).where(
+                    TechExpertActualizationFile.run_id == int(run_id)
+                )
+            ).all()
+        }
+        items_by_file: dict[int, list[TechExpertActualizationItem]] = {
+            file_id: [] for file_id in files
+        }
+        for item in self.db.scalars(
+            select(TechExpertActualizationItem).where(
+                TechExpertActualizationItem.run_id == int(run_id)
+            )
+        ).all():
+            items_by_file.setdefault(item.file_id, []).append(item)
+        for file_id, file_row in files.items():
+            items = items_by_file.get(file_id, [])
+            file_row.rows_count = len(items)
+            file_row.working_count = sum(
+                item.category == "working" for item in items
+            )
+            file_row.not_working_count = sum(
+                item.category == "not_working" for item in items
+            )
+            file_row.review_count = sum(
+                item.category == "review" for item in items
+            )
+
+    def reanalyze_not_working(
+        self,
+        *,
+        run_id: int,
+        actor: str,
+    ) -> dict[str, int]:
+        run = self.get_run(run_id)
+        if run.status != "open":
+            raise ValueError("Пакет уже завершён")
+        items = list(
+            self.db.scalars(
+                select(TechExpertActualizationItem)
+                .where(
+                    TechExpertActualizationItem.run_id == run.id,
+                    TechExpertActualizationItem.category == "not_working",
+                )
+                .order_by(TechExpertActualizationItem.id)
+            ).all()
+        )
+        result = {
+            "checked": len(items),
+            "working": 0,
+            "not_working": 0,
+            "review": 0,
+        }
+        if not items:
+            return result
+
+        context = self._analysis_context()
+        for item in items:
+            source = ParsedTechExpertRow(
+                row_number=item.source_row,
+                fio=item.source_fio,
+                position=item.source_position,
+                email=normalize_email(item.source_email),
+                phone=item.source_phone,
+            )
+            analysis = self._analyze_source(source, context)
+            self._apply_analysis(item, analysis)
+            result[str(analysis["category"])] += 1
+
+        self.db.flush()
+        self._recalculate_files(run.id)
+        self._recalculate_run(run)
+        self.db.add(
+            AuditLog(
+                actor=actor,
+                action="techexpert_actualization_not_working_reanalyzed",
+                target=f"run:{run.id}",
+                result="success",
+                details=json.dumps(result, ensure_ascii=False, sort_keys=True),
+            )
+        )
+        self.db.commit()
+        return result
 
     def run_details(self, run_id: int) -> dict[str, object]:
         run = self.get_run(run_id)

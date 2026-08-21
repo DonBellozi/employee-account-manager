@@ -313,6 +313,12 @@
 
   {% if actualization_details.rows %}
   <div class="techexpert-group-actions">
+    {% if actualization_run.not_working_count %}
+    <form method="post" action="/settings/techexpert/actualization/{{ actualization_run.id }}/reanalyze-not-working">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="button secondary" type="submit">Повторно проверить «Не работают»</button>
+    </form>
+    {% endif %}
     <form method="post" action="/settings/techexpert/actualization/{{ actualization_run.id }}/group">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="action" value="add">

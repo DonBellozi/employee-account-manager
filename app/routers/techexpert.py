@@ -357,6 +357,38 @@ async def techexpert_actualization_upload(
 
 
 @router.post(
+    "/settings/techexpert/actualization/{run_id}/reanalyze-not-working"
+)
+def techexpert_actualization_reanalyze_not_working(
+    run_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        result = TechExpertActualizationService(
+            settings,
+            db,
+            config,
+        ).reanalyze_not_working(run_id=run_id, actor=current.username)
+        return _redirect(
+            message=(
+                f"Повторно проверено: {result['checked']}; "
+                f"теперь работают {result['working']}, "
+                f"не работают {result['not_working']}, "
+                f"проверить вручную {result['review']}"
+            )
+        )
+    except Exception as exc:
+        db.rollback()
+        return _redirect(error=f"Повторная проверка не выполнена: {exc}")
+
+
+@router.post(
     "/settings/techexpert/actualization/{run_id}/items/{item_id}/resolve"
 )
 def techexpert_actualization_resolve(
