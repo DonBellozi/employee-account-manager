@@ -17,6 +17,7 @@ from app.models_dismissal_lifecycle import (
     FinalDismissalBlockRun,
 )
 from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
+from app.models_preliminary_dismissals import PreliminaryDismissalItem
 from app.services.hr_employment import sync_workbook_employment
 from app.services.onec_xlsx import parse_onec_xlsx
 
@@ -169,8 +170,6 @@ class UpcomingDismissalService:
                 )
             ).all()
         )
-        if not employment_rows:
-            return []
 
         by_worker: dict[str, list[HREmploymentState]] = defaultdict(list)
         for row in employment_rows:
@@ -222,8 +221,9 @@ class UpcomingDismissalService:
         for worker_key, states in by_worker.items():
             # Любая продолжающаяся занятость в любой организации защищает
             # общие учетные записи от окончательного увольнения.
-            if any(state.status == "active" for state in states):
-                continue
+            final_dismissal = not any(
+                state.status == "active" for state in states
+            )
 
             explicit_dates = [
                 state.dismissal_date
@@ -236,11 +236,18 @@ class UpcomingDismissalService:
             final_date = max(explicit_dates)
             deferral = deferral_by_pair.get((worker_key, final_date))
             deferred_until = deferral.deferred_until if deferral else None
+            if not final_dismissal:
+                deferral = None
+                deferred_until = None
 
             # Объект остается в «Ближайших увольнениях», пока не завершилась
             # автоблокировка. Успешный объект исчезает только на следующий
             # день и затем показывается одной итоговой строкой в журнале.
-            block_run = block_run_by_pair.get((worker_key, final_date))
+            block_run = (
+                block_run_by_pair.get((worker_key, final_date))
+                if final_dismissal
+                else None
+            )
             if (
                 not include_expired
                 and final_date < today
@@ -249,19 +256,22 @@ class UpcomingDismissalService:
                     or deferred_until < today
                 )
             ):
-                completed_before_today = self._completed_before_today(
-                    block_run,
-                    today,
-                )
-                historical_before_automation = bool(
-                    block_run is None
-                    and (
-                        automation_state is None
-                        or final_date < automation_state.activated_on
-                    )
-                )
-                if completed_before_today or historical_before_automation:
+                if not final_dismissal:
                     continue
+                else:
+                    completed_before_today = self._completed_before_today(
+                        block_run,
+                        today,
+                    )
+                    historical_before_automation = bool(
+                        block_run is None
+                        and (
+                            automation_state is None
+                            or final_date < automation_state.activated_on
+                        )
+                    )
+                    if completed_before_today or historical_before_automation:
+                        continue
 
             worker_records = records_by_worker.get(worker_key, [])
             preferred_records = sorted(
@@ -330,9 +340,10 @@ class UpcomingDismissalService:
                     }
                 )
 
-            effective_block_date = max(
-                final_date,
-                deferred_until or final_date,
+            effective_block_date = (
+                max(final_date, deferred_until or final_date)
+                if final_dismissal
+                else final_date
             )
             days_until = (final_date - today).days
             if days_until == 0:
@@ -353,8 +364,12 @@ class UpcomingDismissalService:
                     "dismissal_date": final_date,
                     "timing_label": timing_label,
                     "organizations": organizations,
+                    "preliminary": False,
+                    "final_dismissal": final_dismissal,
+                    "blocking_required": final_dismissal,
                     "deferred": bool(
-                        deferred_until is not None
+                        final_dismissal
+                        and deferred_until is not None
                         and deferred_until > final_date
                     ),
                     "deferred_until": deferred_until,
@@ -379,6 +394,109 @@ class UpcomingDismissalService:
                         if deferral is not None
                         else ""
                     ),
+                }
+            )
+
+        candidate_worker_keys = {
+            str(item.get("worker_key") or "") for item in candidates
+        }
+        confirmed_pairs = {
+            (state.worker_key, normalize(state.source_id))
+            for state in employment_rows
+            if state.dismissal_date is not None
+        }
+        preliminary_items = list(
+            self.db.scalars(
+                select(PreliminaryDismissalItem).where(
+                    PreliminaryDismissalItem.status == "active",
+                    PreliminaryDismissalItem.worker_key != "",
+                    PreliminaryDismissalItem.dismissal_date >= today,
+                )
+            ).all()
+        )
+        preliminary_worker_keys = {
+            item.worker_key for item in preliminary_items if item.worker_key
+        }
+        preliminary_records = list(
+            self.db.scalars(
+                select(HRSourceRecord).where(
+                    HRSourceRecord.worker_key.in_(preliminary_worker_keys)
+                )
+            ).all()
+        ) if preliminary_worker_keys else []
+        preliminary_records_by_pair = {
+            (record.worker_key, normalize(record.source_id)): record
+            for record in preliminary_records
+        }
+
+        for item in preliminary_items:
+            source_id = normalize(item.source_id)
+            if (item.worker_key, source_id) in confirmed_pairs:
+                continue
+            # При кадровом подтверждении этого же человека обычная строка уже
+            # содержит все организации; предварительную рядом не дублируем.
+            if item.worker_key in candidate_worker_keys:
+                continue
+            record = preliminary_records_by_pair.get(
+                (item.worker_key, source_id)
+            )
+            login = record.login.strip().lower() if record is not None else ""
+            email = (
+                record.corporate_email.strip().lower()
+                if record is not None
+                else ""
+            )
+            try:
+                departments = json.loads(item.departments_json or "[]")
+            except (TypeError, json.JSONDecodeError):
+                departments = []
+            if not isinstance(departments, list):
+                departments = []
+            department_text = " / ".join(
+                " ".join(str(value or "").split())
+                for value in departments
+                if " ".join(str(value or "").split())
+            )
+            placement = " – ".join(
+                value
+                for value in (department_text, " ".join(item.position.split()))
+                if value
+            )
+            days_until = (item.dismissal_date - today).days
+            if days_until == 0:
+                timing_label = "Сегодня"
+            elif days_until == 1:
+                timing_label = "Завтра"
+            else:
+                timing_label = f"Через {days_until} дн."
+            candidates.append(
+                {
+                    "worker_key": item.worker_key,
+                    "fio": item.fio,
+                    "login": login,
+                    "email": email,
+                    "dismissal_date": item.dismissal_date,
+                    "timing_label": timing_label,
+                    "organizations": [
+                        {
+                            "source_id": source_id,
+                            "source_name": item.source_name or source_id,
+                            "dismissal_date": item.dismissal_date,
+                            "status": "preliminary",
+                            "is_present": True,
+                            "placements": [placement] if placement else [],
+                        }
+                    ],
+                    "preliminary": True,
+                    "final_dismissal": False,
+                    "blocking_required": False,
+                    "deferred": False,
+                    "deferred_until": None,
+                    "effective_block_date": item.dismissal_date,
+                    "blocking_completed": False,
+                    "blocking_completed_at": None,
+                    "deferral_count": 0,
+                    "deferral_operator": "",
                 }
             )
 
@@ -428,9 +546,11 @@ class UpcomingDismissalService:
         автоматизации в FinalDismissalLifecycleService.
         """
         self.ensure_primary_employment_state()
-        return self._all_candidates(
-            include_expired=True
-        )[: max(1, int(limit))]
+        return [
+            item
+            for item in self._all_candidates(include_expired=True)
+            if item.get("blocking_required")
+        ][: max(1, int(limit))]
 
     def defer(
         self,
@@ -456,6 +576,10 @@ class UpcomingDismissalService:
         if candidate["dismissal_date"] != expected_dismissal_date:
             raise ValueError(
                 "Дата увольнения изменилась. Обновите журнал и проверьте запись снова"
+            )
+        if not candidate.get("blocking_required"):
+            raise ValueError(
+                "Отсрочка не требуется: работа в другой организации продолжается"
             )
 
         deferral = self.db.scalar(

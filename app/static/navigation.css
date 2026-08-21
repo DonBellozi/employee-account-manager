@@ -332,6 +332,16 @@
 .upcoming-table td {
   vertical-align: middle;
 }
+.upcoming-table tr.upcoming-preliminary td {
+  color: #94a3b8;
+  background: #fbfcfe;
+}
+.upcoming-table tr.upcoming-preliminary strong,
+.upcoming-table tr.upcoming-preliminary code,
+.upcoming-table tr.upcoming-preliminary .muted,
+.upcoming-table tr.upcoming-preliminary .upcoming-meta {
+  color: #94a3b8;
+}
 .upcoming-date {
   white-space: nowrap;
   font-weight: 800;

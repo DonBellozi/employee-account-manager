@@ -19,7 +19,7 @@
     </thead>
     <tbody>
       {% for item in upcoming_dismissals %}
-      <tr>
+      <tr{% if item.preliminary %} class="upcoming-preliminary"{% endif %}>
         <td>
           <strong>{{ item.fio }}</strong>
           <div class="upcoming-meta">
@@ -45,7 +45,12 @@
           {% endfor %}
         </td>
         <td>
-          {% if item.blocking_completed %}
+          {% if item.preliminary %}
+          <span class="muted">—</span>
+          {% elif not item.blocking_required %}
+          <span class="registry-state checked">Не требуется</span>
+          <div class="muted">Работа в другой организации продолжается</div>
+          {% elif item.blocking_completed %}
           <span class="registry-state checked">Завершено</span>
           <div class="muted">
             {{ item.blocking_completed_at|app_datetime('%d.%m.%Y %H:%M') }}
@@ -67,6 +72,7 @@
           {% endif %}
         </td>
         <td class="upcoming-actions-cell">
+          {% if not item.preliminary %}
           <div class="upcoming-actions">
             <details class="journal-details upcoming-details"
                      data-upcoming-dismissal-details
@@ -79,7 +85,7 @@
                 <div class="upcoming-details-loading">Загружаю сохранённые данные…</div>
               </div>
             </details>
-          {% if not item.blocking_completed %}
+          {% if item.blocking_required and not item.blocking_completed %}
           <form method="post"
                 action="/dismissals/upcoming/defer"
                 data-upcoming-dismissal-defer>
@@ -93,6 +99,7 @@
           </form>
           {% endif %}
           </div>
+          {% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -100,5 +107,5 @@
   </table>
 </div>
 {% else %}
-<div class="upcoming-empty">Ближайших окончательных увольнений нет.</div>
+<div class="upcoming-empty">Ближайших увольнений нет.</div>
 {% endif %}

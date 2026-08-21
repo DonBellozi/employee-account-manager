@@ -295,6 +295,9 @@ class DismissalDetailsSnapshotWorker:
                     self.settings,
                     db,
                 ).list_upcoming(limit=1000)
+                candidates = [
+                    item for item in candidates if not item.get("preliminary")
+                ]
                 refreshed = 0
                 for candidate in candidates:
                     if self._stop_event.is_set():

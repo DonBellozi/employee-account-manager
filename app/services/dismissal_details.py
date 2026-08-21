@@ -343,6 +343,12 @@ class DismissalDetailsService:
         )
 
     def _automatic_blocking(self, candidate: dict) -> dict[str, str]:
+        if not candidate.get("blocking_required", True):
+            return self._row(
+                "Автоблокировка при увольнении",
+                "Не требуется",
+                note="У работника остается активная занятость в другой организации",
+            )
         run = self.db.scalar(
             select(FinalDismissalBlockRun)
             .where(

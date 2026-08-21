@@ -21,7 +21,11 @@ from app.models import (
     DismissalSchedule,
     ProvisioningOperation,
 )
-from app.models_notifications import DismissalEquipmentNotice
+from app.models_notifications import (
+    DismissalEquipmentNotice,
+    HREmploymentDismissalEvent,
+)
+from app.models_onec_sources import HREmploymentState
 from app.models_techexpert import TechExpertNotification
 from app.models_zimbra_lifecycle import ZimbraEmploymentAction
 from app.models_dismissal_lifecycle import (
@@ -564,6 +568,176 @@ def _completed_dismissal_journal_item(
         "completed_at": run.completed_at,
     }
 
+
+def _organization_dismissal_journal_item(
+    events: list[HREmploymentDismissalEvent],
+    *,
+    notice: DismissalEquipmentNotice | None,
+    techexpert_notifications: list[TechExpertNotification],
+    snapshot: DismissalDetailsSnapshot | None,
+) -> dict[str, object]:
+    """Итог одной организации, когда общая AD-учетка остается активной."""
+    event_date = max(
+        event.current_dismissal_date or event.first_dismissal_date
+        for event in events
+    )
+    fio = next((event.fio for event in events if event.fio), "Работник")
+    organization_names = list(
+        dict.fromkeys(
+            str(event.source_name or event.source_id).strip()
+            for event in events
+            if str(event.source_name or event.source_id).strip()
+        )
+    )
+    components: list[dict[str, object]] = []
+    if notice is not None:
+        components.append(_dismissal_notice_journal_item(notice))
+    components.extend(
+        _techexpert_journal_item(item)
+        for item in techexpert_notifications
+    )
+    components.sort(key=lambda item: item.get("completed_at") or item["created_at"])
+    completed_at = max(
+        [
+            *[event.updated_at for event in events],
+            *[
+                item.get("completed_at") or item["created_at"]
+                for item in components
+            ],
+        ]
+    )
+
+    try:
+        recipients = json.loads(notice.recipients_json or "[]") if notice else []
+    except (TypeError, json.JSONDecodeError):
+        recipients = []
+    if not isinstance(recipients, list):
+        recipients = []
+    corporate_email = ", ".join(
+        str(item.get("email") or "").strip()
+        for item in recipients
+        if isinstance(item, dict)
+        and item.get("kind") == "corporate"
+        and str(item.get("email") or "").strip()
+    )
+    personal_email = next(
+        (
+            str(item.get("email") or "").strip()
+            for item in recipients
+            if isinstance(item, dict)
+            and item.get("kind") == "personal"
+            and str(item.get("email") or "").strip()
+        ),
+        "",
+    )
+    system_rows = (
+        DismissalDetailsCacheService._valid_rows(snapshot.payload_json)
+        if snapshot is not None
+        else []
+    )
+    auto_row = next(
+        (
+            row
+            for row in system_rows
+            if row["label"] == "Автоблокировка при увольнении"
+        ),
+        None,
+    )
+    if auto_row is None:
+        system_rows.append(
+            {
+                "label": "Автоблокировка при увольнении",
+                "value": "Не требуется",
+                "state": "neutral",
+                "note": "Работа в другой организации продолжается",
+            }
+        )
+    else:
+        auto_row.update(
+            value="Не требуется",
+            state="neutral",
+            note="Работа в другой организации продолжается",
+        )
+
+    steps = [
+        {
+            "record_id": event.id,
+            "action": "Кадровое подтверждение",
+            "status_key": "success",
+            "status_label": "Подтверждено",
+            "operator": "Система",
+            "timestamp": event.updated_at,
+            "details": [
+                ("Организация", event.source_name or event.source_id),
+                (
+                    "Дата увольнения",
+                    (
+                        event.current_dismissal_date
+                        or event.first_dismissal_date
+                    ).strftime("%d.%m.%Y"),
+                ),
+            ],
+            "blocking_systems": [],
+            "error_message": "",
+        }
+        for event in events
+    ]
+    steps.extend(
+        {
+            "record_id": item["record_id"],
+            "action": item["action"],
+            "status_key": item["status_key"],
+            "status_label": item["status_label"],
+            "operator": item["operator"],
+            "timestamp": item.get("completed_at") or item["created_at"],
+            "details": item.get("details") or [],
+            "blocking_systems": item.get("blocking_systems") or [],
+            "error_message": item.get("error_message") or "",
+        }
+        for item in components
+    )
+    steps.sort(key=lambda item: item["timestamp"])
+    errors = [
+        f"{item['action']}: {item['error_message']}"
+        for item in components
+        if str(item.get("error_message") or "").strip()
+    ]
+    has_warnings = bool(errors) or any(
+        item.get("status_key") in {"failed", "partial", "running"}
+        for item in components
+    )
+    return {
+        "kind": "dismissal",
+        "record_id": events[0].id,
+        "created_at": completed_at,
+        "action": "Увольнение",
+        "subject": fio,
+        "login": "",
+        "corporate_email": corporate_email,
+        "personal_email": personal_email,
+        "mail_domain": "",
+        "operator": "Система",
+        "status_key": "partial" if has_warnings else "success",
+        "status_label": (
+            "Завершено с предупреждениями" if has_warnings else "Завершено"
+        ),
+        "details": [
+            ("ФИО", fio),
+            ("Дата увольнения", event_date.strftime("%d.%m.%Y")),
+            ("Организации", ", ".join(organization_names)),
+            ("Общая блокировка", "Не требуется"),
+            ("Корпоративная почта", corporate_email),
+            ("Личная почта", personal_email),
+        ],
+        "dismissal_date": event_date,
+        "dismissal_system_rows": system_rows,
+        "dismissal_steps": steps,
+        "blocking_systems": [],
+        "equipment_snapshot": [],
+        "error_message": "\n".join(errors),
+        "completed_at": completed_at,
+    }
+
 def _journal_items(
     db: Session,
     *,
@@ -719,6 +893,42 @@ def _journal_items(
         for item in dismissal_notices
         if (item.worker_key, item.dismissal_date) in completed_keys
     }
+    linked_event_ids: set[int] = set()
+    notice_event_ids: dict[int, list[int]] = {}
+    for notice in dismissal_notices:
+        try:
+            raw_event_ids = json.loads(notice.event_ids_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            raw_event_ids = []
+        event_ids = [
+            int(value) for value in raw_event_ids if str(value).isdigit()
+        ]
+        notice_event_ids[notice.id] = event_ids
+        linked_event_ids.update(event_ids)
+    linked_events = (
+        list(
+            db.scalars(
+                select(HREmploymentDismissalEvent).where(
+                    HREmploymentDismissalEvent.id.in_(linked_event_ids)
+                )
+            ).all()
+        )
+        if linked_event_ids
+        else []
+    )
+    event_by_id = {event.id: event for event in linked_events}
+    for notice in dismissal_notices:
+        for event_id in notice_event_ids.get(notice.id, []):
+            event = event_by_id.get(event_id)
+            if event is None:
+                continue
+            event_date = (
+                event.current_dismissal_date
+                or event.first_dismissal_date
+            )
+            key = (event.worker_key, event_date)
+            if key in completed_keys:
+                notice_by_key[key] = notice
     techexpert_by_key: dict[
         tuple[str, date],
         list[TechExpertNotification],
@@ -784,6 +994,99 @@ def _journal_items(
         for run in final_block_runs
     ]
 
+    latest_events_by_source: dict[
+        tuple[str, str],
+        HREmploymentDismissalEvent,
+    ] = {}
+    for event in db.scalars(
+        select(HREmploymentDismissalEvent).order_by(
+            HREmploymentDismissalEvent.sequence,
+            HREmploymentDismissalEvent.id,
+        )
+    ).all():
+        latest_events_by_source[(event.worker_key, event.source_id)] = event
+    active_worker_keys = set(
+        db.scalars(
+            select(HREmploymentState.worker_key).where(
+                HREmploymentState.status == "active"
+            )
+        ).all()
+    )
+    organization_event_groups: dict[
+        tuple[str, date],
+        list[HREmploymentDismissalEvent],
+    ] = {}
+    for event in latest_events_by_source.values():
+        event_date = event.current_dismissal_date
+        if (
+            event.worker_key not in active_worker_keys
+            or event.status not in {"open", "absent"}
+            or event_date is None
+            or event_date >= today
+        ):
+            continue
+        key = (event.worker_key, event_date)
+        if key in completed_keys:
+            continue
+        organization_event_groups.setdefault(key, []).append(event)
+
+    organization_dismissal_items: list[dict[str, object]] = []
+    for (worker_key, event_date), events in list(
+        organization_event_groups.items()
+    )[:50]:
+        event_ids = {event.id for event in events}
+        worker_notices = list(
+            db.scalars(
+                select(DismissalEquipmentNotice)
+                .where(DismissalEquipmentNotice.worker_key == worker_key)
+                .order_by(
+                    desc(DismissalEquipmentNotice.created_at),
+                    desc(DismissalEquipmentNotice.id),
+                )
+            ).all()
+        )
+        notice = None
+        for candidate_notice in worker_notices:
+            try:
+                raw_ids = json.loads(candidate_notice.event_ids_json or "[]")
+            except (TypeError, json.JSONDecodeError):
+                raw_ids = []
+            candidate_ids = {
+                int(value) for value in raw_ids if str(value).isdigit()
+            }
+            if event_ids.intersection(candidate_ids):
+                notice = candidate_notice
+                break
+        if notice is None:
+            notice = next(
+                (
+                    candidate_notice
+                    for candidate_notice in worker_notices
+                    if candidate_notice.dismissal_date == event_date
+                ),
+                None,
+            )
+        organization_dismissal_items.append(
+            _organization_dismissal_journal_item(
+                events,
+                notice=notice,
+                techexpert_notifications=list(
+                    db.scalars(
+                        select(TechExpertNotification).where(
+                            TechExpertNotification.worker_key == worker_key,
+                            TechExpertNotification.dismissal_date == event_date,
+                        )
+                    ).all()
+                ),
+                snapshot=db.scalar(
+                    select(DismissalDetailsSnapshot).where(
+                        DismissalDetailsSnapshot.worker_key == worker_key,
+                        DismissalDetailsSnapshot.dismissal_date == event_date,
+                    )
+                ),
+            )
+        )
+
     items = [
         *(
             _provisioning_journal_item(item)
@@ -805,6 +1108,7 @@ def _journal_items(
             for item in dismissal_operations
         ),
         *completed_dismissal_items,
+        *organization_dismissal_items,
     ]
     items.sort(key=lambda item: item["created_at"], reverse=True)
     return items[:50]

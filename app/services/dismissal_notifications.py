@@ -747,6 +747,111 @@ class DismissalNotificationService:
             added += 1
         return merged, added
 
+    def queue_preliminary_notice(
+        self,
+        *,
+        candidate: dict,
+        equipment_notice_id: int | None = None,
+    ) -> tuple[DismissalEquipmentNotice | None, str]:
+        """Создать/дослать письмо из предварительного кадрового уведомления.
+
+        Такое письмо не является кадровым подтверждением и не запускает ни
+        одну блокировку. Переданный equipment_notice_id удерживает один и тот
+        же эпизод при переносе предварительной даты.
+        """
+        profiles = self._profiles()
+        if not profiles:
+            return None, "Не настроен почтовый профиль отправителя"
+
+        sender_domain, planned = self._event_recipient_plan(candidate, profiles)
+        if not planned:
+            return None, "Не найден корпоративный или личный адрес работника"
+
+        templates = ensure_dismissal_mail_templates(self.db, self.settings)
+        sender_domains = {
+            str(item.get("sender_domain") or "").strip().lower()
+            for item in planned
+            if str(item.get("sender_domain") or "").strip()
+        }
+        if any(
+            domain not in templates
+            or not str(templates[domain].updated_by or "").strip()
+            for domain in sender_domains
+        ):
+            return None, (
+                "Сначала откройте и сохраните шаблон «Возврат оборудования» "
+                "для используемого домена"
+            )
+
+        notice = (
+            self.db.get(DismissalEquipmentNotice, equipment_notice_id)
+            if equipment_notice_id
+            else None
+        )
+        if notice is None:
+            notice = self.db.scalar(
+                select(DismissalEquipmentNotice).where(
+                    DismissalEquipmentNotice.worker_key
+                    == candidate["worker_key"],
+                    DismissalEquipmentNotice.dismissal_date
+                    == candidate["dismissal_date"],
+                )
+            )
+
+        if notice is None:
+            notice = DismissalEquipmentNotice(
+                worker_key=candidate["worker_key"],
+                dismissal_date=candidate["dismissal_date"],
+                fio=str(candidate.get("fio") or ""),
+                sender_domain=sender_domain,
+                event_ids_json="[]",
+                recipients_json=json.dumps(
+                    planned,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                status="pending",
+            )
+            self.db.add(notice)
+            self.db.commit()
+            self.db.refresh(notice)
+        else:
+            merged, added = self._merge_recipients(
+                self._load_recipients(notice),
+                planned,
+            )
+            notice.recipients_json = json.dumps(
+                merged,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            notice.fio = str(candidate.get("fio") or notice.fio)
+            if not notice.sender_domain:
+                notice.sender_domain = sender_domain
+            if added:
+                sent_count = sum(1 for item in merged if item.get("sent"))
+                notice.status = "partial" if sent_count else "pending"
+                notice.next_attempt_at = None
+                notice.last_error = ""
+            notice.updated_at = utcnow()
+            self.db.commit()
+
+        if notice.status == "sent":
+            return notice, "sent"
+
+        now = utcnow()
+        next_attempt_at = notice.next_attempt_at
+        if next_attempt_at is not None:
+            compare_now = now
+            if next_attempt_at.tzinfo is None:
+                compare_now = now.replace(tzinfo=None)
+            if next_attempt_at > compare_now:
+                return notice, notice.status
+
+        self._send_notice(notice, candidate, profiles)
+        self.db.refresh(notice)
+        return notice, notice.status
+
     def process(self) -> dict[str, int | str]:
         if self.settings.dry_run:
             return {"status": "dry_run", "created": 0, "sent": 0}
@@ -959,6 +1064,22 @@ class DismissalNotificationWorker:
     def _run_once(self) -> None:
         with self.session_factory() as db:
             try:
+                # Предварительное письмо использует ту же минутную очередь,
+                # но само по себе никогда не становится кадровым разрешением
+                # на блокировку.
+                from app.services.preliminary_dismissals import (
+                    PreliminaryDismissalService,
+                )
+
+                preliminary = PreliminaryDismissalService(
+                    self.settings,
+                    db,
+                ).process()
+                if preliminary.get("messages"):
+                    logger.info(
+                        "Обработано предварительных кадровых писем: %s",
+                        preliminary.get("messages"),
+                    )
                 result = DismissalNotificationService(
                     self.settings,
                     db,

@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Предварительные увольнения{% endblock %}
+{% block content %}
+<div class="heading-row">
+  <div>
+    <h1>Предварительные увольнения</h1>
+    <p class="muted">Ранние уведомления кадрового департамента для одной организации.</p>
+  </div>
+  <a class="button secondary" href="/settings">Настройки</a>
+</div>
+
+{% if saved %}<div class="alert success">Настройки сохранены.</div>{% endif %}
+{% if result %}<div class="alert success">{{ result }}</div>{% endif %}
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+<section class="card">
+  <div class="observer-card-heading">
+    <div>
+      <h2>Правило входящего письма</h2>
+      <p class="muted">Используется общее read-only IMAP-подключение кадровой почты.</p>
+    </div>
+    <span class="integration-badge{% if summary.settings.enabled %} active{% endif %}">
+      {{ 'Включено' if summary.settings.enabled else 'Отключено' }}
+    </span>
+  </div>
+
+  <div class="alert warning">
+    Предварительное письмо только добавляет бледную строку и отправляет просьбу
+    вернуть оборудование. AD, почта, DSM и Техэксперт ждут кадровую выгрузку.
+  </div>
+
+  <form method="post" action="/settings/preliminary-dismissals/save" class="settings-source-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="settings-source-grid">
+      <label>
+        <span>Организация</span>
+        <select name="source_id">
+          <option value="">Выберите организацию</option>
+          {% for source in sources %}
+          <option value="{{ source.source_id }}"{% if summary.settings.source_id == source.source_id %} selected{% endif %}>
+            {{ source.name }}
+          </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>Папка IMAP</span>
+        <input type="text" name="imap_folder" value="{{ summary.settings.imap_folder or 'INBOX' }}" required>
+      </label>
+      <label>
+        <span>Отправитель содержит</span>
+        <input type="text" name="sender_filter" value="{{ summary.settings.sender_filter }}" placeholder="hr@company.ru">
+      </label>
+      <label>
+        <span>Тема содержит</span>
+        <input type="text" name="subject_filter" value="{{ summary.settings.subject_filter }}" placeholder="Увольнение">
+      </label>
+    </div>
+    <label class="observer-check-row">
+      <input type="checkbox" name="enabled" value="on"{% if summary.settings.enabled %} checked{% endif %}>
+      <span>
+        <strong>Получать предварительные уведомления</strong>
+        <small>Письма проверяются раз в минуту и не помечаются прочитанными.</small>
+      </span>
+    </label>
+    <div class="observer-form-actions">
+      <button class="button" type="submit">Сохранить</button>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="observer-card-heading">
+    <div>
+      <h2>Состояние</h2>
+      <p class="muted">Техническая сводка без лишних записей в основном журнале.</p>
+    </div>
+    <form method="post" action="/settings/preliminary-dismissals/check-now">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="button secondary" type="submit">Проверить почту сейчас</button>
+    </form>
+  </div>
+  <div class="settings-status-grid">
+    <div><span>Писем обработано</span><strong>{{ summary.messages }}</strong></div>
+    <div><span>Ожидают кадровую выгрузку</span><strong>{{ summary.counts.active }}</strong></div>
+    <div><span>Подтверждено кадрами</span><strong>{{ summary.counts.confirmed }}</strong></div>
+    <div><span>Не сопоставлено</span><strong>{{ summary.counts.unmatched }}</strong></div>
+  </div>
+  <dl class="integration-details">
+    <dt>Организация</dt><dd>{{ summary.source_name or 'Не выбрана' }}</dd>
+    <dt>Последняя проверка</dt>
+    <dd>{{ summary.settings.last_checked_at|app_datetime('%d.%m.%Y %H:%M') if summary.settings.last_checked_at else 'Еще не выполнялась' }}</dd>
+    <dt>Результат</dt><dd>{{ summary.status_label }}</dd>
+    {% if summary.settings.last_error %}<dt>Сообщение</dt><dd class="registry-error">{{ summary.settings.last_error }}</dd>{% endif %}
+  </dl>
+</section>
+{% endblock %}

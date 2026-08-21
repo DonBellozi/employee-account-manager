@@ -20,6 +20,7 @@ from app.routers import (
     hr_registry_multisource,
     mail_templates,
     onec_sources,
+    preliminary_dismissals,
     settings_ui,
     synology,
     techexpert,
@@ -129,6 +130,7 @@ app.include_router(employees.router)
 app.include_router(hr_reconcile_multisource.router)
 app.include_router(settings_ui.router)
 app.include_router(onec_sources.router)
+app.include_router(preliminary_dismissals.router)
 app.include_router(synology.router)
 app.include_router(techexpert.router)
 app.include_router(telegram_settings.router)
