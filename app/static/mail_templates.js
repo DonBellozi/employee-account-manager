@@ -37,6 +37,71 @@
     activate(buttons[0].dataset.templateTarget || '');
   }
 
+  const previewDialog = document.querySelector('[data-mail-template-preview-dialog]');
+  const previewFrame = previewDialog?.querySelector('[data-mail-template-preview-frame]');
+  const previewTitle = previewDialog?.querySelector('[data-mail-template-preview-title]');
+  const previewSender = previewDialog?.querySelector('[data-mail-template-preview-sender]');
+  const previewSubject = previewDialog?.querySelector('[data-mail-template-preview-subject]');
+  let previewTrigger = null;
+
+  const previewDocument = body => `<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html { color-scheme: light; background: #fff; }
+    body { margin: 24px; color: #172033; font-family: Arial, sans-serif; line-height: 1.5; overflow-wrap: anywhere; }
+    img { max-width: 100%; height: auto; }
+    table { max-width: 100%; }
+  </style>
+</head>
+<body>${body || '<p style="color:#64748b">Шаблон пуст.</p>'}</body>
+</html>`;
+
+  const closePreview = () => {
+    if (previewDialog?.open) previewDialog.close();
+  };
+
+  workspace.querySelectorAll('[data-mail-template-preview]').forEach(button => {
+    button.addEventListener('click', () => {
+      const form = button.closest('[data-mail-template-form]');
+      if (!form || !previewDialog || !previewFrame) return;
+
+      const senderName = form.querySelector('[name="sender_name"]')?.value.trim() || '';
+      const senderEmail = form.querySelector('[name="sender_email"]')?.value.trim() || '';
+      const subject = form.querySelector('[name="subject"]')?.value || '';
+      const body = form.querySelector('[name="body_html"]')?.value || '';
+      const sender = senderName && senderEmail
+        ? `${senderName} <${senderEmail}>`
+        : senderName || senderEmail || 'Не указан';
+      const label = button.dataset.previewLabel || 'Шаблон';
+      const domain = button.dataset.previewDomain || '';
+      previewTrigger = button;
+
+      if (previewTitle) {
+        previewTitle.textContent = domain ? `${label} · @${domain}` : label;
+      }
+      if (previewSender) previewSender.textContent = sender;
+      if (previewSubject) previewSubject.textContent = subject || 'Без темы';
+      previewFrame.srcdoc = previewDocument(body);
+      if (!previewDialog.open) previewDialog.showModal();
+      previewDialog.querySelector('[data-mail-template-preview-close]')?.focus();
+    });
+  });
+
+  previewDialog?.querySelectorAll('[data-mail-template-preview-close]').forEach(button => {
+    button.addEventListener('click', closePreview);
+  });
+  previewDialog?.addEventListener('click', event => {
+    if (event.target === previewDialog) closePreview();
+  });
+  previewDialog?.addEventListener('close', () => {
+    previewFrame?.removeAttribute('srcdoc');
+    previewTrigger?.focus();
+    previewTrigger = null;
+  });
+
   const recipientStorageKey = 'mail-template-test-recipient';
   let savedRecipient = '';
   try {

@@ -46,7 +46,7 @@ TEMPLATE_DEFINITIONS = {
     "dismissal": {
         "label": "Возврат оборудования при увольнении",
         "short_label": "Увольнение / оборудование",
-        "description": "Автоматическое уведомление при окончательном увольнении работника.",
+        "description": "Уведомление при первом появлении даты увольнения в организации.",
         "variables": DISMISSAL_TEMPLATE_VARIABLES,
     },
 }

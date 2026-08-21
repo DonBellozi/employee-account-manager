@@ -8,7 +8,7 @@
   <div>
     <h1>Шаблоны писем</h1>
     <p class="muted admin-lead">
-      Слева выбирается письмо, справа редактируется его содержимое. Отправитель настраивается отдельно для каждого почтового домена.
+      Выберите письмо слева. Справа его можно изменить, посмотреть и отправить на тестовый адрес.
     </p>
   </div>
 </div>
@@ -139,7 +139,7 @@
 
             {% if template_key == 'dismissal' %}
             <div class="alert warning mail-template-inline-note">
-              Письмо отправляется только при окончательном увольнении: если у человека остается активная должность или работа в другой организации, рассылки не будет. Отсрочка блокировки повторное письмо не отправляет.
+              Письмо относится к событию увольнения в этом домене и отправляется при первом появлении даты. Работа в другой организации не отменяет письмо, но блокировка AD ждет окончательного увольнения. Перенос даты повторное письмо не отправляет. Отсрочка блокировки повторное письмо не отправляет.
               {% if not updated_by %}
               <br><strong>Авторассылка для этого домена начнется только после первого сохранения шаблона.</strong>
               {% endif %}
@@ -182,7 +182,16 @@
                   Используется начальный шаблон
                 {% endif %}
               </div>
-              <button type="submit">Сохранить</button>
+              <div class="mail-template-action-buttons">
+                <button type="button"
+                        class="button secondary"
+                        data-mail-template-preview
+                        data-preview-label="{{ definition.label }}"
+                        data-preview-domain="{{ profile.domain }}">
+                  Посмотреть
+                </button>
+                <button type="submit">Сохранить</button>
+              </div>
             </div>
           </form>
         </div>
@@ -190,6 +199,38 @@
     {% endfor %}
   </section>
 </div>
+
+<dialog class="mail-template-preview-dialog"
+        data-mail-template-preview-dialog
+        aria-labelledby="mail-template-preview-title">
+  <div class="mail-template-preview-head">
+    <div>
+      <span class="mail-template-preview-kicker">Предпросмотр письма</span>
+      <h2 id="mail-template-preview-title" data-mail-template-preview-title>Шаблон</h2>
+    </div>
+    <button type="button"
+            class="mail-template-preview-close"
+            data-mail-template-preview-close
+            aria-label="Закрыть">×</button>
+  </div>
+  <div class="mail-template-preview-meta">
+    <div><span>От</span><strong data-mail-template-preview-sender>—</strong></div>
+    <div><span>Тема</span><strong data-mail-template-preview-subject>—</strong></div>
+  </div>
+  <p class="muted mail-template-preview-note">
+    Это текущий черновик. Переменные показаны как написаны в шаблоне и не заменяются данными работника.
+  </p>
+  <div class="mail-template-preview-body">
+    <iframe sandbox
+            data-mail-template-preview-frame
+            title="Содержимое шаблона письма"></iframe>
+  </div>
+  <div class="mail-template-preview-footer">
+    <button type="button"
+            class="button secondary"
+            data-mail-template-preview-close>Закрыть</button>
+  </div>
+</dialog>
 {% else %}
 <section class="card">
   <div class="candidate-pool-empty">
