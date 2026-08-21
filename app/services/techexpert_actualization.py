@@ -35,6 +35,7 @@ from app.services.techexpert_access import (
 ACTIVE_EMPLOYMENT_STATUSES = {"active", "scheduled"}
 MAX_FILE_SIZE = 10 * 1024 * 1024
 MAX_DATA_ROWS = 10_000
+COMPATIBLE_CORPORATE_TLDS = {"com", "ru"}
 
 
 def utcnow() -> datetime:
@@ -50,6 +51,29 @@ def safe_excel_value(value: object) -> str:
     if text.startswith(("=", "+", "-", "@")):
         return "'" + text
     return text
+
+
+def organization_email_keys(value: object, source_id: object) -> set[str]:
+    """Exact email plus a safe .com/.ru alias for the configured organization."""
+
+    email = normalize_email(value)
+    current_domain = normalize_email(source_id).lstrip("@")
+    if email.count("@") != 1 or not current_domain:
+        return {email} if email else set()
+
+    local_part, domain = email.rsplit("@", 1)
+    current_stem, current_dot, current_tld = current_domain.rpartition(".")
+    domain_stem, domain_dot, domain_tld = domain.rpartition(".")
+    if (
+        local_part
+        and current_dot
+        and domain_dot
+        and current_stem == domain_stem
+        and current_tld in COMPATIBLE_CORPORATE_TLDS
+        and domain_tld in COMPATIBLE_CORPORATE_TLDS
+    ):
+        return {email, f"{local_part}@{current_domain}"}
+    return {email}
 
 
 @dataclass(frozen=True)
@@ -346,8 +370,15 @@ class TechExpertActualizationService:
         for record in records:
             by_fio.setdefault(normalize_fio(record.fio), []).append(record)
             for email in (record.corporate_email, record.personal_email):
-                if normalize_email(email):
-                    by_email.setdefault(normalize_email(email), []).append(record)
+                for email_key in organization_email_keys(email, self.source_id):
+                    by_email.setdefault(email_key, []).append(record)
+
+        def records_by_email(value: object) -> list[HRSourceRecord]:
+            matched: dict[int, HRSourceRecord] = {}
+            for email_key in organization_email_keys(value, self.source_id):
+                for candidate in by_email.get(email_key, []):
+                    matched[candidate.id] = candidate
+            return list(matched.values())
 
         mappings = self._mappings({record.worker_key for record in records})
         ad = ActiveDirectoryService(self.settings)
@@ -384,19 +415,24 @@ class TechExpertActualizationService:
             if len(candidates) > 1 and source.email:
                 email_candidates = {
                     record.worker_key: record
-                    for record in by_email.get(source.email, [])
+                    for record in records_by_email(source.email)
                     if record.worker_key in unique
                 }
                 if len(email_candidates) == 1:
                     candidates = list(email_candidates.values())
-                    reason_parts.append("Совпадение уточнено по e-mail")
+                    reason_parts.append(
+                        "Совпадение уточнено по e-mail"
+                        if source.email in by_email
+                        else "Совпадение уточнено по корпоративному e-mail "
+                        "с учетом смены домена .com/.ru"
+                    )
 
             category = "review"
             record = candidates[0] if len(candidates) == 1 else None
             if record is None:
                 email_suggestions = {
                     value.worker_key: value
-                    for value in by_email.get(source.email, [])
+                    for value in records_by_email(source.email)
                 } if source.email else {}
                 display_candidates = candidates or list(email_suggestions.values())
                 if not exact and not email_suggestions:
@@ -440,10 +476,16 @@ class TechExpertActualizationService:
             }
             if source.position and normalize_fio(source.position) not in normalized_positions:
                 reason_parts.append("Должность в кадрах изменилась")
-            if source.email and source.email not in {
-                normalize_email(record.corporate_email),
-                normalize_email(record.personal_email),
-            }:
+            record_email_keys = {
+                email_key
+                for value in (record.corporate_email, record.personal_email)
+                for email_key in organization_email_keys(value, self.source_id)
+            }
+            if (
+                source.email
+                and not organization_email_keys(source.email, self.source_id)
+                & record_email_keys
+            ):
                 reason_parts.append("E-mail отличается от кадровых данных")
 
             is_active = record.worker_key in active_worker_keys
