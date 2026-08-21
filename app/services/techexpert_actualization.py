@@ -1088,7 +1088,7 @@ class TechExpertActualizationService:
                     sequence,
                     record.fio,
                     position,
-                    record.personal_email or record.corporate_email,
+                    record.corporate_email,
                 ]
                 for column, value in enumerate(values, 1):
                     sheet.cell(
