@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Шаблоны писем{% endblock %}
 {% block content %}
-<link rel="stylesheet" href="/static/mail_templates.css">
-<script src="/static/mail_templates.js" defer></script>
+<link rel="stylesheet" href="/static/mail_templates.css?v=20260821-preview2">
+<script src="/static/mail_templates.js?v=20260821-preview2" defer></script>
 
 <div class="heading-row">
   <div>
@@ -222,6 +222,8 @@
   </p>
   <div class="mail-template-preview-body">
     <iframe sandbox
+            name="mail-template-preview-frame"
+            data-preview-url="/admin/mail-templates/preview/body"
             data-mail-template-preview-frame
             title="Содержимое шаблона письма"></iframe>
   </div>

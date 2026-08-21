@@ -44,20 +44,27 @@
   const previewSubject = previewDialog?.querySelector('[data-mail-template-preview-subject]');
   let previewTrigger = null;
 
-  const previewDocument = body => `<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    html { color-scheme: light; background: #fff; }
-    body { margin: 24px; color: #172033; font-family: Arial, sans-serif; line-height: 1.5; overflow-wrap: anywhere; }
-    img { max-width: 100%; height: auto; }
-    table { max-width: 100%; }
-  </style>
-</head>
-<body>${body || '<p style="color:#64748b">Шаблон пуст.</p>'}</body>
-</html>`;
+  const submitPreviewDocument = (sourceForm, body) => {
+    if (!previewFrame?.name || !previewFrame.dataset.previewUrl) return false;
+    const csrf = sourceForm.querySelector('[name="csrf"]')?.value || '';
+    const requestForm = document.createElement('form');
+    requestForm.method = 'POST';
+    requestForm.action = previewFrame.dataset.previewUrl;
+    requestForm.target = previewFrame.name;
+    requestForm.hidden = true;
+
+    [['csrf', csrf], ['body_html', body]].forEach(([name, value]) => {
+      const field = document.createElement('input');
+      field.type = 'hidden';
+      field.name = name;
+      field.value = value;
+      requestForm.appendChild(field);
+    });
+    document.body.appendChild(requestForm);
+    requestForm.submit();
+    requestForm.remove();
+    return true;
+  };
 
   const closePreview = () => {
     if (previewDialog?.open) previewDialog.close();
@@ -84,7 +91,7 @@
       }
       if (previewSender) previewSender.textContent = sender;
       if (previewSubject) previewSubject.textContent = subject || 'Без темы';
-      previewFrame.srcdoc = previewDocument(body);
+      if (!submitPreviewDocument(form, body)) return;
       if (!previewDialog.open) previewDialog.showModal();
       previewDialog.querySelector('[data-mail-template-preview-close]')?.focus();
     });
@@ -97,7 +104,7 @@
     if (event.target === previewDialog) closePreview();
   });
   previewDialog?.addEventListener('close', () => {
-    previewFrame?.removeAttribute('srcdoc');
+    if (previewFrame) previewFrame.src = 'about:blank';
     previewTrigger?.focus();
     previewTrigger = null;
   });

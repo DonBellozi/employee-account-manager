@@ -153,11 +153,21 @@ async def security_headers(request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; style-src 'self'; script-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; frame-src 'self'; frame-ancestors 'self'; "
-        "form-action 'self'"
-    )
+    if request.url.path == "/admin/mail-templates/preview/body":
+        # Предпросмотр выполняется в iframe без sandbox-разрешений. Почтовым
+        # шаблонам нужны inline-стили, но скрипты и любые действия запрещены.
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            "img-src 'self' data: https: http:; font-src 'self' data:; "
+            "script-src 'none'; connect-src 'none'; object-src 'none'; "
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+        )
+    else:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; style-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; frame-src 'self'; frame-ancestors 'self'; "
+            "form-action 'self'"
+        )
     if not request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
         response.headers["Pragma"] = "no-cache"

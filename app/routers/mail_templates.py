@@ -4,7 +4,7 @@ from urllib.parse import quote_plus
 
 from email_validator import EmailNotValidError, validate_email
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
@@ -125,6 +125,28 @@ def _redirect(
     )
 
 
+def _mail_template_preview_document(body_html: str) -> str:
+    """Сохранить полный HTML письма или обернуть фрагмент без Jinja-рендера."""
+    body = str(body_html or "").strip()
+    if not body:
+        body = '<p style="color:#64748b">Шаблон пуст.</p>'
+    lowered = body.casefold()
+    if "<!doctype" in lowered or "<html" in lowered:
+        return body
+    return (
+        "<!doctype html>\n"
+        '<html lang="ru">\n'
+        "<head>\n"
+        '  <meta charset="utf-8">\n'
+        '  <meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        "</head>\n"
+        '<body style="margin:24px; color:#172033; '
+        'font-family:Arial,sans-serif; line-height:1.5">'
+        f"{body}</body>\n"
+        "</html>"
+    )
+
+
 def _page_context(
     request: Request,
     *,
@@ -174,6 +196,26 @@ def mail_templates(
             db=db,
         ),
     )
+
+
+@router.post(
+    "/admin/mail-templates/preview/body",
+    response_class=HTMLResponse,
+)
+def preview_mail_template_body(
+    request: Request,
+    body_html: str = Form(""),
+    csrf: str = Form(...),
+):
+    """Показать текущий HTML-черновик без подстановки шаблонных переменных."""
+    validate_csrf(request, csrf)
+    require_admin(request)
+    if len(body_html) > 1_000_000:
+        return HTMLResponse(
+            '<p style="font-family:Arial,sans-serif">Шаблон слишком большой.</p>',
+            status_code=413,
+        )
+    return HTMLResponse(_mail_template_preview_document(body_html))
 
 
 @router.post("/admin/mail-templates/{profile_id}")
