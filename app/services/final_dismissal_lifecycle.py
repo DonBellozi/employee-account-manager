@@ -513,20 +513,30 @@ class FinalDismissalLifecycleService:
                 "error": "У одного человека найдены разные AD objectGUID",
             }
 
-        logins = {
+        # Явное сопоставление является исключением из логина, пришедшего из
+        # кадровой выгрузки. Их нельзя складывать в один набор и затем брать
+        # первый по алфавиту: так в план мог попасть заново сгенерированный
+        # логин вместо подтвержденной учетной записи AD.
+        mapped_logins = {
             normalize(mapping.ad_login)
             for mapping in mappings
             if normalize(mapping.ad_login)
         }
-        logins.update(
+        mapped_login = next(iter(mapped_logins), "")
+        record_logins = {
             normalize(record.login)
             for record in records
             if normalize(record.login)
-        )
+        }
 
         if len(guids) == 1:
             guid = next(iter(guids))
-            login = next(iter(sorted(logins)), "")
+            # objectGUID однозначно задает физический объект. Если старые
+            # сопоставления сохранили разные варианты имени, AD сама вернет
+            # текущий sAMAccountName при обработке цели.
+            login = mapped_login if len(mapped_logins) == 1 else ""
+            if not mapped_logins:
+                login = next(iter(sorted(record_logins)), "")
             return {
                 "system": "ad",
                 "target_key": f"ad:{guid}",
@@ -535,7 +545,23 @@ class FinalDismissalLifecycleService:
                 "error": "",
             }
 
-        if len(logins) > 1:
+        if len(mapped_logins) > 1:
+            return {
+                "system": "ad",
+                "target_key": "ad:conflict",
+                "identifier": "",
+                "stable_id": "",
+                "error": "У одного человека найдены разные сопоставления AD",
+            }
+        if mapped_login:
+            return {
+                "system": "ad",
+                "target_key": f"ad:{mapped_login}",
+                "identifier": mapped_login,
+                "stable_id": "",
+                "error": "",
+            }
+        if len(record_logins) > 1:
             return {
                 "system": "ad",
                 "target_key": "ad:conflict",
@@ -543,8 +569,8 @@ class FinalDismissalLifecycleService:
                 "stable_id": "",
                 "error": "У одного человека найдены разные логины AD",
             }
-        if len(logins) == 1:
-            login = next(iter(logins))
+        if len(record_logins) == 1:
+            login = next(iter(record_logins))
             return {
                 "system": "ad",
                 "target_key": f"ad:{login}",

@@ -19,6 +19,7 @@ from app.models import (
     BlockingOperation,
     BlockingQueueItem,
     DismissalSchedule,
+    EmailLoginMapping,
     ProvisioningOperation,
 )
 from app.models_notifications import (
@@ -322,6 +323,8 @@ def _techexpert_journal_item(
 def _final_dismissal_block_journal_item(
     run: FinalDismissalBlockRun,
     targets: list[FinalDismissalBlockTarget],
+    *,
+    mapped_ad_login: str = "",
 ) -> dict[str, object]:
     labels = {
         "pending": ("running", "Ожидает"),
@@ -365,7 +368,7 @@ def _final_dismissal_block_journal_item(
             }
         )
 
-    ad_identifier = next(
+    ad_identifier = str(mapped_ad_login or "").strip() or next(
         (
             item.target_identifier
             for item in targets
@@ -420,9 +423,14 @@ def _completed_dismissal_journal_item(
     techexpert_notifications: list[TechExpertNotification],
     deferral_items: list[dict[str, object]],
     snapshot: DismissalDetailsSnapshot | None,
+    mapped_ad_login: str = "",
 ) -> dict[str, object]:
     """Итоговая карточка одного завершенного объекта увольнения."""
-    block_item = _final_dismissal_block_journal_item(run, targets)
+    block_item = _final_dismissal_block_journal_item(
+        run,
+        targets,
+        mapped_ad_login=mapped_ad_login,
+    )
     components: list[dict[str, object]] = [*deferral_items]
     if notice is not None:
         components.append(_dismissal_notice_journal_item(notice))
@@ -553,7 +561,9 @@ def _completed_dismissal_journal_item(
     if successful_ad is not None:
         set_system_row(
             "AD",
-            successful_ad.target_identifier or "Учетная запись",
+            str(block_item.get("login") or "")
+            or successful_ad.target_identifier
+            or "Учетная запись",
             state="warning",
             note="Заблокирован",
         )
@@ -631,6 +641,7 @@ def _organization_dismissal_journal_item(
     notice: DismissalEquipmentNotice | None,
     techexpert_notifications: list[TechExpertNotification],
     snapshot: DismissalDetailsSnapshot | None,
+    mapped_ad_login: str = "",
 ) -> dict[str, object]:
     """Итог одной организации, когда общая AD-учетка остается активной."""
     event_date = max(
@@ -768,7 +779,7 @@ def _organization_dismissal_journal_item(
         "created_at": completed_at,
         "action": "Увольнение",
         "subject": fio,
-        "login": "",
+        "login": mapped_ad_login,
         "corporate_email": corporate_email,
         "personal_email": personal_email,
         "mail_domain": "",
@@ -782,6 +793,7 @@ def _organization_dismissal_journal_item(
             ("Дата увольнения", event_date.strftime("%d.%m.%Y")),
             ("Организации", ", ".join(organization_names)),
             ("Общая блокировка", "Не требуется"),
+            ("Логин AD", mapped_ad_login),
             ("Корпоративная почта", corporate_email),
             ("Личная почта", personal_email),
         ],
@@ -793,6 +805,43 @@ def _organization_dismissal_journal_item(
         "error_message": "\n".join(errors),
         "completed_at": completed_at,
     }
+
+
+def _preferred_mapped_ad_login(
+    mappings: list[EmailLoginMapping],
+    targets: (
+        list[FinalDismissalBlockTarget]
+        | tuple[FinalDismissalBlockTarget, ...]
+    ) = (),
+) -> str:
+    """Вернуть подтвержденный AD-логин для строки журнала.
+
+    Сначала учитывается objectGUID фактической цели. Это позволяет правильно
+    показывать и старые операции, в которых target_identifier был заполнен
+    кадровым логином до применения явного исключения.
+    """
+
+    target_guids = {
+        str(target.stable_id or "").strip().casefold()
+        for target in targets
+        if target.system == "ad" and str(target.stable_id or "").strip()
+    }
+    exact_logins = {
+        str(mapping.ad_login or "").strip().casefold()
+        for mapping in mappings
+        if str(mapping.ad_object_guid or "").strip().casefold()
+        in target_guids
+        and str(mapping.ad_login or "").strip()
+    }
+    if len(exact_logins) == 1:
+        return next(iter(exact_logins))
+
+    mapped_logins = {
+        str(mapping.ad_login or "").strip().casefold()
+        for mapping in mappings
+        if str(mapping.ad_login or "").strip()
+    }
+    return next(iter(mapped_logins)) if len(mapped_logins) == 1 else ""
 
 def _journal_items(
     db: Session,
@@ -892,6 +941,23 @@ def _journal_items(
             target.run_id,
             [],
         ).append(target)
+
+    mappings_for_completed = (
+        list(
+            db.scalars(
+                select(EmailLoginMapping).where(
+                    EmailLoginMapping.worker_key.in_(
+                        {item.worker_key for item in final_block_runs}
+                    )
+                )
+            ).all()
+        )
+        if final_block_runs
+        else []
+    )
+    mappings_by_worker: dict[str, list[EmailLoginMapping]] = {}
+    for mapping in mappings_for_completed:
+        mappings_by_worker.setdefault(mapping.worker_key, []).append(mapping)
 
     completed_keys = {
         (item.worker_key, item.dismissal_date)
@@ -1052,6 +1118,10 @@ def _journal_items(
             snapshot=snapshot_by_key.get(
                 (run.worker_key, run.dismissal_date)
             ),
+            mapped_ad_login=_preferred_mapped_ad_login(
+                mappings_by_worker.get(run.worker_key, []),
+                final_targets_by_run.get(run.id, []),
+            ),
         )
         for run in final_block_runs
     ]
@@ -1093,6 +1163,22 @@ def _journal_items(
         organization_event_groups.setdefault(key, []).append(event)
 
     organization_dismissal_items: list[dict[str, object]] = []
+    organization_worker_keys = {
+        worker_key for worker_key, _ in organization_event_groups
+    }
+    missing_mapping_keys = organization_worker_keys.difference(
+        mappings_by_worker
+    )
+    if missing_mapping_keys:
+        for mapping in db.scalars(
+            select(EmailLoginMapping).where(
+                EmailLoginMapping.worker_key.in_(missing_mapping_keys)
+            )
+        ).all():
+            mappings_by_worker.setdefault(
+                mapping.worker_key,
+                [],
+            ).append(mapping)
     for (worker_key, event_date), events in list(
         organization_event_groups.items()
     )[:50]:
@@ -1145,6 +1231,9 @@ def _journal_items(
                         DismissalDetailsSnapshot.worker_key == worker_key,
                         DismissalDetailsSnapshot.dismissal_date == event_date,
                     )
+                ),
+                mapped_ad_login=_preferred_mapped_ad_login(
+                    mappings_by_worker.get(worker_key, [])
                 ),
             )
         )

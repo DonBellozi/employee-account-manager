@@ -184,6 +184,11 @@ def _blocking_journal_item(
     queue_by_system = {item.system: item for item in queue_items}
     ad_item = queue_by_system.get("ad")
     zimbra_item = queue_by_system.get("zimbra")
+    ad_login = (
+        str(ad_item.target_identifier or "").strip()
+        if ad_item is not None
+        else ""
+    ) or operation.login
 
     def queue_result(item: BlockingQueueItem | None, system: str) -> str:
         if item is None:
@@ -219,7 +224,7 @@ def _blocking_journal_item(
         "created_at": operation.created_at,
         "action": "Блокировка учетных записей",
         "subject": operation.full_name,
-        "login": operation.login,
+        "login": ad_login,
         "corporate_email": operation.corporate_email,
         "personal_email": "",
         "mail_domain": "",
@@ -228,7 +233,7 @@ def _blocking_journal_item(
         "status_label": status_label,
         "details": [
             ("ФИО", operation.full_name),
-            ("Логин AD", operation.login),
+            ("Логин AD", ad_login),
             ("Корпоративная почта", operation.corporate_email),
             ("IT Invent проверен", _yes_no(operation.itinvent_checked)),
             ("Имущества в IT Invent", str(operation.equipment_count)),
