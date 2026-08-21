@@ -127,6 +127,7 @@
     </section>
 
     <section class="mail-template-section">
+      <h3>Письмо о прекращении доступа</h3>
       <label>
         <span>Тема письма</span>
         <input type="text"
@@ -156,6 +157,35 @@
       </p>
     </section>
 
+    <section class="mail-template-section">
+      <h3>Запрос на регистрацию</h3>
+      <label>
+        <span>Тема письма</span>
+        <input type="text"
+               name="registration_subject"
+               value="{{ techexpert.registration_subject }}"
+               maxlength="512"
+               required>
+      </label>
+      <label>
+        <span>HTML-шаблон письма</span>
+        <textarea name="registration_body_html"
+                  rows="14"
+                  required
+                  spellcheck="false">{{ techexpert.registration_body_html }}</textarea>
+      </label>
+      <div class="template-variables">
+        <span>Доступные переменные:</span>
+        {% for variable in registration_template_variables|sort %}
+        <code>{{ "{{ " }}{{ variable }}{{ " }}" }}</code>
+        {% endfor %}
+      </div>
+      <p class="muted mail-template-hint">
+        Перед отправкой оператор увидит уже заполненное письмо. Получатель и
+        отправитель берутся из сохранённых настроек организации.
+      </p>
+    </section>
+
     <div class="alert warning">
       Все готовые события одного цикла объединяются в одно письмо. Отсрочка на
       7 дней исключает работника из текущего списка; перед SMTP кадровые данные
@@ -178,9 +208,9 @@
 <section class="card">
   <h2>Тестовое письмо</h2>
   <p class="muted">
-    Отправляется сохранённый шаблон со списком из двух тестовых работников.
     Реальные кадровые сведения не используются.
   </p>
+  <h3>Прекращение доступа</h3>
   <form method="post" action="/settings/techexpert/test-email">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="mail-template-test-row">
@@ -189,6 +219,17 @@
         <input type="email" name="test_recipient" placeholder="user@example.ru" required>
       </label>
       <button class="button secondary" type="submit">Отправить тест</button>
+    </div>
+  </form>
+  <h3>Регистрация пользователя</h3>
+  <form method="post" action="/settings/techexpert/test-registration-email">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="mail-template-test-row">
+      <label>
+        <span>Тестовый адрес</span>
+        <input type="email" name="test_recipient" placeholder="user@example.ru" required>
+      </label>
+      <button class="button secondary" type="submit">Отправить тест регистрации</button>
     </div>
   </form>
 </section>

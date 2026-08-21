@@ -528,6 +528,7 @@ class HRRegistryService:
                     fio=worker.fio,
                     corporate_email=worker.email or "",
                     personal_email=worker.personal_email or "",
+                    mobile_phone=worker.mobile_phone or "",
                     login=worker.login or "",
                     placements_json=placements_json,
                     is_present=True,
@@ -570,6 +571,7 @@ class HRRegistryService:
                 record.fio = worker.fio
                 record.corporate_email = worker.email or ""
                 record.personal_email = worker.personal_email or ""
+                record.mobile_phone = worker.mobile_phone or ""
                 record.login = worker.login or ""
                 record.placements_json = placements_json
                 record.is_present = True

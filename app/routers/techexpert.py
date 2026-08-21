@@ -4,7 +4,7 @@ import json
 from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -27,10 +27,15 @@ from app.services.mailer import (
     render_mail_template,
 )
 from app.services.techexpert_settings import (
+    TECHEXPERT_REGISTRATION_TEMPLATE_VARIABLES,
     TECHEXPERT_TEMPLATE_VARIABLES,
     TechExpertSettingsService,
     build_techexpert_template_context,
     normalize_email,
+)
+from app.services.techexpert_registration import (
+    TechExpertRegistrationService,
+    preview_document,
 )
 from app.services.techexpert_access import TechExpertGroupAccessService
 from app.services.techexpert_actualization import (
@@ -51,6 +56,29 @@ def _redirect(*, message: str = "", error: str = "") -> RedirectResponse:
         parts.append(f"error={quote_plus(error)}")
     suffix = f"?{'&'.join(parts)}" if parts else ""
     return RedirectResponse(f"/settings/techexpert{suffix}", status_code=303)
+
+
+def _registration_redirect(
+    *,
+    registration_id: int = 0,
+    record_id: int = 0,
+    query: str = "",
+    message: str = "",
+    error: str = "",
+) -> RedirectResponse:
+    parts = []
+    if registration_id:
+        parts.append(f"registration_id={int(registration_id)}")
+    if record_id:
+        parts.append(f"record_id={int(record_id)}")
+    if query:
+        parts.append(f"q={quote_plus(query)}")
+    if message:
+        parts.append(f"message={quote_plus(message)}")
+    if error:
+        parts.append(f"error={quote_plus(error)}")
+    suffix = f"?{'&'.join(parts)}" if parts else ""
+    return RedirectResponse(f"/techexpert/registration{suffix}", status_code=303)
 
 
 def _page_context(
@@ -119,6 +147,9 @@ def _page_context(
         "source_domains": service.available_domains(),
         "sender_profile": profiles.get(config.source_domain.strip().lower()),
         "template_variables": TECHEXPERT_TEMPLATE_VARIABLES,
+        "registration_template_variables": (
+            TECHEXPERT_REGISTRATION_TEMPLATE_VARIABLES
+        ),
         "smtp_configured": bool(settings.smtp_host),
         "app_timezone": settings.app_timezone,
         "message": request.query_params.get("message", ""),
@@ -155,6 +186,8 @@ def techexpert_save(
     notification_time: str = Form(...),
     subject: str = Form(...),
     body_html: str = Form(...),
+    registration_subject: str = Form(...),
+    registration_body_html: str = Form(...),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
@@ -169,6 +202,8 @@ def techexpert_save(
             notification_time=notification_time,
             subject=subject,
             body_html=body_html,
+            registration_subject=registration_subject,
+            registration_body_html=registration_body_html,
             actor=current.username,
         )
         return _redirect(message="Настройки Техэксперта сохранены")
@@ -266,6 +301,203 @@ def techexpert_test_email(
         return _redirect(message=f"Тестовое письмо отправлено на {recipient}")
     except Exception as exc:
         return _redirect(error=f"Тестовое письмо не отправлено: {exc}")
+
+
+@router.post("/settings/techexpert/test-registration-email")
+def techexpert_test_registration_email(
+    request: Request,
+    csrf: str = Form(...),
+    test_recipient: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    require_admin(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        recipient = normalize_email(
+            test_recipient,
+            field_name="тестовый e-mail",
+        )
+        profile = get_domain_mail_profile(
+            db,
+            settings,
+            config.source_domain,
+        )
+        context = {
+            "full_name": "Иванов Иван Иванович",
+            "position": "Ведущий инженер",
+            "corporate_email": f"ivanov@{config.source_domain}",
+            "mobile_phone": "+7 900 000-00-00",
+            "department": "Центральный аппарат",
+            "organization": "Тестовая организация",
+        }
+        CredentialMailer(settings).send_html(
+            recipient=recipient,
+            subject=render_mail_template(
+                config.registration_subject,
+                context,
+                autoescape=False,
+            ),
+            body_html=render_mail_template(
+                config.registration_body_html,
+                context,
+                autoescape=True,
+            ),
+            sender_email=profile.sender_email,
+            sender_name=profile.sender_name,
+        )
+        return _redirect(
+            message=f"Тестовое письмо о регистрации отправлено на {recipient}"
+        )
+    except Exception as exc:
+        return _redirect(
+            error=f"Тестовое письмо о регистрации не отправлено: {exc}"
+        )
+
+
+@router.get("/techexpert/registration")
+def techexpert_registration_page(
+    request: Request,
+    q: str = "",
+    record_id: int = 0,
+    registration_id: int = 0,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    current = require_operator(request)
+    config = TechExpertSettingsService(settings, db).get()
+    service = TechExpertRegistrationService(settings, db, config)
+    error = request.query_params.get("error", "")
+    results: list[dict[str, object]] = []
+    selected = None
+    registration = None
+    try:
+        if q.strip():
+            if len(q.strip()) < 2:
+                raise ValueError("Введите не менее двух символов ФИО")
+            results = service.search(q)
+        if record_id:
+            selected = service.selected_record(record_id)
+        if registration_id:
+            registration = service.get_request(registration_id)
+    except Exception as exc:
+        error = str(exc)
+    return templates.TemplateResponse(
+        request,
+        "techexpert_registration.html",
+        {
+            "user": current,
+            "csrf": get_or_create_csrf(request),
+            "query": q,
+            "results": results,
+            "selected": selected,
+            "registration": registration,
+            "history": service.history(),
+            "techexpert": config,
+            "message": request.query_params.get("message", ""),
+            "error": error,
+        },
+    )
+
+
+@router.post("/techexpert/registration/prepare")
+def techexpert_registration_prepare(
+    request: Request,
+    record_id: int = Form(...),
+    placement_index: int = Form(...),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        registration = TechExpertRegistrationService(
+            settings,
+            db,
+            config,
+        ).prepare(
+            record_id=record_id,
+            placement_index=placement_index,
+            actor=current.username,
+        )
+        return _registration_redirect(
+            registration_id=registration.id,
+            message="Письмо подготовлено. Проверьте его перед отправкой.",
+        )
+    except Exception as exc:
+        db.rollback()
+        return _registration_redirect(
+            record_id=record_id,
+            error=f"Письмо не подготовлено: {exc}",
+        )
+
+
+@router.post("/techexpert/registration/{registration_id}/execute")
+def techexpert_registration_execute(
+    registration_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        registration = TechExpertRegistrationService(
+            settings,
+            db,
+            config,
+        ).execute(request_id=registration_id, actor=current.username)
+        if registration.status == "sent":
+            message = "Работник добавлен в группу, письмо отправлено."
+            error = ""
+        elif registration.status == "partial":
+            message = ""
+            error = (
+                "Работник добавлен в группу, но письмо не отправлено. "
+                "Исправьте SMTP и повторите отправку."
+            )
+        elif registration.status == "dry_run":
+            message = "DRY_RUN: группа и почта не изменены."
+            error = ""
+        else:
+            message = ""
+            error = registration.last_error or "Запрос не выполнен"
+        return _registration_redirect(
+            registration_id=registration.id,
+            message=message,
+            error=error,
+        )
+    except Exception as exc:
+        db.rollback()
+        return _registration_redirect(
+            registration_id=registration_id,
+            error=f"Запрос не выполнен: {exc}",
+        )
+
+
+@router.get(
+    "/techexpert/registration/{registration_id}/body",
+    response_class=HTMLResponse,
+)
+def techexpert_registration_preview_body(
+    registration_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    require_operator(request)
+    config = TechExpertSettingsService(settings, db).get()
+    registration = TechExpertRegistrationService(
+        settings,
+        db,
+        config,
+    ).get_request(registration_id)
+    return HTMLResponse(preview_document(registration.body_html))
 
 
 @router.post("/settings/techexpert/group-sync")

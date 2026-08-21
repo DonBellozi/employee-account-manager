@@ -29,6 +29,7 @@
         <div class="nav-main">
           <a href="/">Журнал</a>
           <a href="/employees/new" data-workspace-modal data-workspace-title="Создание учетных записей">Создание</a>
+          <a href="/techexpert/registration" data-workspace-modal data-workspace-title="Техэксперт">Техэксперт</a>
           <a href="/blocking">Блокировка</a>
         </div>
 
@@ -48,7 +49,7 @@
           {% if user.role == 'admin' %}
           <a class="settings-link" href="/settings">Настройки</a>
           {% elif user.role == 'operator' %}
-          <a class="settings-link" href="/settings/techexpert">Техэксперт</a>
+          <a class="settings-link" href="/settings/techexpert">Настройки ТЭ</a>
           {% endif %}
           <form method="post" action="/logout" class="inline">
             <input type="hidden" name="csrf" value="{{ csrf }}">

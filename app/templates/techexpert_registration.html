@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+{% block title %}Техэксперт — регистрация{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="/static/techexpert_registration.css">
+{% set status_labels = {
+  'draft': 'Подготовлен',
+  'processing': 'Выполняется',
+  'sent': 'Выполнен',
+  'partial': 'Письмо не отправлено',
+  'failed': 'Ошибка',
+  'stale': 'Данные изменились',
+  'dry_run': 'Тестовый режим'
+} %}
+
+<div class="heading-row">
+  <div>
+    <h1>Регистрация в Техэксперте</h1>
+    <p class="muted">
+      Найдите работника, проверьте письмо и подтвердите добавление в группу AD.
+    </p>
+  </div>
+  <a class="button secondary" href="/settings/techexpert">Настройки ТЭ</a>
+</div>
+
+{% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+{% if not techexpert.source_domain or not techexpert.ad_group_dn or not techexpert.recipient_email %}
+<div class="alert warning">
+  Сначала настройте организацию, группу AD и получателя уведомлений Техэксперта.
+</div>
+{% endif %}
+
+{% if registration %}
+<section class="card te-registration-preview">
+  <div class="te-registration-heading">
+    <div>
+      <h2>{{ registration.fio }}</h2>
+      <span class="registry-state {{ 'working' if registration.status == 'sent' else 'review' if registration.status in ['draft', 'processing', 'dry_run'] else 'not_working' }}">
+        {{ status_labels.get(registration.status, registration.status) }}
+      </span>
+    </div>
+    <form method="get" action="/techexpert/registration">
+      <button class="button secondary" type="submit">Новый поиск</button>
+    </form>
+  </div>
+
+  <dl class="integration-details te-registration-meta">
+    <dt>Подразделение</dt><dd>{{ registration.department }}</dd>
+    <dt>Должность</dt><dd>{{ registration.position or 'Не указана' }}</dd>
+    <dt>Корпоративный e-mail</dt><dd>{{ registration.corporate_email }}</dd>
+    <dt>Телефон из 1С</dt><dd>{{ registration.mobile_phone or 'Не указан' }}</dd>
+    <dt>AD</dt><dd>{{ registration.ad_login }}</dd>
+    <dt>Получатель</dt><dd>{{ registration.recipient_email }}</dd>
+    <dt>Отправитель</dt>
+    <dd>{{ registration.sender_name }} &lt;{{ registration.sender_email }}&gt;</dd>
+    <dt>Тема</dt><dd>{{ registration.subject }}</dd>
+  </dl>
+
+  {% if not registration.mobile_phone %}
+  <div class="alert warning">
+    В кадровой выгрузке телефон не указан. В письмо подставлено «Не указан».
+  </div>
+  {% endif %}
+
+  <div class="te-registration-letter">
+    <div class="te-registration-letter-title">Предпросмотр письма</div>
+    <iframe sandbox
+            src="/techexpert/registration/{{ registration.id }}/body"
+            title="Письмо о регистрации в Техэксперте"></iframe>
+  </div>
+
+  {% if registration.last_error %}
+  <div class="alert error">{{ registration.last_error }}</div>
+  {% endif %}
+
+  <div class="te-registration-result-grid">
+    <div>
+      <span>Группа AD</span>
+      <strong>{{ registration.group_status }}</strong>
+      {% if registration.group_error %}<small>{{ registration.group_error }}</small>{% endif %}
+    </div>
+    <div>
+      <span>Письмо</span>
+      <strong>{{ registration.email_status }}</strong>
+      {% if registration.email_error %}<small>{{ registration.email_error }}</small>{% endif %}
+    </div>
+  </div>
+
+  {% if registration.status not in ['sent', 'stale', 'processing'] %}
+  <form method="post"
+        action="/techexpert/registration/{{ registration.id }}/execute"
+        class="te-registration-confirm-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="alert warning">
+      Система повторно проверит кадровое состояние и AD, добавит работника в
+      группу Техэксперта и только затем отправит письмо.
+    </div>
+    <button class="button" type="submit">
+      {% if registration.status == 'partial' %}
+        Повторить отправку письма
+      {% else %}
+        Добавить в группу и отправить запрос
+      {% endif %}
+    </button>
+  </form>
+  {% elif registration.status == 'stale' %}
+  <form method="get" action="/techexpert/registration">
+    <input type="hidden" name="record_id" value="{{ registration.hr_record_id }}">
+    <button class="button secondary" type="submit">Подготовить письмо заново</button>
+  </form>
+  {% endif %}
+</section>
+
+{% else %}
+<section class="card">
+  <h2>Поиск работника</h2>
+  <form method="get" action="/techexpert/registration" class="te-registration-search">
+    <label>
+      <span>ФИО</span>
+      <input type="search"
+             name="q"
+             value="{{ query }}"
+             minlength="2"
+             placeholder="Начните вводить фамилию"
+             autocomplete="off"
+             required
+             autofocus>
+    </label>
+    <button class="button" type="submit">Найти</button>
+  </form>
+</section>
+
+{% if query and not results and not selected %}
+<div class="alert warning">Активные работники по запросу «{{ query }}» не найдены.</div>
+{% endif %}
+
+{% if results and not selected %}
+<section class="card">
+  <h2>Выберите работника</h2>
+  <div class="te-registration-results">
+    {% for item in results %}
+    {% set record = item.record %}
+    <form method="get" action="/techexpert/registration" class="te-registration-person">
+      <input type="hidden" name="record_id" value="{{ record.id }}">
+      <input type="hidden" name="q" value="{{ query }}">
+      <div>
+        <strong>{{ record.fio }}</strong>
+        <span>{{ item.placements|map(attribute='top_department')|unique|join(', ') }}</span>
+        <small>{{ item.placements|map(attribute='position')|reject('equalto', '')|join(', ') or 'Должность не указана' }}</small>
+      </div>
+      <div class="te-registration-person-contacts">
+        <span>{{ record.corporate_email or 'Нет корпоративного e-mail' }}</span>
+        <small>{{ record.mobile_phone or 'Телефон не указан' }}</small>
+        {% if record.techexpert_access %}<em>Уже отмечен как пользователь ТЭ</em>{% endif %}
+      </div>
+      <button class="button secondary" type="submit">Выбрать</button>
+    </form>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if selected %}
+{% set record = selected.record %}
+<section class="card">
+  <div class="te-registration-heading">
+    <div>
+      <h2>{{ record.fio }}</h2>
+      <p class="muted">Выберите кадровое назначение для письма.</p>
+    </div>
+    <form method="get" action="/techexpert/registration">
+      <input type="hidden" name="q" value="{{ query }}">
+      <button class="button secondary" type="submit">Изменить работника</button>
+    </form>
+  </div>
+
+  {% if selected.state.status == 'scheduled' %}
+  <div class="alert warning">
+    У работника указана предстоящая дата увольнения:
+    {{ selected.state.dismissal_date.strftime('%d.%m.%Y') if selected.state.dismissal_date else 'дата не указана' }}.
+  </div>
+  {% endif %}
+  {% if selected.last_sent %}
+  <div class="alert warning">
+    Запрос этому работнику уже отправлялся
+    {{ selected.last_sent.sent_at|app_datetime('%d.%m.%Y %H:%M') }}.
+    Новое подтверждение отправит повторную заявку.
+  </div>
+  {% endif %}
+  {% if not record.corporate_email %}
+  <div class="alert error">В кадровой выгрузке нет корпоративного e-mail. Отправка недоступна.</div>
+  {% endif %}
+  {% if not record.mobile_phone %}
+  <div class="alert warning">Телефон в выгрузке 1С не заполнен. В письме будет «Не указан».</div>
+  {% endif %}
+
+  <form method="post" action="/techexpert/registration/prepare" class="te-registration-placement-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="record_id" value="{{ record.id }}">
+    <div class="te-registration-placements">
+      {% for placement in selected.placements %}
+      <label>
+        <input type="radio" name="placement_index" value="{{ placement.index }}"{% if loop.first %} checked{% endif %}>
+        <span>
+          <strong>{{ placement.top_department }}</strong>
+          <small>{{ placement.department or 'Иерархия подразделения не указана' }}</small>
+          <em>{{ placement.position or 'Должность не указана' }}</em>
+        </span>
+      </label>
+      {% endfor %}
+    </div>
+    <dl class="integration-details te-registration-meta">
+      <dt>Корпоративный e-mail</dt><dd>{{ record.corporate_email or '–' }}</dd>
+      <dt>Телефон из 1С</dt><dd>{{ record.mobile_phone or 'Не указан' }}</dd>
+      <dt>Получатель запроса</dt><dd>{{ techexpert.recipient_email }}</dd>
+    </dl>
+    <button class="button" type="submit"{% if not record.corporate_email %} disabled{% endif %}>
+      Подготовить письмо
+    </button>
+  </form>
+</section>
+{% endif %}
+{% endif %}
+
+{% if history %}
+<section class="card te-registration-history">
+  <details>
+    <summary>Последние запросы — {{ history|length }}</summary>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Дата</th><th>Работник</th><th>Подразделение</th><th>Результат</th><th></th></tr>
+        </thead>
+        <tbody>
+        {% for item in history %}
+        <tr>
+          <td>{{ item.created_at|app_datetime('%d.%m.%Y %H:%M') }}</td>
+          <td>{{ item.fio }}<div class="muted">{{ item.corporate_email }}</div></td>
+          <td>{{ item.department }}<div class="muted">{{ item.position or '–' }}</div></td>
+          <td>{{ status_labels.get(item.status, item.status) }}</td>
+          <td>
+            <form method="get" action="/techexpert/registration">
+              <input type="hidden" name="registration_id" value="{{ item.id }}">
+              <button class="button small secondary" type="submit">Открыть</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+</section>
+{% endif %}
+{% endblock %}

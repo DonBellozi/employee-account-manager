@@ -20,6 +20,7 @@ DEFAULT_COLUMNS = {
     "fio": "Сотрудник.Физическое лицо.ФИО",
     "email": "Физическое лицо.Адрес электронной почты",
     "personal_email": "Физическое лицо.Email",
+    "mobile_phone": "Физическое лицо.Мобильный телефон",
     "position": "Должность",
 }
 
@@ -42,6 +43,7 @@ class OneCWorker:
     login: str | None
     placements: tuple[OneCPlacement, ...]
     personal_email: str | None = None
+    mobile_phone: str | None = None
     dismissal_date: date | None = None
 
 
@@ -335,6 +337,7 @@ def parse_onec_xlsx(
         fio_col = mapping["fio"]
         email_col = mapping.get("email")
         personal_email_col = mapping.get("personal_email")
+        mobile_phone_col = mapping.get("mobile_phone")
         position_col = mapping.get("position")
         dismissal_col, dismissal_name, dismissal_ambiguous = _dismissal_column(
             sheet,
@@ -389,6 +392,11 @@ def parse_onec_xlsx(
                 if personal_email_col
                 else None
             )
+            mobile_phone = (
+                normalize_text(values[mobile_phone_col - 1]) or None
+                if mobile_phone_col
+                else None
+            )
 
             position = (
                 normalize_text(values[position_col - 1])
@@ -420,6 +428,7 @@ def parse_onec_xlsx(
                         placement,
                     ),
                     personal_email=personal_email or existing.personal_email,
+                    mobile_phone=mobile_phone or existing.mobile_phone,
                 )
             else:
                 merged[key] = OneCWorker(
@@ -429,6 +438,7 @@ def parse_onec_xlsx(
                     login=login,
                     placements=(placement,),
                     personal_email=personal_email,
+                    mobile_phone=mobile_phone,
                 )
 
         # Полная кадровая выгрузка является источником увольнений по отсутствию.
@@ -487,6 +497,7 @@ def worker_snapshot(worker: OneCWorker) -> dict:
         "fio": worker.fio,
         "email": worker.email,
         "personal_email": worker.personal_email,
+        "mobile_phone": worker.mobile_phone,
         "login": worker.login,
         "dismissal_date": (
             worker.dismissal_date.isoformat()

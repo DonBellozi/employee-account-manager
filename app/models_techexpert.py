@@ -25,6 +25,8 @@ class TechExpertSettings(Base):
     notification_time: Mapped[str] = mapped_column(String(5), default="08:45")
     subject: Mapped[str] = mapped_column(String(512))
     body_html: Mapped[str] = mapped_column(Text)
+    registration_subject: Mapped[str] = mapped_column(String(512), default="")
+    registration_body_html: Mapped[str] = mapped_column(Text, default="")
     updated_by: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -292,4 +294,50 @@ class TechExpertActualizationItem(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,
+    )
+
+
+class TechExpertRegistrationRequest(Base):
+    """Подготовленный и исполненный запрос на регистрацию пользователя."""
+
+    __tablename__ = "techexpert_registration_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    worker_key: Mapped[str] = mapped_column(String(64), index=True)
+    source_id: Mapped[str] = mapped_column(String(128), index=True)
+    source_name: Mapped[str] = mapped_column(String(256), default="")
+    hr_record_id: Mapped[int] = mapped_column(Integer, index=True)
+    fio: Mapped[str] = mapped_column(String(512), default="")
+    department: Mapped[str] = mapped_column(String(512), default="")
+    placement_department: Mapped[str] = mapped_column(String(1024), default="")
+    position: Mapped[str] = mapped_column(String(512), default="")
+    corporate_email: Mapped[str] = mapped_column(String(320), default="")
+    mobile_phone: Mapped[str] = mapped_column(String(128), default="")
+    ad_login: Mapped[str] = mapped_column(String(128), default="")
+    ad_object_guid: Mapped[str] = mapped_column(String(64), default="")
+    recipient_email: Mapped[str] = mapped_column(String(320), default="")
+    sender_email: Mapped[str] = mapped_column(String(320), default="")
+    sender_name: Mapped[str] = mapped_column(String(256), default="")
+    subject: Mapped[str] = mapped_column(String(512), default="")
+    body_html: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    group_status: Mapped[str] = mapped_column(
+        String(32), default="not_started", index=True
+    )
+    group_error: Mapped[str] = mapped_column(Text, default="")
+    email_status: Mapped[str] = mapped_column(
+        String(32), default="not_started", index=True
+    )
+    email_error: Mapped[str] = mapped_column(Text, default="")
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str] = mapped_column(String(256), default="", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )

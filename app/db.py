@@ -117,12 +117,25 @@ def ensure_compatibility_schema() -> None:
                     "personal_email": (
                         "VARCHAR(320) NOT NULL DEFAULT ''"
                     ),
+                    "mobile_phone": (
+                        "VARCHAR(128) NOT NULL DEFAULT ''"
+                    ),
                     "techexpert_access": (
                         "BOOLEAN NOT NULL DEFAULT 0"
                     ),
                 },
             )
 
+        add_missing_columns(
+            connection,
+            "techexpert_settings",
+            {
+                "registration_subject": (
+                    "VARCHAR(512) NOT NULL DEFAULT ''"
+                ),
+                "registration_body_html": "TEXT NOT NULL DEFAULT ''",
+            },
+        )
         add_missing_columns(
             connection,
             "techexpert_notifications",

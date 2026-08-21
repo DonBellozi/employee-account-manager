@@ -23,6 +23,15 @@ TECHEXPERT_TEMPLATE_VARIABLES = {
     "dismissal_date",
 }
 
+TECHEXPERT_REGISTRATION_TEMPLATE_VARIABLES = {
+    "full_name",
+    "position",
+    "corporate_email",
+    "mobile_phone",
+    "department",
+    "organization",
+}
+
 LEGACY_TECHEXPERT_SUBJECT = (
     "Прекращение доступа к системе «Техэксперт»: {{ full_name }}"
 )
@@ -97,6 +106,32 @@ DEFAULT_TECHEXPERT_BODY_HTML = """\
 <p>Это автоматическое уведомление по подтвержденным кадровым событиям.</p>
 """
 
+DEFAULT_TECHEXPERT_REGISTRATION_SUBJECT = (
+    "Регистрация пользователя в системе «Техэксперт» — {{ full_name }}"
+)
+
+DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
+<p><strong>{{ department }}</strong></p>
+<table border="1" cellpadding="6" cellspacing="0">
+  <thead>
+    <tr>
+      <th>ФИО</th>
+      <th>Должность</th>
+      <th>E-mail</th>
+      <th>Телефон</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>{{ full_name }}</td>
+      <td>{{ position }}</td>
+      <td>{{ corporate_email }}</td>
+      <td>{{ mobile_phone }}</td>
+    </tr>
+  </tbody>
+</table>
+"""
+
 
 def build_techexpert_template_context(
     employees: list[dict[str, str]],
@@ -153,6 +188,7 @@ def normalize_email(value: str, *, field_name: str) -> str:
 def ensure_techexpert_settings(db: Session) -> TechExpertSettings:
     row = db.get(TechExpertSettings, 1)
     if row is not None:
+        changed = False
         if (
             row.subject.strip() == LEGACY_TECHEXPERT_SUBJECT.strip()
             and row.body_html.strip() == LEGACY_TECHEXPERT_BODY_HTML.strip()
@@ -163,6 +199,16 @@ def ensure_techexpert_settings(db: Session) -> TechExpertSettings:
         ):
             row.subject = DEFAULT_TECHEXPERT_SUBJECT
             row.body_html = DEFAULT_TECHEXPERT_BODY_HTML
+            changed = True
+        if not row.registration_subject.strip():
+            row.registration_subject = DEFAULT_TECHEXPERT_REGISTRATION_SUBJECT
+            changed = True
+        if not row.registration_body_html.strip():
+            row.registration_body_html = (
+                DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML
+            )
+            changed = True
+        if changed:
             db.commit()
             db.refresh(row)
         return row
@@ -172,6 +218,8 @@ def ensure_techexpert_settings(db: Session) -> TechExpertSettings:
         notification_time="08:45",
         subject=DEFAULT_TECHEXPERT_SUBJECT,
         body_html=DEFAULT_TECHEXPERT_BODY_HTML,
+        registration_subject=DEFAULT_TECHEXPERT_REGISTRATION_SUBJECT,
+        registration_body_html=DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML,
     )
     db.add(row)
     db.commit()
@@ -215,6 +263,8 @@ class TechExpertSettingsService:
         notification_time: str,
         subject: str,
         body_html: str,
+        registration_subject: str | None = None,
+        registration_body_html: str | None = None,
     ) -> dict[str, str]:
         domain = normalize(source_domain)
         if not domain:
@@ -245,6 +295,26 @@ class TechExpertSettingsService:
             field_name="HTML-шаблон письма",
             autoescape=True,
         )
+        registration_subject = (
+            str(registration_subject or "").strip()
+            or DEFAULT_TECHEXPERT_REGISTRATION_SUBJECT
+        )
+        registration_body_html = (
+            str(registration_body_html or "").strip()
+            or DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML
+        )
+        validate_mail_template(
+            registration_subject,
+            allowed_variables=TECHEXPERT_REGISTRATION_TEMPLATE_VARIABLES,
+            field_name="Тема письма о регистрации",
+            autoescape=False,
+        )
+        validate_mail_template(
+            registration_body_html,
+            allowed_variables=TECHEXPERT_REGISTRATION_TEMPLATE_VARIABLES,
+            field_name="HTML-шаблон письма о регистрации",
+            autoescape=True,
+        )
         return {
             "source_domain": domain,
             "ad_group_dn": group_dn,
@@ -252,6 +322,8 @@ class TechExpertSettingsService:
             "notification_time": normalized_time,
             "subject": subject.strip(),
             "body_html": body_html.strip(),
+            "registration_subject": registration_subject,
+            "registration_body_html": registration_body_html,
         }
 
     def save(
@@ -265,7 +337,10 @@ class TechExpertSettingsService:
         subject: str,
         body_html: str,
         actor: str,
+        registration_subject: str | None = None,
+        registration_body_html: str | None = None,
     ) -> TechExpertSettings:
+        row = self.get()
         values = self.validate(
             source_domain=source_domain,
             ad_group_dn=ad_group_dn,
@@ -273,8 +348,17 @@ class TechExpertSettingsService:
             notification_time=notification_time,
             subject=subject,
             body_html=body_html,
+            registration_subject=(
+                row.registration_subject
+                if registration_subject is None
+                else registration_subject
+            ),
+            registration_body_html=(
+                row.registration_body_html
+                if registration_body_html is None
+                else registration_body_html
+            ),
         )
-        row = self.get()
         row.enabled = bool(enabled)
         row.source_domain = values["source_domain"]
         row.ad_group_dn = values["ad_group_dn"]
@@ -282,6 +366,8 @@ class TechExpertSettingsService:
         row.notification_time = values["notification_time"]
         row.subject = values["subject"]
         row.body_html = values["body_html"]
+        row.registration_subject = values["registration_subject"]
+        row.registration_body_html = values["registration_body_html"]
         row.updated_by = str(actor or "").strip()
         self.db.commit()
         self.db.refresh(row)

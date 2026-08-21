@@ -240,6 +240,7 @@ class HRSourceRecord(Base):
     fio: Mapped[str] = mapped_column(String(512), index=True)
     corporate_email: Mapped[str] = mapped_column(String(320), default="", index=True)
     personal_email: Mapped[str] = mapped_column(String(320), default="", index=True)
+    mobile_phone: Mapped[str] = mapped_column(String(128), default="")
     login: Mapped[str] = mapped_column(String(128), default="", index=True)
     placements_json: Mapped[str] = mapped_column(Text, default="[]")
     is_present: Mapped[bool] = mapped_column(Boolean, default=True, index=True)

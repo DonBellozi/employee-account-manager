@@ -153,7 +153,13 @@ async def security_headers(request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "no-referrer"
-    if request.url.path == "/admin/mail-templates/preview/body":
+    if (
+        request.url.path == "/admin/mail-templates/preview/body"
+        or (
+            request.url.path.startswith("/techexpert/registration/")
+            and request.url.path.endswith("/body")
+        )
+    ):
         # Предпросмотр выполняется в iframe без sandbox-разрешений. Почтовым
         # шаблонам нужны inline-стили, но скрипты и любые действия запрещены.
         response.headers["Content-Security-Policy"] = (

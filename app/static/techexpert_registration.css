@@ -1,0 +1,165 @@
+.te-registration-search {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.te-registration-results {
+  display: grid;
+  gap: 10px;
+}
+
+.te-registration-person {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.3fr) minmax(220px, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.te-registration-person > div,
+.te-registration-person-contacts {
+  display: grid;
+  gap: 4px;
+}
+
+.te-registration-person span,
+.te-registration-person small,
+.te-registration-person-contacts small {
+  color: #64748b;
+}
+
+.te-registration-person em {
+  color: #166534;
+  font-size: .82rem;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.te-registration-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.te-registration-heading h2 {
+  margin-bottom: 6px;
+}
+
+.te-registration-placement-form {
+  display: grid;
+  gap: 16px;
+}
+
+.te-registration-placements {
+  display: grid;
+  gap: 9px;
+}
+
+.te-registration-placements label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid #dbe4ee;
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+.te-registration-placements label:has(input:checked) {
+  border-color: #47729f;
+  background: #f0f6fc;
+}
+
+.te-registration-placements span {
+  display: grid;
+  gap: 3px;
+}
+
+.te-registration-placements small,
+.te-registration-placements em {
+  color: #64748b;
+  font-style: normal;
+}
+
+.te-registration-meta {
+  margin: 14px 0;
+}
+
+.te-registration-letter {
+  overflow: hidden;
+  margin: 16px 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.te-registration-letter-title {
+  padding: 10px 14px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 700;
+}
+
+.te-registration-letter iframe {
+  display: block;
+  width: 100%;
+  height: 340px;
+  border: 0;
+  background: #fff;
+}
+
+.te-registration-result-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.te-registration-result-grid > div {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+
+.te-registration-result-grid span,
+.te-registration-result-grid small {
+  color: #64748b;
+}
+
+.te-registration-confirm-form {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+}
+
+.te-registration-history {
+  margin-top: 18px;
+}
+
+.te-registration-history summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .te-registration-search,
+  .te-registration-person,
+  .te-registration-result-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .te-registration-person .button {
+    justify-self: start;
+  }
+}
