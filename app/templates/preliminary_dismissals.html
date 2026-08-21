@@ -4,94 +4,206 @@
 <div class="heading-row">
   <div>
     <h1>Предварительные увольнения</h1>
-    <p class="muted">Ранние уведомления кадрового департамента для одной организации.</p>
+    <p class="muted">Для каждой организации можно подключить свой кадровый ящик.</p>
   </div>
   <a class="button secondary" href="/settings">Настройки</a>
 </div>
 
-{% if saved %}<div class="alert success">Настройки сохранены.</div>{% endif %}
+{% if saved %}<div class="alert success">Настройки организации сохранены.</div>{% endif %}
 {% if result %}<div class="alert success">{{ result }}</div>{% endif %}
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+<div class="alert warning">
+  Предварительное письмо только добавляет бледную строку и отправляет просьбу
+  вернуть оборудование. AD, почта, DSM и Техэксперт ждут кадровую выгрузку.
+  Ящики проверяются независимо и в режиме read-only.
+</div>
 
 <section class="card">
   <div class="observer-card-heading">
     <div>
-      <h2>Правило входящего письма</h2>
-      <p class="muted">Используется общее read-only IMAP-подключение кадровой почты.</p>
+      <h2>Общее состояние</h2>
+      <p class="muted">Письма и сотрудники не смешиваются между организациями.</p>
     </div>
-    <span class="integration-badge{% if summary.settings.enabled %} active{% endif %}">
-      {{ 'Включено' if summary.settings.enabled else 'Отключено' }}
+    <span class="integration-badge{% if summary.rules|selectattr('settings.enabled')|list %} active{% endif %}">
+      {{ summary.rules|selectattr('settings.enabled')|list|length }} включено
     </span>
   </div>
+  <div class="settings-status-grid">
+    <div><span>Почтовых правил</span><strong>{{ summary.rules|length }}</strong></div>
+    <div><span>Писем обработано</span><strong>{{ summary.messages }}</strong></div>
+    <div><span>Ожидают кадровую выгрузку</span><strong>{{ summary.counts.active }}</strong></div>
+    <div><span>Подтверждено кадрами</span><strong>{{ summary.counts.confirmed }}</strong></div>
+  </div>
+</section>
 
-  <div class="alert warning">
-    Предварительное письмо только добавляет бледную строку и отправляет просьбу
-    вернуть оборудование. AD, почта, DSM и Техэксперт ждут кадровую выгрузку.
+{% for rule in summary.rules %}
+{% set item = rule.settings %}
+<section class="card preliminary-mailbox-card">
+  <div class="observer-card-heading">
+    <div>
+      <h2>{{ rule.source_name or 'Организация не найдена' }}</h2>
+      <p class="muted">{{ item.imap_username }}{% if item.imap_host %} · {{ item.imap_host }}:{{ item.imap_port }}{% endif %}</p>
+    </div>
+    <div class="preliminary-mailbox-actions">
+      <span class="integration-badge{% if item.last_status == 'failed' %} error{% elif item.enabled %} active{% endif %}">
+        {{ 'Включено' if item.enabled else 'Отключено' }}
+      </span>
+      <form method="post" action="/settings/preliminary-dismissals/check-now">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="rule_id" value="{{ item.id }}">
+        <button class="button secondary" type="submit">Проверить сейчас</button>
+      </form>
+    </div>
   </div>
 
   <form method="post" action="/settings/preliminary-dismissals/save" class="settings-source-form">
     <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="rule_id" value="{{ item.id }}">
     <div class="settings-source-grid">
       <label>
         <span>Организация</span>
-        <select name="source_id">
-          <option value="">Выберите организацию</option>
+        <select name="source_id" required>
           {% for source in sources %}
-          <option value="{{ source.source_id }}"{% if summary.settings.source_id == source.source_id %} selected{% endif %}>
-            {{ source.name }}
-          </option>
+          <option value="{{ source.source_id }}"{% if item.source_id == source.source_id %} selected{% endif %}>{{ source.name }}</option>
           {% endfor %}
         </select>
       </label>
       <label>
-        <span>Папка IMAP</span>
-        <input type="text" name="imap_folder" value="{{ summary.settings.imap_folder or 'INBOX' }}" required>
+        <span>IMAP-сервер</span>
+        <input type="text" name="imap_host" value="{{ item.imap_host }}" placeholder="imap.company.ru" required>
       </label>
       <label>
-        <span>Отправитель содержит</span>
-        <input type="text" name="sender_filter" value="{{ summary.settings.sender_filter }}" placeholder="hr@company.ru">
+        <span>Порт IMAP</span>
+        <input type="number" name="imap_port" value="{{ item.imap_port }}" min="1" max="65535" required>
+      </label>
+      <label>
+        <span>Почтовый ящик / логин</span>
+        <input type="text" name="imap_username" value="{{ item.imap_username }}" autocomplete="username" required>
+      </label>
+      <label>
+        <span>Пароль IMAP</span>
+        <input type="password" name="imap_password" value="" autocomplete="new-password" placeholder="{{ 'Оставьте пустым — пароль сохранён' if rule.password_configured else 'Введите пароль' }}">
+      </label>
+      <label>
+        <span>Папка IMAP</span>
+        <input type="text" name="imap_folder" value="{{ item.imap_folder or 'INBOX' }}" required>
+      </label>
+      <label>
+        <span>Искать письма за, дней</span>
+        <input type="number" name="imap_lookback_days" value="{{ item.imap_lookback_days }}" min="1" max="365" required>
+      </label>
+      <label>
+        <span>Письмо от</span>
+        <input type="email" name="sender_filter" value="{{ item.sender_filter }}" placeholder="hr@company.ru">
       </label>
       <label>
         <span>Тема содержит</span>
-        <input type="text" name="subject_filter" value="{{ summary.settings.subject_filter }}" placeholder="Увольнение">
+        <input type="text" name="subject_filter" value="{{ item.subject_filter }}" placeholder="Увольнение">
       </label>
     </div>
-    <label class="observer-check-row">
-      <input type="checkbox" name="enabled" value="on"{% if summary.settings.enabled %} checked{% endif %}>
-      <span>
-        <strong>Получать предварительные уведомления</strong>
-        <small>Письма проверяются раз в минуту и не помечаются прочитанными.</small>
-      </span>
-    </label>
+    <div class="preliminary-mailbox-flags">
+      <label class="observer-check-row">
+        <input type="checkbox" name="imap_ssl" value="on"{% if item.imap_ssl %} checked{% endif %}>
+        <span><strong>Защищённое подключение SSL/TLS</strong></span>
+      </label>
+      <label class="observer-check-row">
+        <input type="checkbox" name="enabled" value="on"{% if item.enabled %} checked{% endif %}>
+        <span>
+          <strong>Получать уведомления этой организации</strong>
+          <small>Фоновая проверка выполняется раз в минуту.</small>
+        </span>
+      </label>
+    </div>
     <div class="observer-form-actions">
       <button class="button" type="submit">Сохранить</button>
     </div>
   </form>
+
+  <div class="settings-status-grid">
+    <div><span>Писем обработано</span><strong>{{ rule.messages }}</strong></div>
+    <div><span>Ожидают выгрузку</span><strong>{{ rule.counts.active }}</strong></div>
+    <div><span>Подтверждено</span><strong>{{ rule.counts.confirmed }}</strong></div>
+    <div><span>Не сопоставлено</span><strong>{{ rule.counts.unmatched }}</strong></div>
+  </div>
+  <dl class="integration-details">
+    <dt>Последняя проверка</dt>
+    <dd>{{ item.last_checked_at|app_datetime('%d.%m.%Y %H:%M') if item.last_checked_at else 'Еще не выполнялась' }}</dd>
+    <dt>Результат</dt><dd>{{ rule.status_label }}</dd>
+    {% if item.last_error %}<dt>Сообщение</dt><dd class="registry-error">{{ item.last_error }}</dd>{% endif %}
+  </dl>
 </section>
+{% else %}
+<div class="alert">Почтовые правила ещё не добавлены.</div>
+{% endfor %}
 
 <section class="card">
   <div class="observer-card-heading">
     <div>
-      <h2>Состояние</h2>
-      <p class="muted">Техническая сводка без лишних записей в основном журнале.</p>
+      <h2>Добавить организацию</h2>
+      <p class="muted">Одна организация — одно правило и свой почтовый курсор.</p>
     </div>
-    <form method="post" action="/settings/preliminary-dismissals/check-now">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button class="button secondary" type="submit">Проверить почту сейчас</button>
-    </form>
   </div>
-  <div class="settings-status-grid">
-    <div><span>Писем обработано</span><strong>{{ summary.messages }}</strong></div>
-    <div><span>Ожидают кадровую выгрузку</span><strong>{{ summary.counts.active }}</strong></div>
-    <div><span>Подтверждено кадрами</span><strong>{{ summary.counts.confirmed }}</strong></div>
-    <div><span>Не сопоставлено</span><strong>{{ summary.counts.unmatched }}</strong></div>
-  </div>
-  <dl class="integration-details">
-    <dt>Организация</dt><dd>{{ summary.source_name or 'Не выбрана' }}</dd>
-    <dt>Последняя проверка</dt>
-    <dd>{{ summary.settings.last_checked_at|app_datetime('%d.%m.%Y %H:%M') if summary.settings.last_checked_at else 'Еще не выполнялась' }}</dd>
-    <dt>Результат</dt><dd>{{ summary.status_label }}</dd>
-    {% if summary.settings.last_error %}<dt>Сообщение</dt><dd class="registry-error">{{ summary.settings.last_error }}</dd>{% endif %}
-  </dl>
+  {% if not new_sources %}
+  <p class="muted">Для всех подключенных организаций почтовые правила уже созданы.</p>
+  {% endif %}
+  <form method="post" action="/settings/preliminary-dismissals/save" class="settings-source-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="rule_id" value="0">
+    <div class="settings-source-grid">
+      <label>
+        <span>Организация</span>
+        <select name="source_id" required>
+          <option value="">Выберите организацию</option>
+          {% for source in new_sources %}<option value="{{ source.source_id }}">{{ source.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>IMAP-сервер</span>
+        <input type="text" name="imap_host" value="{{ summary.new_rule.imap_host }}" placeholder="imap.company.ru" required>
+      </label>
+      <label>
+        <span>Порт IMAP</span>
+        <input type="number" name="imap_port" value="{{ summary.new_rule.imap_port }}" min="1" max="65535" required>
+      </label>
+      <label>
+        <span>Почтовый ящик / логин</span>
+        <input type="text" name="imap_username" value="{{ summary.new_rule.imap_username }}" autocomplete="username" required>
+      </label>
+      <label>
+        <span>Пароль IMAP</span>
+        <input type="password" name="imap_password" value="" autocomplete="new-password" required>
+      </label>
+      <label>
+        <span>Папка IMAP</span>
+        <input type="text" name="imap_folder" value="{{ summary.new_rule.imap_folder }}" required>
+      </label>
+      <label>
+        <span>Искать письма за, дней</span>
+        <input type="number" name="imap_lookback_days" value="{{ summary.new_rule.imap_lookback_days }}" min="1" max="365" required>
+      </label>
+      <label>
+        <span>Письмо от</span>
+        <input type="email" name="sender_filter" value="" placeholder="hr@company.ru" required>
+      </label>
+      <label>
+        <span>Тема содержит</span>
+        <input type="text" name="subject_filter" value="" placeholder="Увольнение" required>
+      </label>
+    </div>
+    <div class="preliminary-mailbox-flags">
+      <label class="observer-check-row">
+        <input type="checkbox" name="imap_ssl" value="on"{% if summary.new_rule.imap_ssl %} checked{% endif %}>
+        <span><strong>Защищённое подключение SSL/TLS</strong></span>
+      </label>
+      <label class="observer-check-row">
+        <input type="checkbox" name="enabled" value="on" checked>
+        <span><strong>Сразу включить фоновую проверку</strong></span>
+      </label>
+    </div>
+    <div class="observer-form-actions">
+      <button class="button" type="submit"{% if not new_sources %} disabled{% endif %}>Добавить</button>
+    </div>
+  </form>
 </section>
 {% endblock %}

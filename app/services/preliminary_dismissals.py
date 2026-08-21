@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import email
 import hashlib
 import html
@@ -13,6 +14,7 @@ from email.header import decode_header
 from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
@@ -104,6 +106,35 @@ class PreliminaryMailScan:
     messages: tuple[PreliminaryMail, ...]
 
 
+class PreliminaryDismissalSecretBox:
+    """Шифрует пароль IMAP ключом, производным от APP_SECRET_KEY."""
+
+    def __init__(self, app_secret_key: str):
+        secret = str(app_secret_key or "").encode("utf-8")
+        if not secret:
+            raise RuntimeError("APP_SECRET_KEY не задан")
+        digest = hashlib.sha256(secret).digest()
+        self._fernet = Fernet(base64.urlsafe_b64encode(digest))
+
+    def encrypt(self, value: str) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        return self._fernet.encrypt(text.encode("utf-8")).decode("ascii")
+
+    def decrypt(self, value: str) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        try:
+            return self._fernet.decrypt(text.encode("ascii")).decode("utf-8")
+        except (InvalidToken, ValueError, UnicodeError) as exc:
+            raise RuntimeError(
+                "Не удалось расшифровать пароль IMAP. "
+                "Проверьте, что APP_SECRET_KEY не менялся."
+            ) from exc
+
+
 def _split_position_and_departments(value: str) -> tuple[str, tuple[str, ...]]:
     parts = [" ".join(part.split()) for part in str(value or "").split("/")]
     position = parts[0] if parts else ""
@@ -175,8 +206,22 @@ def parse_preliminary_dismissals(body: str) -> list[ParsedPreliminaryDismissal]:
 class PreliminaryDismissalImapService:
     """Read-only чтение доверенных предварительных кадровых писем."""
 
-    def __init__(self, settings: Settings):
-        self.settings = settings
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        use_ssl: bool,
+        username: str,
+        password: str,
+        lookback_days: int,
+    ):
+        self.host = str(host or "").strip()
+        self.port = int(port)
+        self.use_ssl = bool(use_ssl)
+        self.username = str(username or "").strip()
+        self.password = str(password or "")
+        self.lookback_days = max(1, int(lookback_days))
 
     @staticmethod
     def _uid_number(value: str | bytes | None) -> int:
@@ -186,18 +231,11 @@ class PreliminaryDismissalImapService:
             return 0
 
     def _connect(self):
-        if not (
-            self.settings.onec_imap_host
-            and self.settings.onec_imap_username
-            and self.settings.onec_imap_password
-        ):
-            raise RuntimeError("Не настроено общее IMAP-подключение кадровой почты")
-        client_cls = imaplib.IMAP4_SSL if self.settings.onec_imap_ssl else imaplib.IMAP4
-        client = client_cls(self.settings.onec_imap_host, self.settings.onec_imap_port)
-        client.login(
-            self.settings.onec_imap_username,
-            self.settings.onec_imap_password,
-        )
+        if not (self.host and self.username and self.password):
+            raise RuntimeError("Для организации не настроено IMAP-подключение")
+        client_cls = imaplib.IMAP4_SSL if self.use_ssl else imaplib.IMAP4
+        client = client_cls(self.host, self.port)
+        client.login(self.username, self.password)
         return client
 
     @staticmethod
@@ -274,7 +312,7 @@ class PreliminaryDismissalImapService:
                 )
             since = (
                 datetime.now()
-                - timedelta(days=max(1, self.settings.onec_imap_lookback_days))
+                - timedelta(days=self.lookback_days)
             ).strftime("%d-%b-%Y")
             criteria: list[str] = []
             if after_number:
@@ -308,15 +346,79 @@ class PreliminaryDismissalService:
     def __init__(self, settings: Settings, db: Session):
         self.settings = settings
         self.db = db
+        self.secret_box = PreliminaryDismissalSecretBox(settings.app_secret_key)
 
     @property
     def today(self) -> date:
         return datetime.now(ZoneInfo(self.settings.app_timezone)).date()
 
-    def get_settings(self, *, create: bool = True) -> PreliminaryDismissalSettings | None:
-        row = self.db.get(PreliminaryDismissalSettings, 1)
+    def _migrate_legacy_settings(self) -> None:
+        """Перенести прежнее общее IMAP-подключение в единственное старое правило."""
+        rows = list(
+            self.db.scalars(
+                select(PreliminaryDismissalSettings).order_by(
+                    PreliminaryDismissalSettings.id
+                )
+            ).all()
+        )
+        changed = False
+        for row in rows:
+            if not row.source_id or row.imap_host or row.imap_username:
+                continue
+            row.imap_host = str(self.settings.onec_imap_host or "").strip()
+            row.imap_port = int(self.settings.onec_imap_port or 993)
+            row.imap_ssl = bool(self.settings.onec_imap_ssl)
+            row.imap_username = str(self.settings.onec_imap_username or "").strip()
+            row.imap_lookback_days = max(
+                1,
+                int(self.settings.onec_imap_lookback_days or 7),
+            )
+            legacy_password = str(self.settings.onec_imap_password or "")
+            if legacy_password and not row.imap_password_encrypted:
+                row.imap_password_encrypted = self.secret_box.encrypt(legacy_password)
+            row.config_key = self._config_key(
+                source_id=row.source_id,
+                imap_host=row.imap_host,
+                imap_port=row.imap_port,
+                imap_ssl=row.imap_ssl,
+                imap_username=row.imap_username,
+                imap_folder=row.imap_folder,
+                imap_lookback_days=row.imap_lookback_days,
+                sender_filter=row.sender_filter,
+                subject_filter=row.subject_filter,
+            )
+            changed = True
+        if changed:
+            self.db.commit()
+
+    def list_settings(self) -> list[PreliminaryDismissalSettings]:
+        self._migrate_legacy_settings()
+        return list(
+            self.db.scalars(
+                select(PreliminaryDismissalSettings).order_by(
+                    PreliminaryDismissalSettings.id
+                )
+            ).all()
+        )
+
+    def get_settings(
+        self,
+        rule_id: int | None = None,
+        *,
+        create: bool = False,
+    ) -> PreliminaryDismissalSettings | None:
+        """Совместимый доступ к первому правилу; новые вызовы передают rule_id."""
+        self._migrate_legacy_settings()
+        if rule_id is not None:
+            row = self.db.get(PreliminaryDismissalSettings, rule_id)
+        else:
+            row = self.db.scalar(
+                select(PreliminaryDismissalSettings)
+                .order_by(PreliminaryDismissalSettings.id)
+                .limit(1)
+            )
         if row is None and create:
-            row = PreliminaryDismissalSettings(id=1)
+            row = PreliminaryDismissalSettings()
             self.db.add(row)
             self.db.commit()
             self.db.refresh(row)
@@ -324,39 +426,92 @@ class PreliminaryDismissalService:
 
     @staticmethod
     def _config_key(
+        *,
         source_id: str,
+        imap_host: str,
+        imap_port: int,
+        imap_ssl: bool,
+        imap_username: str,
         imap_folder: str,
+        imap_lookback_days: int,
         sender_filter: str,
         subject_filter: str,
     ) -> str:
         raw = "\n".join(
-            (source_id, imap_folder, sender_filter.casefold(), subject_filter.casefold())
+            (
+                source_id,
+                imap_host.casefold(),
+                str(imap_port),
+                "ssl" if imap_ssl else "plain",
+                imap_username.casefold(),
+                imap_folder,
+                str(imap_lookback_days),
+                sender_filter.casefold(),
+                subject_filter.casefold(),
+            )
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def save_settings(
         self,
         *,
+        rule_id: int | None,
         enabled: bool,
         source_id: str,
+        imap_host: str,
+        imap_port: int,
+        imap_ssl: bool,
+        imap_username: str,
+        imap_password: str,
         imap_folder: str,
+        imap_lookback_days: int,
         sender_filter: str,
         subject_filter: str,
         operator: str,
     ) -> PreliminaryDismissalSettings:
         source_id = source_id.strip().lower()
+        imap_host = imap_host.strip()
+        imap_username = imap_username.strip()
         imap_folder = imap_folder.strip() or "INBOX"
         sender_filter = sender_filter.strip()
         subject_filter = subject_filter.strip()
-        if any(char in imap_folder for char in ("\r", "\n", "\0")):
-            raise ValueError("Папка IMAP содержит недопустимые символы")
+        try:
+            imap_port = int(imap_port)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Порт IMAP должен быть числом") from exc
+        if not 1 <= imap_port <= 65535:
+            raise ValueError("Порт IMAP должен быть от 1 до 65535")
+        try:
+            imap_lookback_days = int(imap_lookback_days)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Глубина поиска должна быть числом дней") from exc
+        if not 1 <= imap_lookback_days <= 365:
+            raise ValueError("Глубина поиска должна быть от 1 до 365 дней")
+        if any(
+            char in value
+            for value in (imap_host, imap_username, imap_folder)
+            for char in ("\r", "\n", "\0")
+        ):
+            raise ValueError("Параметры IMAP содержат недопустимые символы")
         source = self.db.scalar(
             select(OneCAdditionalSource).where(
                 OneCAdditionalSource.mail_domain == source_id
             )
         ) if source_id else None
-        if enabled and source is None:
+        if source is None:
             raise ValueError("Выберите организацию предварительных уведомлений")
+        duplicate = self.db.scalar(
+            select(PreliminaryDismissalSettings).where(
+                PreliminaryDismissalSettings.source_id == source_id,
+                PreliminaryDismissalSettings.id != int(rule_id or 0),
+            )
+        )
+        if duplicate is not None:
+            raise ValueError("Для этой организации правило уже создано")
+        if not imap_host:
+            raise ValueError("Укажите IMAP-сервер")
+        if not imap_username:
+            raise ValueError("Укажите почтовый ящик или логин IMAP")
         if enabled and not sender_filter:
             raise ValueError("Укажите доверенного отправителя")
         if enabled and "@" not in sender_filter:
@@ -364,13 +519,26 @@ class PreliminaryDismissalService:
         if enabled and not subject_filter:
             raise ValueError("Укажите часть темы кадрового письма")
 
-        row = self.get_settings()
-        assert row is not None
+        row = self.get_settings(rule_id, create=False) if rule_id else None
+        if rule_id and row is None:
+            raise ValueError("Настройка организации не найдена")
+        if row is None:
+            row = PreliminaryDismissalSettings()
+            self.db.add(row)
+        if imap_password:
+            row.imap_password_encrypted = self.secret_box.encrypt(imap_password)
+        if enabled and not row.imap_password_encrypted:
+            raise ValueError("Укажите пароль IMAP")
         new_key = self._config_key(
-            source_id,
-            imap_folder,
-            sender_filter,
-            subject_filter,
+            source_id=source_id,
+            imap_host=imap_host,
+            imap_port=imap_port,
+            imap_ssl=imap_ssl,
+            imap_username=imap_username,
+            imap_folder=imap_folder,
+            imap_lookback_days=imap_lookback_days,
+            sender_filter=sender_filter,
+            subject_filter=subject_filter,
         )
         if row.config_key and row.config_key != new_key:
             row.last_scanned_uid = ""
@@ -378,7 +546,12 @@ class PreliminaryDismissalService:
             row.last_error = "Правило изменено; почтовый курсор сброшен"
         row.enabled = enabled
         row.source_id = source_id
+        row.imap_host = imap_host
+        row.imap_port = imap_port
+        row.imap_ssl = imap_ssl
+        row.imap_username = imap_username
         row.imap_folder = imap_folder
+        row.imap_lookback_days = imap_lookback_days
         row.sender_filter = sender_filter
         row.subject_filter = subject_filter
         row.config_key = new_key
@@ -437,11 +610,11 @@ class PreliminaryDismissalService:
         )
 
     @staticmethod
-    def _message_key(item: PreliminaryMail) -> str:
+    def _message_key(source_id: str, item: PreliminaryMail) -> str:
         identity = item.message_id.strip() or (
             f"{item.sender}\n{item.subject}\n{item.message_date}\n{item.body_hash}"
         )
-        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return hashlib.sha256(f"{source_id}\n{identity}".encode("utf-8")).hexdigest()
 
     def _latest_item(self, source_id: str, normalized_fio: str):
         return self.db.scalar(
@@ -531,7 +704,7 @@ class PreliminaryDismissalService:
         source: OneCAdditionalSource,
         item: PreliminaryMail,
     ) -> tuple[int, int]:
-        message_key = self._message_key(item)
+        message_key = self._message_key(source.source_id, item)
         existing = self.db.scalar(
             select(PreliminaryDismissalMessage).where(
                 PreliminaryDismissalMessage.message_key == message_key
@@ -543,6 +716,7 @@ class PreliminaryDismissalService:
         parsed_items = parse_preliminary_dismissals(item.body)
         row = PreliminaryDismissalMessage(
             message_key=message_key,
+            source_id=source.source_id,
             imap_uid=item.uid,
             message_id=item.message_id,
             message_date=item.message_date,
@@ -700,28 +874,51 @@ class PreliminaryDismissalService:
             self.db.commit()
         return queued, sent
 
-    def process(self, *, force: bool = False) -> dict[str, int | str]:
-        config = self.get_settings(create=False)
-        notification_service = DismissalNotificationService(self.settings, self.db)
-        notification_service._sync_employment_events()
-        self.reconcile()
+    @staticmethod
+    def _status_label(value: str) -> str:
+        return {
+            "never": "Еще не проверялось",
+            "reset": "Правило изменено",
+            "success": "Проверено",
+            "warning": "Требует проверки",
+            "failed": "Ошибка",
+        }.get(value, value or "Неизвестно")
 
-        if config is None or (not config.enabled and not force):
-            return {"status": "disabled", "messages": 0, "items": 0, "sent": 0}
-        if not config.source_id:
-            return {"status": "not_configured", "messages": 0, "items": 0, "sent": 0}
+    def _safe_rule_error(self, exc: Exception, password: str = "") -> str:
+        message = str(exc)[:4000] or exc.__class__.__name__
+        if password:
+            message = message.replace(password, "***")
+        return message
+
+    def _scan_rule(self, config: PreliminaryDismissalSettings) -> dict[str, int | str]:
+        config_id = config.id
         source = self._source(config.source_id)
         if source is None:
             config.last_status = "failed"
             config.last_error = "Выбранная организация больше не существует"
             config.last_checked_at = utcnow()
             self.db.commit()
-            return {"status": "failed", "messages": 0, "items": 0, "sent": 0}
+            return {
+                "rule_id": config_id,
+                "status": "failed",
+                "messages": 0,
+                "items": 0,
+                "matched": 0,
+            }
 
-        config.last_checked_at = utcnow()
-        self.db.commit()
+        password = ""
         try:
-            scan = PreliminaryDismissalImapService(self.settings).scan(
+            password = self.secret_box.decrypt(config.imap_password_encrypted)
+            config.last_checked_at = utcnow()
+            self.db.commit()
+            scan = PreliminaryDismissalImapService(
+                host=config.imap_host,
+                port=config.imap_port,
+                use_ssl=config.imap_ssl,
+                username=config.imap_username,
+                password=password,
+                lookback_days=config.imap_lookback_days,
+            ).scan(
                 after_uid=config.last_scanned_uid,
                 folder=config.imap_folder,
                 sender_filter=config.sender_filter,
@@ -733,17 +930,9 @@ class PreliminaryDismissalService:
                 parsed, matched = self._ingest_message(source, message)
                 parsed_count += parsed
                 matched_count += matched
-            config = self.get_settings()
+
+            config = self.db.get(PreliminaryDismissalSettings, config_id)
             assert config is not None
-            config.last_scanned_uid = scan.max_uid
-            config.last_status = "success"
-            config.last_error = ""
-            config.last_checked_at = utcnow()
-            config.last_success_at = utcnow()
-            self.db.commit()
-            self.reconcile()
-            queued, sent = self._queue_equipment_notices()
-            self.reconcile()
             warnings: list[str] = []
             if scan.messages and parsed_count == 0:
                 warnings.append("В найденных письмах нет строк увольнений нужного формата")
@@ -751,9 +940,78 @@ class PreliminaryDismissalService:
                 warnings.append(
                     f"Не сопоставлено с кадровым реестром: {parsed_count - matched_count}"
                 )
+            config.last_scanned_uid = scan.max_uid
+            config.last_status = "warning" if warnings else "success"
+            config.last_error = ". ".join(warnings)
+            config.last_checked_at = utcnow()
+            config.last_success_at = utcnow()
+            self.db.commit()
+            return {
+                "rule_id": config_id,
+                "status": config.last_status,
+                "messages": len(scan.messages),
+                "items": parsed_count,
+                "matched": matched_count,
+            }
+        except Exception as exc:
+            self.db.rollback()
+            config = self.db.get(PreliminaryDismissalSettings, config_id)
+            if config is not None:
+                config.last_status = "failed"
+                config.last_error = self._safe_rule_error(exc, password)
+                config.last_checked_at = utcnow()
+                self.db.commit()
+            return {
+                "rule_id": config_id,
+                "status": "failed",
+                "messages": 0,
+                "items": 0,
+                "matched": 0,
+            }
+
+    def process(
+        self,
+        *,
+        force: bool = False,
+        rule_id: int | None = None,
+    ) -> dict[str, int | str]:
+        notification_service = DismissalNotificationService(self.settings, self.db)
+        notification_service._sync_employment_events()
+        self.reconcile()
+
+        if rule_id is not None:
+            selected = self.get_settings(rule_id, create=False)
+            configs = [selected] if selected is not None else []
+        else:
+            configs = [row for row in self.list_settings() if row.enabled]
+        configs = [row for row in configs if row is not None and (row.enabled or force)]
+        if not configs:
+            return {
+                "status": "not_found" if rule_id is not None else "disabled",
+                "rules": 0,
+                "failed": 0,
+                "messages": 0,
+                "items": 0,
+                "matched": 0,
+                "queued": 0,
+                "sent": 0,
+            }
+
+        results = [self._scan_rule(config) for config in configs]
+        self.reconcile()
+        queued, sent = self._queue_equipment_notices()
+        self.reconcile()
+
+        for result in results:
+            if result["status"] == "failed":
+                continue
+            config = self.db.get(PreliminaryDismissalSettings, int(result["rule_id"]))
+            if config is None:
+                continue
             delivery_errors = int(
                 self.db.scalar(
                     select(func.count(PreliminaryDismissalItem.id)).where(
+                        PreliminaryDismissalItem.source_id == config.source_id,
                         PreliminaryDismissalItem.status.in_(["active", "confirmed"]),
                         PreliminaryDismissalItem.worker_key != "",
                         PreliminaryDismissalItem.match_error != "",
@@ -762,62 +1020,114 @@ class PreliminaryDismissalService:
                 or 0
             )
             if delivery_errors:
-                warnings.append(
-                    f"Письмо о возврате оборудования ожидает отправки: {delivery_errors}"
+                message = (
+                    "Письмо о возврате оборудования ожидает отправки: "
+                    f"{delivery_errors}"
                 )
-            config = self.get_settings()
-            assert config is not None
-            if warnings:
                 config.last_status = "warning"
-                config.last_error = ". ".join(warnings)
-                self.db.commit()
-            return {
-                "status": "success",
-                "messages": len(scan.messages),
-                "items": parsed_count,
-                "matched": matched_count,
-                "queued": queued,
-                "sent": sent,
-            }
-        except Exception as exc:
-            self.db.rollback()
-            config = self.get_settings()
-            assert config is not None
-            config.last_status = "failed"
-            config.last_error = str(exc)[:4000]
-            config.last_checked_at = utcnow()
-            self.db.commit()
-            raise
+                config.last_error = ". ".join(
+                    part for part in (config.last_error, message) if part
+                )
+                result["status"] = "warning"
+        self.db.commit()
+
+        failed = sum(result["status"] == "failed" for result in results)
+        warnings = sum(result["status"] == "warning" for result in results)
+        overall_status = (
+            "failed"
+            if failed == len(results)
+            else "partial"
+            if failed
+            else "warning"
+            if warnings
+            else "success"
+        )
+        return {
+            "status": overall_status,
+            "rules": len(results),
+            "failed": failed,
+            "messages": sum(int(result["messages"]) for result in results),
+            "items": sum(int(result["items"]) for result in results),
+            "matched": sum(int(result["matched"]) for result in results),
+            "queued": queued,
+            "sent": sent,
+        }
 
     def summary(self) -> dict[str, object]:
-        config = self.get_settings()
-        assert config is not None
-        source = self._source(config.source_id) if config.source_id else None
-        counts = {
-            status: int(
-                self.db.scalar(
-                    select(func.count(PreliminaryDismissalItem.id)).where(
-                        PreliminaryDismissalItem.status == status
+        rules: list[dict[str, object]] = []
+        for config in self.list_settings():
+            source = self._source(config.source_id) if config.source_id else None
+            counts = {
+                status: int(
+                    self.db.scalar(
+                        select(func.count(PreliminaryDismissalItem.id)).where(
+                            PreliminaryDismissalItem.source_id == config.source_id,
+                            PreliminaryDismissalItem.status == status,
+                        )
                     )
+                    or 0
                 )
-                or 0
+                for status in ("active", "confirmed", "expired", "unmatched")
+            }
+            rules.append(
+                {
+                    "settings": {
+                        "id": config.id,
+                        "enabled": config.enabled,
+                        "source_id": config.source_id,
+                        "imap_host": config.imap_host,
+                        "imap_port": config.imap_port,
+                        "imap_ssl": config.imap_ssl,
+                        "imap_username": config.imap_username,
+                        "imap_folder": config.imap_folder,
+                        "imap_lookback_days": config.imap_lookback_days,
+                        "sender_filter": config.sender_filter,
+                        "subject_filter": config.subject_filter,
+                        "last_status": config.last_status,
+                        "last_error": config.last_error,
+                        "last_checked_at": config.last_checked_at,
+                    },
+                    "source_name": source.name if source is not None else config.source_id,
+                    "password_configured": bool(config.imap_password_encrypted),
+                    "counts": counts,
+                    "status_label": self._status_label(config.last_status),
+                    "messages": int(
+                        self.db.scalar(
+                            select(func.count(PreliminaryDismissalMessage.id)).where(
+                                PreliminaryDismissalMessage.source_id == config.source_id
+                            )
+                        )
+                        or 0
+                    ),
+                }
             )
-            for status in ("active", "confirmed", "expired", "unmatched")
-        }
         return {
-            "settings": config,
-            "source_name": source.name if source is not None else "",
-            "counts": counts,
-            "status_label": {
-                "never": "Еще не проверялось",
-                "reset": "Правило изменено",
-                "success": "Проверено",
-                "warning": "Требует проверки",
-                "failed": "Ошибка",
-            }.get(config.last_status, config.last_status or "Неизвестно"),
+            "rules": rules,
             "messages": int(
                 self.db.scalar(select(func.count(PreliminaryDismissalMessage.id))) or 0
             ),
+            "counts": {
+                status: int(
+                    self.db.scalar(
+                        select(func.count(PreliminaryDismissalItem.id)).where(
+                            PreliminaryDismissalItem.status == status
+                        )
+                    )
+                    or 0
+                )
+                for status in ("active", "confirmed", "expired", "unmatched")
+            },
+            "new_rule": {
+                "imap_host": str(self.settings.onec_imap_host or ""),
+                "imap_port": int(self.settings.onec_imap_port or 993),
+                "imap_ssl": bool(self.settings.onec_imap_ssl),
+                "imap_username": str(self.settings.onec_imap_username or ""),
+                "imap_folder": "INBOX",
+                "imap_lookback_days": max(
+                    1,
+                    int(self.settings.onec_imap_lookback_days or 7),
+                ),
+            },
         }
 
     def source_options(self) -> list[OneCAdditionalSource]:

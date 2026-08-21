@@ -31,8 +31,38 @@
   margin: 0;
 }
 
+.preliminary-mailbox-card {
+  border-left: 4px solid #dbeafe;
+}
+
+.preliminary-mailbox-actions,
+.preliminary-mailbox-flags {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.preliminary-mailbox-actions form {
+  margin: 0;
+}
+
+.preliminary-mailbox-flags {
+  align-items: flex-start;
+  margin-top: 16px;
+}
+
+.preliminary-mailbox-flags .observer-check-row {
+  flex: 1 1 280px;
+}
+
 @media (max-width: 800px) {
   .settings-source-grid {
     grid-template-columns: 1fr;
+  }
+
+  .preliminary-mailbox-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 }

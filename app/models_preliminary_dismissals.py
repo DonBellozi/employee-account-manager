@@ -13,14 +13,20 @@ def utcnow() -> datetime:
 
 
 class PreliminaryDismissalSettings(Base):
-    """Web-настройки одного доверенного источника предварительных увольнений."""
+    """Независимое правило входящей почты для одной кадровой организации."""
 
     __tablename__ = "preliminary_dismissal_settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     source_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    imap_host: Mapped[str] = mapped_column(String(512), default="")
+    imap_port: Mapped[int] = mapped_column(Integer, default=993)
+    imap_ssl: Mapped[bool] = mapped_column(Boolean, default=True)
+    imap_username: Mapped[str] = mapped_column(String(512), default="")
+    imap_password_encrypted: Mapped[str] = mapped_column(Text, default="")
     imap_folder: Mapped[str] = mapped_column(String(512), default="INBOX")
+    imap_lookback_days: Mapped[int] = mapped_column(Integer, default=7)
     sender_filter: Mapped[str] = mapped_column(String(512), default="")
     subject_filter: Mapped[str] = mapped_column(String(512), default="")
     config_key: Mapped[str] = mapped_column(String(64), default="", index=True)
@@ -47,6 +53,7 @@ class PreliminaryDismissalMessage(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     message_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    source_id: Mapped[str] = mapped_column(String(128), default="", index=True)
     imap_uid: Mapped[str] = mapped_column(String(128), default="", index=True)
     message_id: Mapped[str] = mapped_column(String(1024), default="")
     message_date: Mapped[str] = mapped_column(String(256), default="")

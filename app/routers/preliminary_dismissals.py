@@ -29,11 +29,22 @@ def _context(
 ):
     current = require_admin(request)
     service = PreliminaryDismissalService(settings, db)
+    summary = service.summary()
+    sources = service.source_options()
+    configured_source_ids = {
+        str(rule["settings"]["source_id"])
+        for rule in summary["rules"]
+    }
     return {
         "user": current,
         "csrf": get_or_create_csrf(request),
-        "summary": service.summary(),
-        "sources": service.source_options(),
+        "summary": summary,
+        "sources": sources,
+        "new_sources": [
+            source
+            for source in sources
+            if source.source_id not in configured_source_ids
+        ],
         "saved": saved,
         "result": result,
         "error": error,
@@ -65,8 +76,15 @@ def settings_page(
 def save_settings(
     request: Request,
     csrf: str = Form(...),
+    rule_id: int = Form(0),
     source_id: str = Form(""),
+    imap_host: str = Form(""),
+    imap_port: int = Form(993),
+    imap_ssl: str = Form(""),
+    imap_username: str = Form(""),
+    imap_password: str = Form(""),
     imap_folder: str = Form("INBOX"),
+    imap_lookback_days: int = Form(7),
     sender_filter: str = Form(""),
     subject_filter: str = Form(""),
     enabled: str = Form(""),
@@ -77,9 +95,16 @@ def save_settings(
     current = require_admin(request)
     try:
         PreliminaryDismissalService(settings, db).save_settings(
+            rule_id=rule_id or None,
             enabled=enabled.strip().casefold() in {"1", "true", "yes", "on"},
             source_id=source_id,
+            imap_host=imap_host,
+            imap_port=imap_port,
+            imap_ssl=imap_ssl.strip().casefold() in {"1", "true", "yes", "on"},
+            imap_username=imap_username,
+            imap_password=imap_password,
             imap_folder=imap_folder,
+            imap_lookback_days=imap_lookback_days,
             sender_filter=sender_filter,
             subject_filter=subject_filter,
             operator=current.username,
@@ -107,17 +132,42 @@ def save_settings(
 def check_now(
     request: Request,
     csrf: str = Form(...),
+    rule_id: int = Form(...),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf)
     require_admin(request)
     try:
-        result = PreliminaryDismissalService(settings, db).process(force=True)
+        service = PreliminaryDismissalService(settings, db)
+        result = service.process(
+            force=True,
+            rule_id=rule_id,
+        )
+        if result.get("status") in {"failed", "not_found"}:
+            rule = service.get_settings(rule_id, create=False)
+            message = (
+                rule.last_error
+                if rule is not None and rule.last_error
+                else "Не удалось проверить выбранный почтовый ящик"
+            )
+            return templates.TemplateResponse(
+                request,
+                "preliminary_dismissals.html",
+                _context(
+                    request,
+                    settings=settings,
+                    db=db,
+                    error=message,
+                ),
+                status_code=503,
+            )
         message = (
-            f"Писем: {int(result.get('messages', 0) or 0)}, "
+            f"Ящиков: {int(result.get('rules', 0) or 0)}, "
+            f"писем: {int(result.get('messages', 0) or 0)}, "
             f"работников: {int(result.get('items', 0) or 0)}, "
-            f"сопоставлено: {int(result.get('matched', 0) or 0)}."
+            f"сопоставлено: {int(result.get('matched', 0) or 0)}, "
+            f"ошибок: {int(result.get('failed', 0) or 0)}."
         )
         return RedirectResponse(
             "/settings/preliminary-dismissals?result=" + quote_plus(message),

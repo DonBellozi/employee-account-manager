@@ -91,6 +91,23 @@ def ensure_compatibility_schema() -> None:
                 "allow_alias_remove": "BOOLEAN NOT NULL DEFAULT 0",
             },
         )
+        add_missing_columns(
+            connection,
+            "preliminary_dismissal_settings",
+            {
+                "imap_host": "VARCHAR(512) NOT NULL DEFAULT ''",
+                "imap_port": "INTEGER NOT NULL DEFAULT 993",
+                "imap_ssl": "BOOLEAN NOT NULL DEFAULT 1",
+                "imap_username": "VARCHAR(512) NOT NULL DEFAULT ''",
+                "imap_password_encrypted": "TEXT NOT NULL DEFAULT ''",
+                "imap_lookback_days": "INTEGER NOT NULL DEFAULT 7",
+            },
+        )
+        add_missing_columns(
+            connection,
+            "preliminary_dismissal_messages",
+            {"source_id": "VARCHAR(128) NOT NULL DEFAULT ''"},
+        )
 
         if "hr_source_records" in tables:
             columns = {
