@@ -27,31 +27,30 @@
   font-size: 1.3rem;
 }
 
-.techexpert-credentials-export {
-  display: grid;
-  gap: 12px;
-  margin-top: 16px;
-  padding: 14px 16px;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #f8fafc;
+/* Кнопка выгрузки одновременно является выбором файлов сверки: сам input
+   скрыт, клик по label открывает диалог, а выбор файлов отправляет форму. */
+.techexpert-export-label {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
 }
 
-.techexpert-credentials-export p {
-  margin: 4px 0 0;
+.techexpert-export-label input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
 }
 
-.techexpert-credentials-export-controls {
-  display: grid;
-  grid-template-columns: minmax(240px, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-}
-
-@media (max-width: 760px) {
-  .techexpert-credentials-export-controls {
-    grid-template-columns: 1fr;
-  }
+.techexpert-export-label:focus-within {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
 }
 
 .techexpert-start-form,
