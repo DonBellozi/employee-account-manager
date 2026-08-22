@@ -1053,77 +1053,6 @@ class TechExpertActualizationService:
             sheet.column_dimensions[column].width = width
         return self._finish_workbook(workbook)
 
-    def export_current(self) -> bytes:
-        records = list(
-            self.db.scalars(
-                select(HRSourceRecord)
-                .where(
-                    HRSourceRecord.source_id == self.source_id,
-                    HRSourceRecord.techexpert_access.is_(True),
-                )
-                .order_by(HRSourceRecord.fio)
-            ).all()
-        )
-        grouped: dict[str, list[tuple[HRSourceRecord, str]]] = {}
-        for record in records:
-            snapshot = placement_snapshot(record)
-            placements = []
-            try:
-                raw = json.loads(record.placements_json or "[]")
-            except (TypeError, json.JSONDecodeError):
-                raw = []
-            for value in raw if isinstance(raw, list) else []:
-                if not isinstance(value, dict):
-                    continue
-                department = normalize_text(value.get("department"))
-                position = normalize_text(value.get("position"))
-                top = department.split(" / ", 1)[0].strip() or "Без подразделения"
-                placements.append((top, position))
-            if not placements:
-                tops = snapshot["top_departments"] or ["Без подразделения"]
-                positions = snapshot["positions"] or [""]
-                placements = [(tops[0], position) for position in positions]
-            for top, position in placements:
-                grouped.setdefault(top, []).append((record, position))
-
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "Актуальный список"
-        row_number = 1
-        for department in sorted(grouped, key=str.casefold):
-            if row_number > 1:
-                row_number += 1
-            sheet.cell(row_number, 1, safe_excel_value(department))
-            sheet.cell(row_number, 1).font = Font(bold=True, size=12)
-            row_number += 1
-            for column, header in enumerate(
-                ["№ п/п", "ФИО", "Должность", "E-mail"], 1
-            ):
-                cell = sheet.cell(row_number, column, header)
-                cell.font = Font(bold=True)
-                cell.fill = PatternFill("solid", fgColor="DCE6F1")
-            row_number += 1
-            for sequence, (record, position) in enumerate(
-                sorted(grouped[department], key=lambda item: item[0].fio.casefold()),
-                1,
-            ):
-                values = [
-                    sequence,
-                    record.fio,
-                    position,
-                    record.corporate_email,
-                ]
-                for column, value in enumerate(values, 1):
-                    sheet.cell(
-                        row_number,
-                        column,
-                        value if isinstance(value, int) else safe_excel_value(value),
-                    )
-                row_number += 1
-        for column, width in {"A": 10, "B": 42, "C": 44, "D": 34}.items():
-            sheet.column_dimensions[column].width = width
-        return self._finish_workbook(workbook)
-
     @staticmethod
     def _credentials_index(
         files: list[tuple[str, bytes]],
@@ -1146,11 +1075,11 @@ class TechExpertActualizationService:
                     by_fio.setdefault(fio_key, []).append(row)
         return by_email, by_fio
 
-    def export_current_with_credentials(
+    def export_current(
         self,
         files: list[tuple[str, bytes]],
     ) -> bytes:
-        """Актуальный список с учетными данными из файлов сверки.
+        """Актуальный список пользователей Техэксперта.
 
         Кадровая часть (ФИО, должность, e-mail) берется из 1С, учетные данные
         Техэксперта – только из приложенных файлов. Работник, которого нет в

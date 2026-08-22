@@ -251,24 +251,22 @@
           Обновить из AD
         </button>
       </form>
-      <a class="button secondary" href="/settings/techexpert/current.xlsx">
-        Актуальный список
-      </a>
     </div>
   </div>
 
   <form class="techexpert-credentials-export"
         method="post"
-        action="/settings/techexpert/current-credentials.xlsx"
+        action="/settings/techexpert/current.xlsx"
         enctype="multipart/form-data">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div>
-      <strong>Актуальный список с учетными данными</strong>
+      <strong>Актуальный список</strong>
       <p class="muted">
         ФИО, должность и e-mail берутся из кадровой выгрузки, телефон, логин и
-        пароль – из приложенных файлов сверки. Файлы читаются только для
-        формирования выгрузки и нигде не сохраняются. Работники, которых нет в
-        файлах, попадают на отдельный лист «Не вошли в выгрузку».
+        пароль – из приложенных файлов сверки. Приложите те же файлы, что и для
+        актуализации: они читаются только для формирования выгрузки и нигде не
+        сохраняются. Работники, которых нет в файлах, попадают на отдельный
+        лист «Не вошли в выгрузку».
       </p>
     </div>
     <div class="techexpert-credentials-export-controls">

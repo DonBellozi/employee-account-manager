@@ -729,15 +729,15 @@ def techexpert_actualization_not_working_export(
     )
 
 
-@router.post("/settings/techexpert/current-credentials.xlsx")
-async def techexpert_current_credentials_export(
+@router.post("/settings/techexpert/current.xlsx")
+async def techexpert_current_export(
     request: Request,
     files: list[UploadFile] = File(...),
     csrf: str = Form(...),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
-    """Актуальный список с телефоном, логином и паролем из файлов сверки.
+    """Актуальный список: кадровые данные из 1С, учетные – из файлов сверки.
 
     Файлы читаются в память и нигде не сохраняются: синхронизация разовая,
     а учетные данные Техэксперта не должны попадать в базу.
@@ -750,37 +750,11 @@ async def techexpert_current_credentials_export(
             settings,
             db,
             config,
-        ).export_current_with_credentials(
+        ).export_current(
             [(item.filename or "", await item.read()) for item in files]
         )
     except Exception as exc:
         return _redirect(error=f"Выгрузка не сформирована: {exc}")
-    return Response(
-        content=payload,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-        headers={
-            "Content-Disposition": (
-                'attachment; filename="techexpert-current-users-credentials.xlsx"'
-            )
-        },
-    )
-
-
-@router.get("/settings/techexpert/current.xlsx")
-def techexpert_current_export(
-    request: Request,
-    db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-):
-    require_operator(request)
-    config = TechExpertSettingsService(settings, db).get()
-    payload = TechExpertActualizationService(
-        settings,
-        db,
-        config,
-    ).export_current()
     return Response(
         content=payload,
         media_type=(
