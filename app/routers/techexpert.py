@@ -729,42 +729,42 @@ def techexpert_actualization_not_working_export(
     )
 
 
-@router.post("/settings/techexpert/current-credentials.xlsx")
-async def techexpert_current_credentials_export(
+@router.post("/settings/techexpert/actualization/{run_id}/refresh-credentials")
+async def techexpert_actualization_refresh_credentials(
+    run_id: int,
     request: Request,
     files: list[UploadFile] = File(...),
     csrf: str = Form(...),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
-    """Актуальный список с телефоном, логином и паролем из файлов сверки.
+    """Дозаполнить телефон, логин и пароль у уже обработанных позиций пакета.
 
-    Файлы читаются в память и нигде не сохраняются: синхронизация разовая,
-    а учетные данные Техэксперта не должны попадать в базу.
+    Содержимое загруженных файлов приложение не хранит, поэтому те же файлы
+    нужно приложить повторно. Результаты сверки при этом не пересчитываются.
     """
     validate_csrf(request, csrf)
-    require_operator(request)
+    current = require_operator(request)
     config = TechExpertSettingsService(settings, db).get()
     try:
-        payload = TechExpertActualizationService(
+        result = TechExpertActualizationService(
             settings,
             db,
             config,
-        ).export_current_with_credentials(
-            [(item.filename or "", await item.read()) for item in files]
+        ).refresh_source_credentials(
+            run_id=run_id,
+            files=[(item.filename or "", await item.read()) for item in files],
+            actor=current.username,
         )
     except Exception as exc:
-        return _redirect(error=f"Выгрузка не сформирована: {exc}")
-    return Response(
-        content=payload,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-        headers={
-            "Content-Disposition": (
-                'attachment; filename="techexpert-current-users-credentials.xlsx"'
-            )
-        },
+        db.rollback()
+        return _redirect(error=f"Файлы не перечитаны: {exc}")
+    return _redirect(
+        message=(
+            f"Перечитано строк: {result['rows']}; "
+            f"обновлено записей: {result['updated']}; "
+            f"не сопоставлено: {result['unmatched']}"
+        )
     )
 
 

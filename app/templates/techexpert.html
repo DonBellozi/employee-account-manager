@@ -327,7 +327,23 @@
   </form>
   <p class="muted techexpert-file-note">
     Строки 1–2 игнорируются, строка 3 — подразделение, строка 4 — заголовки.
-    Логин и пароль из файла не читаются и не сохраняются.
+  </p>
+
+  <form method="post"
+        action="/settings/techexpert/actualization/{{ actualization_run.id }}/refresh-credentials"
+        enctype="multipart/form-data"
+        class="techexpert-upload-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>
+      <span>Перечитать файлы пакета</span>
+      <input type="file" name="files" accept=".xlsx" multiple required>
+    </label>
+    <button class="button secondary" type="submit">Перечитать файлы</button>
+  </form>
+  <p class="muted techexpert-file-note">
+    Приложите те же файлы, чтобы дозаполнить телефон, логин и пароль для
+    выгрузки актуального списка. Результаты сверки не пересчитываются:
+    категории, сопоставление с кадрами и состояние группы AD не меняются.
   </p>
 
   {% if actualization_details.files %}

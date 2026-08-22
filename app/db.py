@@ -62,6 +62,14 @@ def ensure_compatibility_schema() -> None:
         )
         add_missing_columns(
             connection,
+            "techexpert_actualization_items",
+            {
+                "source_login": "VARCHAR(256) NOT NULL DEFAULT ''",
+                "source_password": "VARCHAR(256) NOT NULL DEFAULT ''",
+            },
+        )
+        add_missing_columns(
+            connection,
             "synology_account_states",
             {
                 "disabled_reason_code": "VARCHAR(64) NOT NULL DEFAULT ''",

@@ -638,6 +638,8 @@ class TechExpertActualizationService:
                 source_position=source.position,
                 source_email=source.email,
                 source_phone=source.phone,
+                source_login=source.login,
+                source_password=source.password,
                 **analysis,
             )
             self.db.add(item)
@@ -1053,7 +1055,104 @@ class TechExpertActualizationService:
             sheet.column_dimensions[column].width = width
         return self._finish_workbook(workbook)
 
+    def refresh_source_credentials(
+        self,
+        *,
+        run_id: int,
+        files: list[tuple[str, bytes]],
+        actor: str,
+    ) -> dict[str, int]:
+        """Дозаполнить телефон, логин и пароль у уже обработанных позиций.
+
+        Содержимое загруженных файлов приложение не хранит, поэтому файлы
+        приходится приложить повторно. Ничего кроме трех полей не меняется:
+        категории, сопоставление с кадрами и состояние группы AD остаются
+        такими, какими их посчитала первичная сверка.
+        """
+        run = self.get_run(run_id)
+        if not files:
+            raise ValueError("Приложите файлы сверки Техэксперта")
+
+        items = list(
+            self.db.scalars(
+                select(TechExpertActualizationItem).where(
+                    TechExpertActualizationItem.run_id == run.id
+                )
+            ).all()
+        )
+        by_email: dict[str, list[TechExpertActualizationItem]] = {}
+        by_fio: dict[str, list[TechExpertActualizationItem]] = {}
+        for item in items:
+            email = normalize_email(item.source_email)
+            if email:
+                by_email.setdefault(email, []).append(item)
+            if item.normalized_fio:
+                by_fio.setdefault(item.normalized_fio, []).append(item)
+
+        rows = 0
+        updated = 0
+        unmatched = 0
+        for _filename, payload in files:
+            parsed = self.parse_xlsx(payload)
+            for source in parsed.rows:
+                rows += 1
+                targets = by_email.get(normalize_email(source.email)) or []
+                if not targets:
+                    targets = by_fio.get(normalize_fio(source.fio)) or []
+                if not targets:
+                    unmatched += 1
+                    continue
+                for item in targets:
+                    changed = False
+                    # Пустое значение в файле не затирает уже известное.
+                    for field, value in (
+                        ("source_phone", source.phone),
+                        ("source_login", source.login),
+                        ("source_password", source.password),
+                    ):
+                        if value and getattr(item, field) != value:
+                            setattr(item, field, value)
+                            changed = True
+                    updated += int(changed)
+
+        self.db.add(
+            AuditLog(
+                actor=actor,
+                action="techexpert_actualization_credentials_refreshed",
+                target=f"run:{run.id}",
+                result="success",
+                details=json.dumps(
+                    {
+                        "files": len(files),
+                        "rows": rows,
+                        "updated": updated,
+                        "unmatched": unmatched,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+        )
+        self.db.commit()
+        return {"rows": rows, "updated": updated, "unmatched": unmatched}
+
+    def _source_credentials(self) -> dict[str, TechExpertActualizationItem]:
+        """Последние известные учетные данные Техэксперта по worker_key."""
+        items = list(
+            self.db.scalars(
+                select(TechExpertActualizationItem)
+                .where(TechExpertActualizationItem.worker_key != "")
+                .order_by(TechExpertActualizationItem.id)
+            ).all()
+        )
+        result: dict[str, TechExpertActualizationItem] = {}
+        for item in items:
+            # Более поздняя сверка перекрывает раннюю.
+            result[item.worker_key] = item
+        return result
+
     def export_current(self) -> bytes:
+        credentials = self._source_credentials()
         records = list(
             self.db.scalars(
                 select(HRSourceRecord)
@@ -1097,7 +1196,16 @@ class TechExpertActualizationService:
             sheet.cell(row_number, 1).font = Font(bold=True, size=12)
             row_number += 1
             for column, header in enumerate(
-                ["№ п/п", "ФИО", "Должность", "E-mail"], 1
+                [
+                    "№ п/п",
+                    "ФИО",
+                    "Должность",
+                    "E-mail",
+                    "Телефон",
+                    "Логин",
+                    "Пароль",
+                ],
+                1,
             ):
                 cell = sheet.cell(row_number, column, header)
                 cell.font = Font(bold=True)
@@ -1107,155 +1215,16 @@ class TechExpertActualizationService:
                 sorted(grouped[department], key=lambda item: item[0].fio.casefold()),
                 1,
             ):
+                # Кадровая часть – из 1С, учетные данные – из файлов сверки.
+                source = credentials.get(record.worker_key)
                 values = [
                     sequence,
                     record.fio,
                     position,
                     record.corporate_email,
-                ]
-                for column, value in enumerate(values, 1):
-                    sheet.cell(
-                        row_number,
-                        column,
-                        value if isinstance(value, int) else safe_excel_value(value),
-                    )
-                row_number += 1
-        for column, width in {"A": 10, "B": 42, "C": 44, "D": 34}.items():
-            sheet.column_dimensions[column].width = width
-        return self._finish_workbook(workbook)
-
-    @staticmethod
-    def _credentials_index(
-        files: list[tuple[str, bytes]],
-    ) -> tuple[dict[str, ParsedTechExpertRow], dict[str, list[ParsedTechExpertRow]]]:
-        """Собрать телефон, логин и пароль из приложенных файлов сверки.
-
-        Данные живут только в памяти на время формирования файла. Ключей два:
-        e-mail как самый надежный и нормализованное ФИО как запасной.
-        """
-        by_email: dict[str, ParsedTechExpertRow] = {}
-        by_fio: dict[str, list[ParsedTechExpertRow]] = {}
-        for _filename, payload in files:
-            parsed = TechExpertActualizationService.parse_xlsx(payload)
-            for row in parsed.rows:
-                email = normalize_email(row.email)
-                if email and email not in by_email:
-                    by_email[email] = row
-                fio_key = normalize_fio(row.fio)
-                if fio_key:
-                    by_fio.setdefault(fio_key, []).append(row)
-        return by_email, by_fio
-
-    def export_current_with_credentials(
-        self,
-        files: list[tuple[str, bytes]],
-    ) -> bytes:
-        """Актуальный список с учетными данными из файлов сверки.
-
-        Кадровая часть (ФИО, должность, e-mail) берется из 1С, учетные данные
-        Техэксперта – только из приложенных файлов. Работник, которого нет в
-        файлах, в выгрузку не попадает: подставлять пустые учетные данные
-        бессмысленно, а гадать по неполному совпадению опасно.
-
-        Ничего из прочитанного не сохраняется: это разовая синхронизация.
-        """
-        if not files:
-            raise ValueError("Приложите файлы сверки Техэксперта")
-
-        by_email, by_fio = self._credentials_index(files)
-        if not by_email and not by_fio:
-            raise ValueError("В приложенных файлах не найдено ни одной строки")
-
-        records = list(
-            self.db.scalars(
-                select(HRSourceRecord)
-                .where(
-                    HRSourceRecord.source_id == self.source_id,
-                    HRSourceRecord.techexpert_access.is_(True),
-                )
-                .order_by(HRSourceRecord.fio)
-            ).all()
-        )
-
-        matched: dict[int, ParsedTechExpertRow] = {}
-        skipped: list[tuple[HRSourceRecord, str]] = []
-        for record in records:
-            row = by_email.get(normalize_email(record.corporate_email))
-            if row is None:
-                candidates = by_fio.get(normalize_fio(record.fio), [])
-                if len(candidates) == 1:
-                    row = candidates[0]
-                elif len(candidates) > 1:
-                    skipped.append(
-                        (record, "В файлах сверки несколько строк с таким ФИО")
-                    )
-                    continue
-            if row is None:
-                skipped.append((record, "Не найден в файлах сверки"))
-                continue
-            matched[record.id] = row
-
-        grouped: dict[str, list[tuple[HRSourceRecord, str]]] = {}
-        for record in records:
-            if record.id not in matched:
-                continue
-            snapshot = placement_snapshot(record)
-            placements: list[tuple[str, str]] = []
-            try:
-                raw = json.loads(record.placements_json or "[]")
-            except (TypeError, json.JSONDecodeError):
-                raw = []
-            for value in raw if isinstance(raw, list) else []:
-                if not isinstance(value, dict):
-                    continue
-                department = normalize_text(value.get("department"))
-                position = normalize_text(value.get("position"))
-                top = department.split(" / ", 1)[0].strip() or "Без подразделения"
-                placements.append((top, position))
-            if not placements:
-                tops = snapshot["top_departments"] or ["Без подразделения"]
-                positions = snapshot["positions"] or [""]
-                placements = [(tops[0], position) for position in positions]
-            for top, position in placements:
-                grouped.setdefault(top, []).append((record, position))
-
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "Актуальный список"
-        row_number = 1
-        headers = [
-            "№ п/п",
-            "ФИО",
-            "Должность",
-            "E-mail",
-            "Телефон",
-            "Логин",
-            "Пароль",
-        ]
-        for department in sorted(grouped, key=str.casefold):
-            if row_number > 1:
-                row_number += 1
-            sheet.cell(row_number, 1, safe_excel_value(department))
-            sheet.cell(row_number, 1).font = Font(bold=True, size=12)
-            row_number += 1
-            for column, header in enumerate(headers, 1):
-                cell = sheet.cell(row_number, column, header)
-                cell.font = Font(bold=True)
-                cell.fill = PatternFill("solid", fgColor="DCE6F1")
-            row_number += 1
-            for sequence, (record, position) in enumerate(
-                sorted(grouped[department], key=lambda item: item[0].fio.casefold()),
-                1,
-            ):
-                source = matched[record.id]
-                values = [
-                    sequence,
-                    record.fio,
-                    position,
-                    record.corporate_email,
-                    source.phone,
-                    source.login,
-                    source.password,
+                    getattr(source, "source_phone", ""),
+                    getattr(source, "source_login", ""),
+                    getattr(source, "source_password", ""),
                 ]
                 for column, value in enumerate(values, 1):
                     sheet.cell(
@@ -1275,22 +1244,6 @@ class TechExpertActualizationService:
         }
         for column, width in widths.items():
             sheet.column_dimensions[column].width = width
-
-        # Отдельный лист вместо тихого выпадения строк: оператор сразу видит,
-        # кого не хватает в файлах сверки и почему.
-        if skipped:
-            report = workbook.create_sheet("Не вошли в выгрузку")
-            for column, header in enumerate(["ФИО", "E-mail", "Причина"], 1):
-                cell = report.cell(1, column, header)
-                cell.font = Font(bold=True)
-                cell.fill = PatternFill("solid", fgColor="FDE9D9")
-            for index, (record, reason) in enumerate(skipped, 2):
-                report.cell(index, 1, safe_excel_value(record.fio))
-                report.cell(index, 2, safe_excel_value(record.corporate_email))
-                report.cell(index, 3, safe_excel_value(reason))
-            for column, width in {"A": 42, "B": 34, "C": 52}.items():
-                report.column_dimensions[column].width = width
-
         return self._finish_workbook(workbook)
 
     def access_summary(self) -> dict[str, int]:
