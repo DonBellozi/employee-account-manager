@@ -257,6 +257,26 @@
     </div>
   </div>
 
+  <form class="techexpert-credentials-export"
+        method="post"
+        action="/settings/techexpert/current-credentials.xlsx"
+        enctype="multipart/form-data">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div>
+      <strong>Актуальный список с учетными данными</strong>
+      <p class="muted">
+        ФИО, должность и e-mail берутся из кадровой выгрузки, телефон, логин и
+        пароль – из приложенных файлов сверки. Файлы читаются только для
+        формирования выгрузки и нигде не сохраняются. Работники, которых нет в
+        файлах, попадают на отдельный лист «Не вошли в выгрузку».
+      </p>
+    </div>
+    <div class="techexpert-credentials-export-controls">
+      <input type="file" name="files" accept=".xlsx" multiple required>
+      <button class="button" type="submit">Выгрузить</button>
+    </div>
+  </form>
+
   <div class="techexpert-access-summary">
     <div><span>Пользуются Техэкспертом</span><strong>{{ access_summary.access_count }}</strong></div>
     {% if actualization_run %}

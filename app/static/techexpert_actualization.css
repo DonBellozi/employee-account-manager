@@ -27,6 +27,33 @@
   font-size: 1.3rem;
 }
 
+.techexpert-credentials-export {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.techexpert-credentials-export p {
+  margin: 4px 0 0;
+}
+
+.techexpert-credentials-export-controls {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+@media (max-width: 760px) {
+  .techexpert-credentials-export-controls {
+    grid-template-columns: 1fr;
+  }
+}
+
 .techexpert-start-form,
 .techexpert-upload-form {
   display: grid;
