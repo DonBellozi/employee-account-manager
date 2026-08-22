@@ -27,32 +27,6 @@
   font-size: 1.3rem;
 }
 
-/* Кнопка выгрузки одновременно является выбором файлов сверки: сам input
-   скрыт, клик по label открывает диалог, а выбор файлов отправляет форму. */
-.techexpert-export-label {
-  position: relative;
-  overflow: hidden;
-  cursor: pointer;
-}
-
-.techexpert-export-label input[type="file"] {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  border: 0;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.techexpert-export-label:focus-within {
-  outline: 2px solid #2563eb;
-  outline-offset: 2px;
-}
-
 .techexpert-start-form,
 .techexpert-upload-form {
   display: grid;

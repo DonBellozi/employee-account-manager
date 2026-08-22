@@ -243,13 +243,6 @@
         Текущий доступ определяется группой AD. Файлы Техэксперта используются
         только для первичной сверки по ФИО, должности и e-mail.
       </p>
-      <p class="muted">
-        Выгрузка актуального списка берет ФИО, должность и e-mail из кадровой
-        выгрузки, а телефон, логин и пароль – из приложенных файлов сверки.
-        Кнопка предложит выбрать файлы; они читаются только для формирования
-        выгрузки и нигде не сохраняются. Работники, которых нет в файлах,
-        попадают на отдельный лист «Не вошли в выгрузку».
-      </p>
     </div>
     <div class="integration-card-actions">
       <form method="post" action="/settings/techexpert/group-sync">
@@ -258,20 +251,9 @@
           Обновить из AD
         </button>
       </form>
-      <form method="post"
-            action="/settings/techexpert/current.xlsx"
-            enctype="multipart/form-data">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <label class="button secondary techexpert-export-label">
-          Актуальный список
-          <input type="file"
-                 name="files"
-                 accept=".xlsx"
-                 multiple
-                 required
-                 onchange="this.form.submit()">
-        </label>
-      </form>
+      <a class="button secondary" href="/settings/techexpert/current.xlsx">
+        Актуальный список
+      </a>
     </div>
   </div>
 
